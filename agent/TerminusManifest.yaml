@@ -1,0 +1,54 @@
+terminusManifest.version: 0.6.0
+terminusManifest.type: app
+metadata:
+  name: agent
+  description: agent
+  icon: https://file.bttcdn.com/appstore/agent/icon.png
+  version: 0.0.1
+  title: agent
+  categories:
+  - Productivity
+permission:
+  appData: true
+  appCache: true
+  userData:
+    - Home
+spec:
+  versionName: 0.0.24
+  namespace: user-space
+  fullDescription: 'Search2 Gateway acts as a bridge, 
+  establishing a connection between dify and other services such as files
+
+  '
+  developer: agent
+  website: https://github.com/beclab/dify-gateway
+  sourceCode: https://github.com/beclab/dify-gateway
+  submitter: Terminus
+  language:
+  - en
+  doc: https://github.com/beclab/dify-gateway#readme
+  license:
+  - text: Apache License 2.0
+    url: https://github.com/beclab/dify-gateway/blob/main/LICENSE.md
+  requiredMemory: 32Mi
+  limitedMemory: 80Gi
+  requiredDisk: 512Mi
+  limitedDisk: 50Gi
+  requiredCpu: 100m
+  limitedCpu: 20000m
+  supportArch:
+  - amd64
+options:
+  dependencies:
+  - name: terminus
+    type: system
+    version: '>=0.3.7-0'
+  - name: dify
+    type: application
+    version: '>=0.0.1-0'
+entrances:
+- name: agent
+  port: 80
+  host: agent-service
+  title: agent
+  invisible: true
