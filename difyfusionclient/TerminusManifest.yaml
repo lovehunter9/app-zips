@@ -24,12 +24,6 @@ spec:
   website: https://github.com/beclab/dify-gateway
   sourceCode: https://github.com/beclab/dify-gateway
   submitter: Terminus
-  lang:
-  - en_US.UTF-8
-  language:
-  - en_US:en
-  lc_all:
-  - en_US.UTF-8
   doc: https://github.com/beclab/dify-gateway#readme
   license:
   - text: Apache License 2.0

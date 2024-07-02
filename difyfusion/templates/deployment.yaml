@@ -1,5 +1,5 @@
 
-{{ $dify_appcache_rootpath := "/terminus/userdata/Cache/difyfusion" }}
+{{ $difyfusion_appcache_rootpath := "/terminus/userdata/Cache/difyfusion" }}
 
 {{- $namespace := printf "%s" "os-system" -}}
 {{- $difyfusion_secret := (lookup "v1" "Secret" $namespace "difyfusion-secrets") -}}
@@ -873,22 +873,22 @@ spec:
         - name: api-vol
           hostPath:
             type: DirectoryOrCreate
-            path: {{ $dify_appcache_rootpath }}/volumes/app/storage
+            path: {{ $difyfusion_appcache_rootpath }}/volumes/app/storage
 
         - name: worker-vol
           hostPath:
             type: DirectoryOrCreate
-            path: {{ $dify_appcache_rootpath }}/volumes/app/storage
+            path: {{ $difyfusion_appcache_rootpath }}/volumes/app/storage
 
         - name: weaviate-vol
           hostPath:
             type: DirectoryOrCreate
-            path: {{ $dify_appcache_rootpath }}/volumes/weaviate
+            path: {{ $difyfusion_appcache_rootpath }}/volumes/weaviate
 
         - name: redis-data
           hostPath:
             type: DirectoryOrCreate
-            path: {{ $dify_appcache_rootpath }}/volumes/redis/data
+            path: {{ $difyfusion_appcache_rootpath }}/volumes/redis/data
 
         - name: difyfusion-nginx-config
           configMap:

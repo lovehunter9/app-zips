@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="AutoImportSettings">
+    <option name="autoReloadType" value="SELECTIVE" />
+  </component>
+  <component name="ChangeListManager">
+    <list default="true" id="e9836655-cb5c-456b-aef7-0ca255338318" name="Changes" comment="">
+      <change afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/difyfusion 0.zip" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/difyfusion 4.zip" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/difyfusionclient 0.zip" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/difyfusionclient 4.zip" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/difyfusion.zip" beforeDir="false" afterPath="$PROJECT_DIR$/difyfusion.zip" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/difyfusion/TerminusManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/difyfusion/TerminusManifest.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/difyfusion/templates/deployment.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/difyfusion/templates/deployment.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/difyfusionclient.zip" beforeDir="false" afterPath="$PROJECT_DIR$/difyfusionclient.zip" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/difyfusionclient/TerminusManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/difyfusionclient/TerminusManifest.yaml" afterDir="false" />
+    </list>
+    <option name="SHOW_DIALOG" value="false" />
+    <option name="HIGHLIGHT_CONFLICTS" value="true" />
+    <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
+    <option name="LAST_RESOLUTION" value="IGNORE" />
+  </component>
+  <component name="Git.Settings">
+    <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
+  </component>
+  <component name="ProjectColorInfo">{
+  &quot;associatedIndex&quot;: 5
+}</component>
+  <component name="ProjectId" id="2iSLEMF9bpYZ73yeGpq8VaUPkCA" />
+  <component name="ProjectViewState">
+    <option name="hideEmptyMiddlePackages" value="true" />
+    <option name="showLibraryContents" value="true" />
+  </component>
+  <component name="PropertiesComponent">{
+  &quot;keyToString&quot;: {
+    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
+    &quot;last_opened_file_path&quot;: &quot;/Users/wangrongxiang/beclab/app-zips&quot;,
+    &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
+    &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,
+    &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
+    &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,
+    &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
+    &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
+  }
+}</component>
+  <component name="SharedIndexes">
+    <attachedChunks>
+      <set>
+        <option value="bundled-js-predefined-1d06a55b98c1-0b3e54e931b4-JavaScript-PY-241.18034.82" />
+        <option value="bundled-python-sdk-975db3bf15a3-2767605e8bc2-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-241.18034.82" />
+      </set>
+    </attachedChunks>
+  </component>
+  <component name="SpellCheckerSettings" RuntimeDictionaries="0" Folders="0" CustomDictionaries="0" DefaultDictionary="application-level" UseSingleDictionary="true" transferred="true" />
+  <component name="TaskManager">
+    <task active="true" id="Default" summary="Default task">
+      <changelist id="e9836655-cb5c-456b-aef7-0ca255338318" name="Changes" comment="" />
+      <created>1719478919651</created>
+      <option name="number" value="Default" />
+      <option name="presentableId" value="Default" />
+      <updated>1719478919651</updated>
+      <workItem from="1719478920852" duration="6368000" />
+      <workItem from="1719542701859" duration="18958000" />
+      <workItem from="1719802421260" duration="24343000" />
+      <workItem from="1719889040565" duration="14238000" />
+    </task>
+    <servers />
+  </component>
+  <component name="TypeScriptGeneratedFilesManager">
+    <option name="version" value="3" />
+  </component>
+</project>
