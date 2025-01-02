@@ -3,7 +3,7 @@
   <component name="TemplatesService">
     <option name="TEMPLATE_FOLDERS">
       <list>
-        <option value="$MODULE_DIR$/difyfusionclient/templates" />
+        <option value="$MODULE_DIR$/teminus/difyfusionclient/templates" />
       </list>
     </option>
   </component>
