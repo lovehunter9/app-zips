@@ -12,7 +12,7 @@ permission:
   appData: true
   appCache: true
 spec:
-  namespace: os-system
+  namespace: user-space
   versionName: '0.6.6'
   onlyAdmin: true
   fullDescription: |
@@ -91,6 +91,12 @@ options:
     clusterScoped: true
     appRef:
     - difyfusionclient
+  policies:
+    - uriRegex: ^/(chat|completion|workflow)
+      level: public
+      oneTime: false
+      validDuration: 3600s
+      entranceName: difyfusion
 entrances:
 - name: difyfusion
   port: 5001

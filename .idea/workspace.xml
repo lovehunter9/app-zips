@@ -5,9 +5,10 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="e9836655-cb5c-456b-aef7-0ca255338318" name="Changes" comment="">
-      <change beforePath="$PROJECT_DIR$/.idea/app-zips.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/app-zips.iml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/olares/difyfusion/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/olares/difyfusion/OlaresManifest.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/olares/difyfusion/templates/deployment.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/olares/difyfusion/templates/deployment.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/olares/difyfusionclient/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/olares/difyfusionclient/OlaresManifest.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/olares/difyfusionclient/templates/dify_fe_deploy.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/olares/difyfusionclient/templates/dify_fe_deploy.yaml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -188,7 +189,13 @@
       <workItem from="1735528066887" duration="2422000" />
       <workItem from="1735541232541" duration="9737000" />
       <workItem from="1735615068372" duration="5020000" />
-      <workItem from="1735786833350" duration="3918000" />
+      <workItem from="1735786833350" duration="7180000" />
+      <workItem from="1735873701727" duration="13875000" />
+      <workItem from="1736132698259" duration="13083000" />
+      <workItem from="1736219575205" duration="9131000" />
+      <workItem from="1736305941357" duration="7760000" />
+      <workItem from="1736391724814" duration="1223000" />
+      <workItem from="1736421724725" duration="599000" />
     </task>
     <servers />
   </component>
