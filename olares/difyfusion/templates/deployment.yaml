@@ -36,7 +36,7 @@ metadata:
   namespace: user-system-{{ .Values.bfl.username }}
 spec:
   app: difyfusion
-  appNamespace: user-space-{{ .Values.bfl.username }}
+  appNamespace: difyfusion-{{ .Values.bfl.username }}
   middleware: postgres
   postgreSQL:
     user: difyfusion_{{ .Values.bfl.username }}
@@ -56,7 +56,7 @@ metadata:
   namespace: user-system-{{ .Values.bfl.username }}
 spec:
   app: difyfusion
-  appNamespace: user-space-{{ .Values.bfl.username }}
+  appNamespace: difyfusion-{{ .Values.bfl.username }}
   middleware: redis
   redis:
     password:
@@ -71,7 +71,7 @@ kind: ConfigMap
 apiVersion: v1
 metadata:
   name: difyfusion-nginx-config
-  namespace: user-space-{{ .Values.bfl.username }}
+  namespace: difyfusion-{{ .Values.bfl.username }}
   annotations:
     kubesphere.io/creator: bytetrade.io
 data:
@@ -86,17 +86,17 @@ data:
       }
     
       location /chat {
-        proxy_pass http://difyfusion.user-space-{{ .Values.bfl.username }}:3000;
+        proxy_pass http://difyfusion.difyfusion-{{ .Values.bfl.username }}:3000;
         include proxy.conf;
       }
     
       location /completion {
-        proxy_pass http://difyfusion.user-space-{{ .Values.bfl.username }}:3000;
+        proxy_pass http://difyfusion.difyfusion-{{ .Values.bfl.username }}:3000;
         include proxy.conf;
       }
     
       location /workflow {
-        proxy_pass http://difyfusion.user-space-{{ .Values.bfl.username }}:3000;
+        proxy_pass http://difyfusion.difyfusion-{{ .Values.bfl.username }}:3000;
         include proxy.conf;
       }
 
@@ -104,7 +104,7 @@ data:
         # Check if user has logged in~
         # access_by_lua_file login.lua;
 
-        proxy_pass http://difyfusion.user-space-{{ .Values.bfl.username }}:5001;
+        proxy_pass http://difyfusion.difyfusion-{{ .Values.bfl.username }}:5001;
         # proxy_pass http://127.0.0.1:5001;
         include proxy.conf;
       }
@@ -113,7 +113,7 @@ data:
         # Check if user has logged in~
         # access_by_lua_file login.lua;
 
-        proxy_pass http://difyfusion.user-space-{{ .Values.bfl.username }}:5001;
+        proxy_pass http://difyfusion.difyfusion-{{ .Values.bfl.username }}:5001;
         # proxy_pass http://127.0.0.1:5001;
         include proxy.conf;
       }
@@ -123,7 +123,7 @@ data:
         access_by_lua_file login.lua;
 
         # Proxy pass the request to backend~
-        proxy_pass http://difyfusion.user-space-{{ .Values.bfl.username }}:5001;
+        proxy_pass http://difyfusion.difyfusion-{{ .Values.bfl.username }}:5001;
         # proxy_pass http://127.0.0.1:5001;
         include proxy.conf;
       }
@@ -133,7 +133,7 @@ data:
         # access_by_lua_file login.lua;
 
         # Proxy pass the request to backend~
-        proxy_pass http://difyfusion.user-space-{{ .Values.bfl.username }}:5001;
+        proxy_pass http://difyfusion.difyfusion-{{ .Values.bfl.username }}:5001;
         # proxy_pass http://127.0.0.1:5001;
         include proxy.conf;
       }
@@ -143,7 +143,7 @@ data:
         access_by_lua_file login.lua;
 
         # Proxy pass the request to backend~
-        proxy_pass http://difyfusion.user-space-{{ .Values.bfl.username }}:5001;
+        proxy_pass http://difyfusion.difyfusion-{{ .Values.bfl.username }}:5001;
         # proxy_pass http://127.0.0.1:5001;
         include proxy.conf;
       }
@@ -153,7 +153,7 @@ data:
         access_by_lua_file login.lua;
 
         # Proxy pass the request to backend~
-        proxy_pass http://difyfusion.user-space-{{ .Values.bfl.username }}:5001;
+        proxy_pass http://difyfusion.difyfusion-{{ .Values.bfl.username }}:5001;
         # proxy_pass http://127.0.0.1:5001;
         include proxy.conf;
       }
@@ -164,7 +164,7 @@ data:
 
         # Proxy pass the request to backend~
         # proxy_pass http://127.0.0.1:3000;
-        proxy_pass http://difyfusion.user-space-{{ .Values.bfl.username }}:3000/apps;
+        proxy_pass http://difyfusion.difyfusion-{{ .Values.bfl.username }}:3000/apps;
         include proxy.conf;
       }
 
@@ -174,7 +174,7 @@ data:
 
         # Proxy pass the request to backend~
         # proxy_pass http://127.0.0.1:3000;
-        proxy_pass http://difyfusion.user-space-{{ .Values.bfl.username }}:3000;
+        proxy_pass http://difyfusion.difyfusion-{{ .Values.bfl.username }}:3000;
         include proxy.conf;
       }
     }
@@ -182,7 +182,7 @@ data:
     local cjson = require "cjson.safe"
 
     local function processAuthorization()
-        local difyHost = "difyfusion.user-space-{{ .Values.bfl.username }}"
+        local difyHost = "difyfusion.difyfusion-{{ .Values.bfl.username }}"
         ngx.log(ngx.STDERR, "HOST: " .. ngx.var.host)
         local isInner = ngx.var.host == difyHost
 
@@ -416,7 +416,7 @@ kind: Service
 apiVersion: v1
 metadata:
   name: difyfusion
-  namespace: user-space-{{ .Values.bfl.username }}
+  namespace: difyfusion-{{ .Values.bfl.username }}
 spec:
   type: ClusterIP
   ports:
@@ -452,7 +452,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: difyfusion
-  namespace: user-space-{{ .Values.bfl.username }}
+  namespace: difyfusion-{{ .Values.bfl.username }}
   labels:
     app: difyfusion
     applications.app.bytetrade.io/author: bytetrade.io
@@ -488,7 +488,7 @@ spec:
             - name: PGPASSWORD
               value: {{ $pg_password | b64dec }}
             - name: PGDB1
-              value: user_space_{{ .Values.bfl.username }}_difyfusion
+              value: difyfusion_{{ .Values.bfl.username }}_difyfusion
 
       securityContext:
         runAsUser: 0
@@ -563,7 +563,7 @@ spec:
             - name: DB_PORT
               value: '5432'
             - name: DB_DATABASE
-              value: user_space_{{ .Values.bfl.username }}_difyfusion
+              value: difyfusion_{{ .Values.bfl.username }}_difyfusion
             - name: DB_OPTIONS
               value: "-c connect_timeout=10000"
             - name: SQLALCHEMY_POOL_SIZE
@@ -780,7 +780,7 @@ spec:
             - name: DB_PORT
               value: '5432'
             - name: DB_DATABASE
-              value: user_space_{{ .Values.bfl.username }}_difyfusion
+              value: difyfusion_{{ .Values.bfl.username }}_difyfusion
             - name: DB_OPTIONS
               value: "-c connect_timeout=10000"
             - name: SQLALCHEMY_POOL_SIZE

@@ -12,7 +12,6 @@ permission:
   appData: true
   appCache: true
 spec:
-  namespace: user-space
   versionName: '0.6.6'
   onlyAdmin: true
   fullDescription: |

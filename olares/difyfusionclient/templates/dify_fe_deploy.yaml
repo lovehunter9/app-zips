@@ -25,7 +25,7 @@ metadata:
   namespace: user-system-{{ .Values.bfl.username }}
 spec:
   app: difyfusionclient
-  appNamespace: user-space-{{ .Values.bfl.username }}
+  appNamespace: difyfusionclient-{{ .Values.bfl.username }}
   middleware: postgres
   postgreSQL:
     user: difyfusionclient_{{ .Values.bfl.username }}
@@ -65,7 +65,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: difyfusionclient
-  namespace: user-space-{{ .Values.bfl.username }}
+  namespace: difyfusionclient-{{ .Values.bfl.username }}
 spec:
   ports:
   - name: "dify-gateway"
@@ -85,7 +85,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: difyfusionclient
-  namespace: user-space-{{ .Values.bfl.username }}
+  namespace: difyfusionclient-{{ .Values.bfl.username }}
   labels:
     app: difyfusionclient
     applications.app.bytetrade.io/author: bytetrade.io
@@ -228,9 +228,9 @@ spec:
           - name: PG_PORT
             value: "5432"
           - name: PG_DATABASE
-            value: user_space_{{ .Values.bfl.username }}_difyfusionclient
+            value: difyfusionclient_{{ .Values.bfl.username }}_difyfusionclient
           - name: DIFY_HOST
-            value: http://difyfusion.user-space-{{ .Values.bfl.username }}
+            value: http://difyfusion.difyfusion-{{ .Values.bfl.username }}
           - name: POD_NAME
             valueFrom:
               fieldRef:
@@ -443,7 +443,7 @@ data:
             return 204;
           }
 
-          proxy_pass http://difyfusion.user-space-{{ .Values.bfl.username }};
+          proxy_pass http://difyfusion.difyfusion-{{ .Values.bfl.username }};
         }
     
         location /api/controllers {
@@ -498,5 +498,4 @@ data:
 kind: ConfigMap
 metadata:
   name: difyfusionclient-nginx-config
-  namespace: user-space-{{ .Values.bfl.username }}
-
+  namespace: difyfusionclient-{{ .Values.bfl.username }}

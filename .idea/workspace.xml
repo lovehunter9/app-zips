@@ -6,7 +6,10 @@
   <component name="ChangeListManager">
     <list default="true" id="e9836655-cb5c-456b-aef7-0ca255338318" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/olares/difyfusion/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/olares/difyfusion/OlaresManifest.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/olares/difyfusion/templates/deployment.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/olares/difyfusion/templates/deployment.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/olares/difyfusionclient/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/olares/difyfusionclient/OlaresManifest.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/olares/difyfusionclient/templates/dify_fe_deploy.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/olares/difyfusionclient/templates/dify_fe_deploy.yaml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -197,6 +200,7 @@
       <workItem from="1736824391925" duration="595000" />
       <workItem from="1736910784422" duration="587000" />
       <workItem from="1736996355591" duration="595000" />
+      <workItem from="1737097270913" duration="6341000" />
     </task>
     <servers />
   </component>

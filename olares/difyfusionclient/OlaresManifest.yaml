@@ -14,7 +14,6 @@ permission:
   userData:
     - Home
 spec:
-  namespace: user-space
   versionName: '0.0.42'
   fullDescription: |
     ## IMPORTANT NOTE ##
