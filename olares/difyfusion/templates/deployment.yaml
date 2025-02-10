@@ -102,7 +102,7 @@ data:
 
       location /console/api/login {
         # Check if user has logged in~
-        # access_by_lua_file login.lua;
+        # # access_by_lua_file login.lua;
 
         proxy_pass http://difyfusion.difyfusion-{{ .Values.bfl.username }}:5001;
         # proxy_pass http://127.0.0.1:5001;
@@ -111,7 +111,7 @@ data:
     
       location /console/api/system-features {
         # Check if user has logged in~
-        # access_by_lua_file login.lua;
+        # # access_by_lua_file login.lua;
 
         proxy_pass http://difyfusion.difyfusion-{{ .Values.bfl.username }}:5001;
         # proxy_pass http://127.0.0.1:5001;
@@ -120,7 +120,7 @@ data:
 
       location /console/api {
         # Check if user has logged in~
-        access_by_lua_file login.lua;
+        # access_by_lua_file login.lua;
 
         # Proxy pass the request to backend~
         proxy_pass http://difyfusion.difyfusion-{{ .Values.bfl.username }}:5001;
@@ -130,7 +130,7 @@ data:
 
       location /api {
         # Check if user has logged in~
-        # access_by_lua_file login.lua;
+        # # access_by_lua_file login.lua;
 
         # Proxy pass the request to backend~
         proxy_pass http://difyfusion.difyfusion-{{ .Values.bfl.username }}:5001;
@@ -140,7 +140,7 @@ data:
 
       location /v1 {
         # Check if user has logged in~
-        access_by_lua_file login.lua;
+        # access_by_lua_file login.lua;
 
         # Proxy pass the request to backend~
         proxy_pass http://difyfusion.difyfusion-{{ .Values.bfl.username }}:5001;
@@ -150,7 +150,7 @@ data:
 
       location /files {
         # Check if user has logged in~
-        access_by_lua_file login.lua;
+        # access_by_lua_file login.lua;
 
         # Proxy pass the request to backend~
         proxy_pass http://difyfusion.difyfusion-{{ .Values.bfl.username }}:5001;
@@ -158,19 +158,19 @@ data:
         include proxy.conf;
       }
 
-      location /signin {
-        # Check if user has logged in~
-        access_by_lua_file login.lua;
+      # location /signin {
+      #  # Check if user has logged in~
+      #  # access_by_lua_file login.lua;
 
-        # Proxy pass the request to backend~
-        # proxy_pass http://127.0.0.1:3000;
-        proxy_pass http://difyfusion.difyfusion-{{ .Values.bfl.username }}:3000/apps;
-        include proxy.conf;
-      }
+      #  # Proxy pass the request to backend~
+      #  # proxy_pass http://127.0.0.1:3000;
+      #  proxy_pass http://difyfusion.difyfusion-{{ .Values.bfl.username }}:3000/apps;
+      #  include proxy.conf;
+      #}
 
       location / {
         # Check if user has logged in~
-        access_by_lua_file login.lua;
+        # access_by_lua_file login.lua;
 
         # Proxy pass the request to backend~
         # proxy_pass http://127.0.0.1:3000;
@@ -178,101 +178,101 @@ data:
         include proxy.conf;
       }
     }
-  login.lua: |-
-    local cjson = require "cjson.safe"
-
-    local function processAuthorization()
-        local difyHost = "difyfusion.difyfusion-{{ .Values.bfl.username }}"
-        ngx.log(ngx.STDERR, "HOST: " .. ngx.var.host)
-        local isInner = ngx.var.host == difyHost
-
-        -- Check if current URL is "/signin"
-        ngx.log(ngx.STDERR, "URI: " .. ngx.var.uri)
-        local isSignIn = ngx.var.uri == "/signin"
-        local isModel = ngx.var.uri == "/console/api/workspaces/current/model-providers/openai_api_compatible/models"
-
-        if isInner and isSignIn then
-          return
-        end
-
-        local headers = ngx.req.get_headers()
-
-        if not isSignIn and not isModel then
-          local cookie = ngx.var.http_cookie
-          local redirectedURL = ngx.var.request_uri
-
-          -- Get next URL
-          ngx.log(ngx.STDERR, "Next URL: " .. redirectedURL)
-
-          local token = ""
-          local _ = ""
-          if cookie then
-              _, _, token = string.find(cookie, "Authorization=Bearer ([^;]+)")
-          end
-
-          if token then
-            -- Check if "Authorization" exists and is not empty string
-            local authorizationHeader = headers["Authorization"]
-            if authorizationHeader then
-              ngx.log(ngx.STDERR, "authorizatioonHeader=" .. authorizationHeader)
-            else
-              ngx.log(ngx.STDERR, "authorizatioonHeader=nil")
-            end
-
-            ngx.log(ngx.STDERR, "token=" .. token)
-            if authorizationHeader and authorizationHeader:match("^Bearer%s+.+") then
-                if isInner then
-                    ngx.log(ngx.STDERR, "Inner Request! Authorization header with non-empty Bearer token found. Skipping further processing.")
-                    return
-                end
-                if authorizationHeader == "Bearer" .. token then
-                    ngx.log(ngx.STDERR, "Authorization header with non-empty and newest Bearer token found. Skipping further processing.")
-                    return
-                end
-            else
-                ngx.req.set_header("Authorization", "Bearer " .. token)
-                ngx.log(ngx.STDERR, "Authorization token found in cookie. Token: " .. token)
-                return
-            end
-          end
-        end
-
-        local username = headers["x-bfl-user"]
-        local orig_ct = headers["Content-Type"]
-        local user_email = 'admin@bytetrade.io'
-        if username ~= nil and username ~= '' then
-          user_email = username .. '@dify.ai'
-        end
-
-        ngx.req.set_header("Content-Type", "application/json")
-        local res = ngx.location.capture("/console/api/login", {
-            method = ngx.HTTP_POST,
-            body = '{"email":"' .. user_email .. '","password":"abcd123456","remember_me":true}'
-        })
-        ngx.req.set_header("Content-Type", orig_ct)
-
-        if res.status == ngx.HTTP_OK or res.status == ngx.HTTP_MOVED_TEMPORARILY then
-            local new_cookie = res.header["Set-Cookie"]
-            local data = res.body
-            local jsonData = cjson.decode(data)
-            local token_data = jsonData
-
-            if token_data and token_data.data and token_data.data.access_token then
-                local token = token_data.data.access_token
-                ngx.req.set_header("Authorization", "Bearer " .. token)
-                ngx.header["Set-Cookie"] = "Authorization=Bearer " .. token .. "; Path=/"
-                ngx.log(ngx.STDERR, "Authorization token obtained from login API. token: " .. token)
-            else
-                ngx.log(ngx.STDERR, "Failed to parse JSON data")
-            end
-        else
-            ngx.log(ngx.STDERR, "Failed to obtain authorization from login API: " .. tostring(res.status))
-            ngx.header["X-Redirected"] = "/"
-            return
-        end
-    end
-
-    processAuthorization()
+#  login.lua: |-
+#    local cjson = require "cjson.safe"
+#
+#    local function processAuthorization()
+#        local difyHost = "difyfusion.difyfusion-{{ .Values.bfl.username }}"
+#        ngx.log(ngx.STDERR, "HOST: " .. ngx.var.host)
+#        local isInner = ngx.var.host == difyHost
+#
+#        -- Check if current URL is "/signin"
+#        ngx.log(ngx.STDERR, "URI: " .. ngx.var.uri)
+#        local isSignIn = ngx.var.uri == "/signin"
+#        local isModel = ngx.var.uri == "/console/api/workspaces/current/model-providers/openai_api_compatible/models"
+#
+#        if isInner and isSignIn then
+#          return
+#        end
+#
+#        local headers = ngx.req.get_headers()
+#
+#        if not isSignIn and not isModel then
+#          local cookie = ngx.var.http_cookie
+#          local redirectedURL = ngx.var.request_uri
+#
+#          -- Get next URL
+#          ngx.log(ngx.STDERR, "Next URL: " .. redirectedURL)
+#
+#          local token = ""
+#          local _ = ""
+#          if cookie then
+#              _, _, token = string.find(cookie, "Authorization=Bearer ([^;]+)")
+#          end
+#
+#          if token then
+#            -- Check if "Authorization" exists and is not empty string
+#            local authorizationHeader = headers["Authorization"]
+#            if authorizationHeader then
+#              ngx.log(ngx.STDERR, "authorizatioonHeader=" .. authorizationHeader)
+#            else
+#              ngx.log(ngx.STDERR, "authorizatioonHeader=nil")
+#            end
+#
+#            ngx.log(ngx.STDERR, "token=" .. token)
+#            if authorizationHeader and authorizationHeader:match("^Bearer%s+.+") then
+#                if isInner then
+#                    ngx.log(ngx.STDERR, "Inner Request! Authorization header with non-empty Bearer token found. Skipping further processing.")
+#                    return
+#                end
+#                if authorizationHeader == "Bearer" .. token then
+#                    ngx.log(ngx.STDERR, "Authorization header with non-empty and newest Bearer token found. Skipping further processing.")
+#                    return
+#                end
+#            else
+#                ngx.req.set_header("Authorization", "Bearer " .. token)
+#                ngx.log(ngx.STDERR, "Authorization token found in cookie. Token: " .. token)
+#                return
+#            end
+#          end
+#        end
+#
+#        local username = headers["x-bfl-user"]
+#        local orig_ct = headers["Content-Type"]
+#        local user_email = 'admin@bytetrade.io'
+#        if username ~= nil and username ~= '' then
+#          user_email = username .. '@dify.ai'
+#        end
+#
+#        ngx.req.set_header("Content-Type", "application/json")
+#        local res = ngx.location.capture("/console/api/login", {
+#            method = ngx.HTTP_POST,
+#            body = '{"email":"' .. user_email .. '","password":"abcd123456","remember_me":true}'
+#        })
+#        ngx.req.set_header("Content-Type", orig_ct)
+#
+#        if res.status == ngx.HTTP_OK or res.status == ngx.HTTP_MOVED_TEMPORARILY then
+#            local new_cookie = res.header["Set-Cookie"]
+#            local data = res.body
+#            local jsonData = cjson.decode(data)
+#            local token_data = jsonData
+#
+#            if token_data and token_data.data and token_data.data.access_token then
+#                local token = token_data.data.access_token
+#                ngx.req.set_header("Authorization", "Bearer " .. token)
+#                ngx.header["Set-Cookie"] = "Authorization=Bearer " .. token .. "; Path=/"
+#                ngx.log(ngx.STDERR, "Authorization token obtained from login API. token: " .. token)
+#            else
+#                ngx.log(ngx.STDERR, "Failed to parse JSON data")
+#            end
+#        else
+#            ngx.log(ngx.STDERR, "Failed to obtain authorization from login API: " .. tostring(res.status))
+#            ngx.header["X-Redirected"] = "/"
+#            return
+#        end
+#    end
+#
+#    processAuthorization()
   nginx.conf: |-
     user  nginx;
     worker_processes  auto;
@@ -529,7 +529,8 @@ spec:
       # terminationGracePeriodSeconds: 0
       containers:
         - name: api
-          image: beclab/dify-api:v0.0.7
+          image: langgenius/dify-api:0.15.3
+#          image: beclab/dify-api:v0.0.8
           imagePullPolicy: IfNotPresent
           ports:
             - name: api-port
@@ -784,7 +785,8 @@ spec:
               mountPath: /app/api/storage
 
         - name: worker
-          image: beclab/dify-api:v0.0.7
+          image: langgenius/dify-api:0.15.3
+#          image: beclab/dify-api:v0.0.8
           imagePullPolicy: IfNotPresent
           env:
             # Startup mode, 'worker' starts the Celery worker for processing the queue.
@@ -959,7 +961,8 @@ spec:
               mountPath: /app/api/storage
 
         - name: web
-          image: beclab/dify-web:v0.0.7
+          image: langgenius/dify-web:0.15.3
+#          image: beclab/dify-web:v0.0.8
           imagePullPolicy: IfNotPresent
           ports:
             - name: web-port
@@ -986,6 +989,10 @@ spec:
             - name: TEXT_GENERATION_TIMEOUT_MS
               value: '60000'
             - name: CSP_WHITELIST
+              value: ''
+            - name: TOP_K_MAX_VALUE
+              value: ''
+            - name: INDEXING_MAX_SEGMENTATION_TOKENS_LENGTH
               value: ''
 
           resources:
@@ -1034,7 +1041,7 @@ spec:
               memory: 100Mi
 
         - name: nginx
-          image: 'beclab/nginx-lua:n0.0.4'
+          image: docker.io/aboveos/nginx:stable-alpine3.17-slim # 'beclab/nginx-lua:n0.0.4'
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 80
@@ -1050,9 +1057,9 @@ spec:
             - name: difyfusion-nginx-config
               mountPath: /etc/nginx/conf.d/default.conf
               subPath: default.conf
-            - name: difyfusion-nginx-config
-              mountPath: /etc/nginx/login.lua
-              subPath: login.lua
+#            - name: difyfusion-nginx-config
+#              mountPath: /etc/nginx/login.lua
+#              subPath: login.lua
           resources:
             limits:
               cpu: 1000m
@@ -1197,8 +1204,8 @@ spec:
                 path: proxy.conf
               - key: default.conf
                 path: default.conf
-              - key: login.lua
-                path: login.lua
+#              - key: login.lua
+#                path: login.lua
               - key: squid.conf.template
                 path: squid.conf.template
               - key: docker-entrypoint.sh

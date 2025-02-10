@@ -184,74 +184,74 @@ spec:
 #              fieldRef:
 #                fieldPath: status.podIP
 
-      - name: dify-gateway
-        image: beclab/search2-gateway:v0.0.44
-        imagePullPolicy: IfNotPresent
-        resources:
-          limits:
-            cpu: 200m
-            memory: 200Mi
-          requests:
-            cpu: 50m
-            memory: 50Mi
-        ports:
-          - name: dify-gateway
-            containerPort: 6317
-            protocol: TCP
-        env:
-          - name: OS_SYSTEM_SERVER
-            value: system-server.user-system-{{ .Values.bfl.username }}
-          - name: OS_APP_SECRET
-            value: '{{ .Values.os.difyfusionclient.appSecret }}'
-          - name: OS_APP_KEY
-            value: {{ .Values.os.difyfusionclient.appKey }}
-          - name: PREFIX
-            value: /api/controllers
-          - name: DIFY_ADMIN_USER_EMAIL
-            value: admin@bytetrade.io
-          - name: DIFY_ADMIN_USER_PASSWORD
-            value: abcd123456
-          - name: DIFY_USER_NAME
-            value: '{{ .Values.bfl.username }}'
-          - name: DIFY_USER_PASSWORD
-            value: abcd123456
-          - name: WATCH_DIR
-            value: /Home/Documents
-          - name: FS_TYPE
-            value: fs
-          - name: PG_USERNAME
-            value: difyfusionclient_{{ .Values.bfl.username }}
-          - name: PG_PASSWORD
-            value: {{ $password | b64dec }}
-          - name: PG_HOST
-            value: citus-master-svc.user-system-{{ .Values.bfl.username }}
-          - name: PG_PORT
-            value: "5432"
-          - name: PG_DATABASE
-            value: difyfusionclient_{{ .Values.bfl.username }}_difyfusionclient
-          - name: DIFY_HOST
-            value: http://difyfusion.difyfusion-{{ .Values.bfl.username }}
-          - name: POD_NAME
-            valueFrom:
-              fieldRef:
-                fieldPath: metadata.name
-          - name: NAMESPACE
-            valueFrom:
-              fieldRef:
-                fieldPath: metadata.namespace
-          - name: CONTAINER_NAME
-            value: dify-gateway
-          - name: NOTIFY_SERVER
-            value: fsnotify-svc.user-system-{{ .Values.bfl.username }}:5079
-          {{- if and .Values.gpu (not (eq .Values.gpu "none" )) }}
-          - name: GPU
-            value: {{ .Values.gpu }}
-          {{- end }}
-        volumeMounts:
-          - name: watch-dir
-            mountPath: /Home/Documents
-          - name: userspace-dir
-            mountPath: /Home
+#      - name: dify-gateway
+#        image: beclab/search2-gateway:v0.0.44
+#        imagePullPolicy: IfNotPresent
+#        resources:
+#          limits:
+#            cpu: 200m
+#            memory: 200Mi
+#          requests:
+#            cpu: 50m
+#            memory: 50Mi
+#        ports:
+#          - name: dify-gateway
+#            containerPort: 6317
+#            protocol: TCP
+#        env:
+#          - name: OS_SYSTEM_SERVER
+#            value: system-server.user-system-{{ .Values.bfl.username }}
+#          - name: OS_APP_SECRET
+#            value: '{{ .Values.os.difyfusionclient.appSecret }}'
+#          - name: OS_APP_KEY
+#            value: {{ .Values.os.difyfusionclient.appKey }}
+#          - name: PREFIX
+#            value: /api/controllers
+#          - name: DIFY_ADMIN_USER_EMAIL
+#            value: admin@bytetrade.io
+#          - name: DIFY_ADMIN_USER_PASSWORD
+#            value: abcd123456
+#          - name: DIFY_USER_NAME
+#            value: '{{ .Values.bfl.username }}'
+#          - name: DIFY_USER_PASSWORD
+#            value: abcd123456
+#          - name: WATCH_DIR
+#            value: /Home/Documents
+#          - name: FS_TYPE
+#            value: fs
+#          - name: PG_USERNAME
+#            value: difyfusionclient_{{ .Values.bfl.username }}
+#          - name: PG_PASSWORD
+#            value: {{ $password | b64dec }}
+#          - name: PG_HOST
+#            value: citus-master-svc.user-system-{{ .Values.bfl.username }}
+#          - name: PG_PORT
+#            value: "5432"
+#          - name: PG_DATABASE
+#            value: difyfusionclient_{{ .Values.bfl.username }}_difyfusionclient
+#          - name: DIFY_HOST
+#            value: http://difyfusion.difyfusion-{{ .Values.bfl.username }}
+#          - name: POD_NAME
+#            valueFrom:
+#              fieldRef:
+#                fieldPath: metadata.name
+#          - name: NAMESPACE
+#            valueFrom:
+#              fieldRef:
+#                fieldPath: metadata.namespace
+#          - name: CONTAINER_NAME
+#            value: dify-gateway
+#          - name: NOTIFY_SERVER
+#            value: fsnotify-svc.user-system-{{ .Values.bfl.username }}:5079
+#          {{- if and .Values.gpu (not (eq .Values.gpu "none" )) }}
+#          - name: GPU
+#            value: {{ .Values.gpu }}
+#          {{- end }}
+#        volumeMounts:
+#          - name: watch-dir
+#            mountPath: /Home/Documents
+#          - name: userspace-dir
+#            mountPath: /Home
 
       - name: dify-proxy
         image: docker.io/aboveos/nginx:stable-alpine3.17-slim
@@ -271,6 +271,7 @@ spec:
           requests:
             cpu: 50m
             memory: 50Mi
+
       volumes:
 #      - name: terminus-sidecar-config
 #        configMap:
@@ -433,6 +434,7 @@ data:
           proxy_connect_timeout                          30s;
           proxy_send_timeout                             60s;
           proxy_read_timeout                             300s;
+          proxy_http_version 1.1;
           proxy_set_header Host                      $host;
           proxy_set_header X-Forwarded-Host          $http_host;
           proxy_set_header X-Real-IP                 $remote_addr;
