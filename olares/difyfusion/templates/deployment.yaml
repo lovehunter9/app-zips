@@ -490,6 +490,40 @@ spec:
             - name: PGDB1
               value: difyfusion_{{ .Values.bfl.username }}_difyfusion
 
+        - name: terminus-sidecar-init
+          image: docker.io/aboveos/openservicemesh-init:v1.2.3
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+            capabilities:
+              add:
+                - NET_ADMIN
+            runAsNonRoot: false
+            runAsUser: 0
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Hello!"
+#              iptables-restore --noflush <<EOF
+#              # sidecar interception rules
+#              *nat
+#              :PROXY_IN_REDIRECT - [0:0]
+#              :PROXY_INBOUND - [0:0]
+#              -A PROXY_IN_REDIRECT -p tcp -j REDIRECT --to-port 15003
+#              -A PROXY_INBOUND -p tcp --dport 15000 -j RETURN
+#              -A PROXY_INBOUND -p tcp -j PROXY_IN_REDIRECT
+#              -A PREROUTING -p tcp -j PROXY_INBOUND
+#              COMMIT
+#              EOF
+
+          env:
+          - name: POD_IP
+            valueFrom:
+              fieldRef:
+                apiVersion: v1
+                fieldPath: status.podIP
+
       securityContext:
         runAsUser: 0
       # terminationGracePeriodSeconds: 0
