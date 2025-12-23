@@ -29,11 +29,11 @@ spec:
             - name: MEDPLUM_PORT
               value: "8103"
             - name: MEDPLUM_BASE_URL
-              value: "http://localhost:8103/"
+              value: "http://{{ $medplumDomain }}:8103/"
             - name: MEDPLUM_APP_BASE_URL
-              value: "http://localhost:3000/"
+              value: "http://{{ $medplumDomain }}:3000/"
             - name: MEDPLUM_STORAGE_BASE_URL
-              value: "http://localhost:8103/storage/"
+              value: "http://{{ $medplumDomain }}/storage/"
             - name: MEDPLUM_DATABASE_HOST
               value: {{ .Values.postgres.host }}
             - name: MEDPLUM_DATABASE_PORT
@@ -89,19 +89,19 @@ spec:
               memory: 2Gi
           ports:
             - containerPort: 8103
-{{/*          volumeMounts:*/}}
-{{/*            - name: medplum-data*/}}
-{{/*              mountPath: /usr/src/medplum/packages/server/medplum.config.json*/}}
-{{/*              readOnly: true  # 建议只读防止误修改*/}}
           command: [ "sh", "-c" ]
           args:
-            - "if [ -n '${MEDPLUM_CONFIG_PATH}' ]; then
-                echo 'Config file found, running with custom config'
-                node --require ./packages/server/dist/otel/instrumentation.js packages/server/dist/index.js file:/usr/src/medplum/packages/server/medplum.config.json
+            - |
+              if [ -n "${MEDPLUM_CONFIG_PATH}" ]; then
+                echo "Config file found, running with custom config"
+                node --require ./packages/server/dist/otel/instrumentation.js \
+                     packages/server/dist/index.js \
+                     file:/usr/src/medplum/packages/server/medplum.config.json
               else
-                echo 'No config file found, running with default env settings'
-                node --require ./packages/server/dist/otel/instrumentation.js packages/server/dist/index.js env
-              fi"
+                echo "No config file found, running with default env settings"
+                node --require ./packages/server/dist/otel/instrumentation.js \
+                     packages/server/dist/index.js env
+              fi
           livenessProbe:
             exec:
               command:
@@ -112,10 +112,6 @@ spec:
             periodSeconds: 30
             timeoutSeconds: 10
             failureThreshold: 5
-{{/*          volumeMounts:*/}}
-{{/*            - name: config-volume*/}}
-{{/*              mountPath: /usr/src/medplum/packages/server/medplum.config.json*/}}
-{{/*              subPath: medplum.config.json*/}}
 
         - name: medplum-app
           image: docker.io/beclab/medplum-medplum-app:5.0
@@ -136,22 +132,7 @@ spec:
             periodSeconds: 5
 
       restartPolicy: Always
-{{/*      volumes:*/}}
-{{/*        - name: config-volume*/}}
-{{/*          configMap:*/}}
-{{/*            name: medplum-config*/}}
-{{/*        - name: medplum-data*/}}
-{{/*          hostPath:*/}}
-{{/*            type: DirectoryOrCreate*/}}
-{{/*                  {{- if .Values.sysVersion }}*/}}
-{{/*                    {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}*/}}
-{{/*            path: '{{ .Values.userspace.appCache }}/medplum.config.json'*/}}
-{{/*                    {{- else }}*/}}
-{{/*            path: '{{ .Values.userspace.appCache }}/medplum/medplum.config.json'*/}}
-{{/*                    {{- end }}*/}}
-{{/*                  {{- else }}*/}}
-{{/*            path: '{{ .Values.userspace.appCache }}/medplum/medplum.config.json'*/}}
-{{/*                  {{- end }}*/}}
+
 ---
 apiVersion: v1
 kind: Service
@@ -169,15 +150,3 @@ spec:
     io.kompose.service: medplum
 status:
   loadBalancer: {}
-
-{{/*---*/}}
-{{/*# ConfigMap for medplum.config.json*/}}
-{{/*apiVersion: v1*/}}
-{{/*kind: ConfigMap*/}}
-{{/*metadata:*/}}
-{{/*  name: medplum-config*/}}
-{{/*data:*/}}
-{{/*  medplum.config.json: |*/}}
-{{/*    {*/}}
-{{/*      "MEDPLUM_CONFIG_PATH": "/usr/src/medplum/packages/server/medplum.config.json"*/}}
-{{/*    }*/}}
