@@ -1,0 +1,14 @@
+metadata:
+  title: Medplum
+  description: Medplum 是一个开发者平台，支持灵活且快速地开发医疗健康应用。
+spec:
+  fullDescription: |
+    Medplum 是一个开发者平台，支持灵活且快速地开发医疗健康应用。其核心组件包括：
+  
+    - Medplum Auth 身份认证系统：端到端的身份解决方案，通过 OAuth、OpenID 和 SMART-on-FHIR 标准实现用户认证、登录及权限管理。
+    - Medplum Clinical Data Repository (CDR) 临床数据仓库：后端服务器，以安全合规、标准化的方式存储医疗健康数据。
+    - Medplum API 接口：基于 FHIR 标准的 API，支持数据的发送、接收与操作处理。
+    - Medplum SDK 开发工具包：客户端库文件，简化与 Medplum API 的交互流程。
+    - Medplum App 应用：网页端应用程序，可查看数据、执行基础编辑操作，并管理基本工作流。
+    - Medplum Bots 机器人服务：无需自建服务器即可编写并运行服务器端应用逻辑。
+    - UI Component Library 界面组件库：基于 React 的组件库，助力快速开发定制化医疗健康应用。

@@ -1,0 +1,183 @@
+﻿{{- $medplumDomainENV := split  ","  .Values.domain.medplum -}}
+{{- $medplumDomain := index $medplumDomainENV "_0" -}}
+
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: medplum
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: medplum
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: medplum
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: medplum
+    spec:
+      containers:
+        - name: medplum
+          image: docker.io/beclab/medplum-medplum-server:5.0
+          env:
+            - name: MEDPLUM_PORT
+              value: "8103"
+            - name: MEDPLUM_BASE_URL
+              value: "http://localhost:8103/"
+            - name: MEDPLUM_APP_BASE_URL
+              value: "http://localhost:3000/"
+            - name: MEDPLUM_STORAGE_BASE_URL
+              value: "http://localhost:8103/storage/"
+            - name: MEDPLUM_DATABASE_HOST
+              value: {{ .Values.postgres.host }}
+            - name: MEDPLUM_DATABASE_PORT
+              value: "{{ .Values.postgres.port }}"
+            - name: MEDPLUM_DATABASE_DBNAME
+              value: {{ .Values.postgres.databases.medplumdb }}
+            - name: MEDPLUM_DATABASE_USERNAME
+              value: {{ .Values.postgres.username }}
+            - name: MEDPLUM_DATABASE_PASSWORD
+              value: {{ .Values.postgres.password }}
+            - name: MEDPLUM_REDIS_HOST
+              value: {{ .Values.redis.host }}
+            - name: MEDPLUM_REDIS_PORT
+              value: "{{ .Values.redis.port }}"
+            - name: MEDPLUM_REDIS_PASSWORD
+              value: {{ .Values.redis.password }}
+            - name: MEDPLUM_BINARY_STORAGE
+              value: "file:./binary/"
+            - name: MEDPLUM_SUPPORT_EMAIL
+              value: '"Medplum" <support@medplum.com>'
+            - name: MEDPLUM_GOOGLE_CLIENT_ID
+              value: "397236612778-c0b5tnjv98frbo1tfuuha5vkme3cmq4s.apps.googleusercontent.com"
+            - name: MEDPLUM_GOOGLE_CLIENT_SECRET
+              value: ""
+            - name: MEDPLUM_RECAPTCHA_SITE_KEY
+              value: "6LfHdsYdAAAAAC0uLnnRrDrhcXnziiUwKd8VtLNq"
+            - name: MEDPLUM_RECAPTCHA_SECRET_KEY
+              value: "6LfHdsYdAAAAAH9dN154jbJ3zpQife3xaiTvPChL"
+            - name: MEDPLUM_MAX_JSON_SIZE
+              value: "1mb"
+            - name: MEDPLUM_MAX_BATCH_SIZE
+              value: "50mb"
+            - name: MEDPLUM_BOT_LAMBDA_ROLE_ARN
+              value: ""
+            - name: MEDPLUM_BOT_LAMBDA_LAYER_NAME
+              value: "medplum-bot-layer"
+            - name: MEDPLUM_VM_CONTEXT_BOTS_ENABLED
+              value: "true"
+            - name: MEDPLUM_DEFAULT_BOT_RUNTIME_VERSION
+              value: "vmcontext"
+            - name: MEDPLUM_ALLOWED_ORIGINS
+              value: "*"
+            - name: MEDPLUM_INTROSPECTION_ENABLED
+              value: "true"
+            - name: MEDPLUM_SHUTDOWN_TIMEOUT_MILLISECONDS
+              value: "30000"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 2Gi
+          ports:
+            - containerPort: 8103
+{{/*          volumeMounts:*/}}
+{{/*            - name: medplum-data*/}}
+{{/*              mountPath: /usr/src/medplum/packages/server/medplum.config.json*/}}
+{{/*              readOnly: true  # 建议只读防止误修改*/}}
+          command: [ "sh", "-c" ]
+          args:
+            - "if [ -n '${MEDPLUM_CONFIG_PATH}' ]; then
+                echo 'Config file found, running with custom config'
+                node --require ./packages/server/dist/otel/instrumentation.js packages/server/dist/index.js file:/usr/src/medplum/packages/server/medplum.config.json
+              else
+                echo 'No config file found, running with default env settings'
+                node --require ./packages/server/dist/otel/instrumentation.js packages/server/dist/index.js env
+              fi"
+          livenessProbe:
+            exec:
+              command:
+                - "node"
+                - "-e"
+                - "fetch(\"http://localhost:8103/healthcheck\").then(r => r.json()).then(console.log).catch(() => { process.exit(1); })"
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
+{{/*          volumeMounts:*/}}
+{{/*            - name: config-volume*/}}
+{{/*              mountPath: /usr/src/medplum/packages/server/medplum.config.json*/}}
+{{/*              subPath: medplum.config.json*/}}
+
+        - name: medplum-app
+          image: docker.io/beclab/medplum-medplum-app:5.0
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 2Gi
+          ports:
+            - containerPort: 3000
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+
+      restartPolicy: Always
+{{/*      volumes:*/}}
+{{/*        - name: config-volume*/}}
+{{/*          configMap:*/}}
+{{/*            name: medplum-config*/}}
+{{/*        - name: medplum-data*/}}
+{{/*          hostPath:*/}}
+{{/*            type: DirectoryOrCreate*/}}
+{{/*                  {{- if .Values.sysVersion }}*/}}
+{{/*                    {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}*/}}
+{{/*            path: '{{ .Values.userspace.appCache }}/medplum.config.json'*/}}
+{{/*                    {{- else }}*/}}
+{{/*            path: '{{ .Values.userspace.appCache }}/medplum/medplum.config.json'*/}}
+{{/*                    {{- end }}*/}}
+{{/*                  {{- else }}*/}}
+{{/*            path: '{{ .Values.userspace.appCache }}/medplum/medplum.config.json'*/}}
+{{/*                  {{- end }}*/}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: medplum
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: medplum
+spec:
+  ports:
+    - protocol: TCP
+      port: 3000
+      targetPort: 80
+  selector:
+    io.kompose.service: medplum
+status:
+  loadBalancer: {}
+
+{{/*---*/}}
+{{/*# ConfigMap for medplum.config.json*/}}
+{{/*apiVersion: v1*/}}
+{{/*kind: ConfigMap*/}}
+{{/*metadata:*/}}
+{{/*  name: medplum-config*/}}
+{{/*data:*/}}
+{{/*  medplum.config.json: |*/}}
+{{/*    {*/}}
+{{/*      "MEDPLUM_CONFIG_PATH": "/usr/src/medplum/packages/server/medplum.config.json"*/}}
+{{/*    }*/}}
