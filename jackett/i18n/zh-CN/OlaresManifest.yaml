@@ -1,8 +1,10 @@
 metadata:
-  title: Formbricks
-  description: Formbricks是一个免费且开源的调查平台。
+  title: Jackett
+  description: Jackett作为代理服务器工作。
 spec:
   fullDescription: |
-    Formbricks是一个免费且开源的调查平台。
-    它支持在用户旅程的每个环节通过精美的应用内调查、网站调查、链接调查和电子邮件调查收集反馈，
-    并允许用户基于Formbricks构建自定义功能，或直接利用其预构建的数据分析能力。
+    Jackett作为代理服务器工作：
+    它将来自应用程序（如Sonarr、SickRage、CouchPotato、Mylar等）的查询转换为特定追踪器网站的HTTP查询，
+    解析HTML响应，然后将结果发送回请求的软件。
+    这允许获取最近上传的内容（如RSS）和执行搜索。
+    Jackett是一个维护良好的索引器抓取与转换逻辑的单一存储库，减轻了其他应用程序的负担。

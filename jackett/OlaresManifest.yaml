@@ -1,11 +1,11 @@
 olaresManifest.version: '0.10.0'
 metadata:
-  name: formbricks
-  description: Formbricks provides a free and open source surveying platform.
+  name: jackett
+  description: Jackett works as a proxy server.
   icon: https://app.cdn.olares.com/appstore/default/defaulticon.webp
-  appid: formbricks
+  appid: jackett
   version: '1.0.0'
-  title: Formbricks
+  title: Jackett
   categories:
   - Productivity_v112
   - Utilities
@@ -15,24 +15,26 @@ permission:
   userData:
   - Home
 spec:
-  versionName: '5.0'
+  versionName: '0.24.766'
   fullDescription: |
-    Formbricks provides a free and open source surveying platform.
-    Gather feedback at every point in the user journey with beautiful in-app, website, link and email surveys.
-    Build on top of Formbricks or leverage prebuilt data analysis capabilities.
-  developer: formbricks
-  website: https://formbricks.com
+    Jackett works as a proxy server: 
+    it translates queries from apps (Sonarr, SickRage, CouchPotato, Mylar, etc) into tracker-site-specific http queries,
+    parses the html response, then sends results back to the requesting software.
+    This allows for getting recent uploads (like RSS) and performing searches.
+    Jackett is a single repository of maintained indexer scraping & translation logic - removing the burden from other apps.
+  developer: linuxserver.io
+  website: https://www.linuxserver.io/
   submitter: Olares
   locale:
   - en-US
   - zh-CN
-  requiredMemory: 512Mi
-  limitedMemory: 2Gi
-  requiredDisk: 1Gi
-  limitedDisk: 5Gi
-  requiredCpu: 1.5
-  limitedCpu: 3
-  doc: https://formbricks.com/docs
+  requiredMemory: 128Mi
+  limitedMemory: 1Gi
+  requiredDisk: 128Mi
+  limitedDisk: 1Gi
+  requiredCpu: 0.25
+  limitedCpu: 1
+  doc: https://docs.linuxserver.io/images/docker-jackett/
   supportArch:
   - amd64
   - arm64
@@ -42,45 +44,10 @@ options:
     type: system
     version: '>=1.10.1-0'
 entrances:
-- name: formbricks
-  port: 3000
-  host: formbricks
-  title: formbricks
+- name: jackett
+  port: 9117
+  host: jackett
+  title: jackett
   icon: https://app.cdn.olares.com/appstore/default/defaulticon.webp
   openMethod: window
 olaresManifest.type: app
-middleware:
-  redis:
-    namespace: formbricks
-  postgres:
-    username: formbricks
-    databases:
-    - name: formbricksdb
-      distributed: false
-      extensions:
-        - vector
-envs:
-  - envName: MAIL_FROM
-    type: email
-    required: true
-    editable: false
-  - envName: MAIL_FROM_NAME
-    type: string
-    required: true
-    editable: false
-  - envName: SMTP_HOST
-    type: string
-    required: true
-    editable: false
-  - envName: SMTP_PORT
-    type: string
-    required: true
-    editable: false
-  - envName: SMTP_USER
-    type: email
-    required: true
-    editable: false
-  - envName: SMTP_PASSWORD
-    type: password
-    required: true
-    editable: false
