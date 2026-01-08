@@ -29,11 +29,101 @@ spec:
             - name: MEDPLUM_PORT
               value: "8103"
             - name: MEDPLUM_BASE_URL
-              value: "http://{{ $medplumDomain }}:8103/"
+              value: "https://{{ $medplumDomain }}/server/"
             - name: MEDPLUM_APP_BASE_URL
-              value: "http://{{ $medplumDomain }}:3000/"
+              value: "https://{{ $medplumDomain }}/"
             - name: MEDPLUM_STORAGE_BASE_URL
-              value: "http://{{ $medplumDomain }}/storage/"
+              value: "https://{{ $medplumDomain }}/server/storage/"
+            - name: MEDPLUM_DATABASE_HOST
+              value: {{ .Values.postgres.host }}
+            - name: MEDPLUM_DATABASE_PORT
+              value: "{{ .Values.postgres.port }}"
+            - name: MEDPLUM_DATABASE_DBNAME
+              value: {{ .Values.postgres.databases.medplumdb }}
+            - name: MEDPLUM_DATABASE_USERNAME
+              value: {{ .Values.postgres.username }}
+            - name: MEDPLUM_DATABASE_PASSWORD
+              value: {{ .Values.postgres.password }}
+            - name: MEDPLUM_REDIS_HOST
+              value: {{ .Values.redis.host }}
+            - name: MEDPLUM_REDIS_PORT
+              value: "{{ .Values.redis.port }}"
+            - name: MEDPLUM_REDIS_PASSWORD
+              value: {{ .Values.redis.password }}
+            - name: MEDPLUM_BINARY_STORAGE
+              value: "file:./binary/"
+            - name: MEDPLUM_SUPPORT_EMAIL
+              value: '"Medplum" <support@medplum.com>'
+            - name: MEDPLUM_GOOGLE_CLIENT_ID
+              value: "397236612778-c0b5tnjv98frbo1tfuuha5vkme3cmq4s.apps.googleusercontent.com"
+            - name: MEDPLUM_GOOGLE_CLIENT_SECRET
+              value: ""
+            - name: MEDPLUM_RECAPTCHA_SITE_KEY
+              value: "6LfHdsYdAAAAAC0uLnnRrDrhcXnziiUwKd8VtLNq"
+            - name: MEDPLUM_RECAPTCHA_SECRET_KEY
+              value: "6LfHdsYdAAAAAH9dN154jbJ3zpQife3xaiTvPChL"
+            - name: MEDPLUM_MAX_JSON_SIZE
+              value: "1mb"
+            - name: MEDPLUM_MAX_BATCH_SIZE
+              value: "50mb"
+            - name: MEDPLUM_BOT_LAMBDA_ROLE_ARN
+              value: ""
+            - name: MEDPLUM_BOT_LAMBDA_LAYER_NAME
+              value: "medplum-bot-layer"
+            - name: MEDPLUM_VM_CONTEXT_BOTS_ENABLED
+              value: "true"
+            - name: MEDPLUM_DEFAULT_BOT_RUNTIME_VERSION
+              value: "vmcontext"
+            - name: MEDPLUM_ALLOWED_ORIGINS
+              value: "*"
+            - name: MEDPLUM_INTROSPECTION_ENABLED
+              value: "true"
+            - name: MEDPLUM_SHUTDOWN_TIMEOUT_MILLISECONDS
+              value: "30000"
+          resources:
+            requests:
+              cpu: 700m
+              memory: 768Mi
+            limits:
+              cpu: 1000m
+              memory: 2Gi
+          ports:
+            - containerPort: 8103
+          command: [ "sh", "-c" ]
+          args:
+            - |
+              if [ -n "${MEDPLUM_CONFIG_PATH}" ]; then
+                echo "Config file found, running with custom config"
+                node --require ./packages/server/dist/otel/instrumentation.js \
+                     packages/server/dist/index.js \
+                     file:/usr/src/medplum/packages/server/medplum.config.json
+              else
+                echo "No config file found, running with default env settings"
+                node --require ./packages/server/dist/otel/instrumentation.js \
+                     packages/server/dist/index.js env
+              fi
+{{/*          livenessProbe:*/}}
+{{/*            exec:*/}}
+{{/*              command:*/}}
+{{/*                - "node"*/}}
+{{/*                - "-e"*/}}
+{{/*                - "fetch(\"https://{{ $medplumDomain }}:8103/healthcheck\").then(r => r.json()).then(console.log).catch(() => { process.exit(1); })"*/}}
+{{/*            initialDelaySeconds: 15*/}}
+{{/*            periodSeconds: 30*/}}
+{{/*            timeoutSeconds: 10*/}}
+{{/*            failureThreshold: 5*/}}
+
+        - name: medplum-app
+          image: docker.io/beclab/medplum-medplum-app:5.0
+          env:
+            - name: MEDPLUM_PORT
+              value: "8103"
+            - name: MEDPLUM_BASE_URL
+              value: "https://{{ $medplumDomain }}/server/"
+            - name: MEDPLUM_APP_BASE_URL
+              value: "https://{{ $medplumDomain }}/"
+            - name: MEDPLUM_STORAGE_BASE_URL
+              value: "https://{{ $medplumDomain }}/server/storage/"
             - name: MEDPLUM_DATABASE_HOST
               value: {{ .Values.postgres.host }}
             - name: MEDPLUM_DATABASE_PORT
@@ -83,45 +173,10 @@ spec:
           resources:
             requests:
               cpu: 100m
-              memory: 256Mi
+              memory: 32Mi
             limits:
               cpu: 1000m
-              memory: 2Gi
-          ports:
-            - containerPort: 8103
-          command: [ "sh", "-c" ]
-          args:
-            - |
-              if [ -n "${MEDPLUM_CONFIG_PATH}" ]; then
-                echo "Config file found, running with custom config"
-                node --require ./packages/server/dist/otel/instrumentation.js \
-                     packages/server/dist/index.js \
-                     file:/usr/src/medplum/packages/server/medplum.config.json
-              else
-                echo "No config file found, running with default env settings"
-                node --require ./packages/server/dist/otel/instrumentation.js \
-                     packages/server/dist/index.js env
-              fi
-          livenessProbe:
-            exec:
-              command:
-                - "node"
-                - "-e"
-                - "fetch(\"http://localhost:8103/healthcheck\").then(r => r.json()).then(console.log).catch(() => { process.exit(1); })"
-            initialDelaySeconds: 15
-            periodSeconds: 30
-            timeoutSeconds: 10
-            failureThreshold: 5
-
-        - name: medplum-app
-          image: docker.io/beclab/medplum-medplum-app:5.0
-          resources:
-            requests:
-              cpu: 100m
-              memory: 256Mi
-            limits:
-              cpu: 1000m
-              memory: 2Gi
+              memory: 500Mi
           ports:
             - containerPort: 3000
           readinessProbe:
@@ -131,7 +186,35 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 5
 
+        - name: nginx
+          image: "beclab/docker-nginx-headers-more:ubuntu-v0.1.0"
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+
+{{/*        - name: redis*/}}
+{{/*          image: redis:7*/}}
+{{/*          command: [ "sh", "-c" ]*/}}
+{{/*          args: [ "redis-server --requirepass medplum" ]*/}}
+{{/*          ports:*/}}
+{{/*            - containerPort: 6379*/}}
+{{/*          resources:*/}}
+{{/*            requests:*/}}
+{{/*              memory: 128Mi*/}}
+{{/*              cpu: 100m*/}}
+{{/*            limits:*/}}
+{{/*              memory: 256Mi*/}}
+{{/*              cpu: 500m*/}}
+
       restartPolicy: Always
+
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: nginx-config
 
 ---
 apiVersion: v1
@@ -143,10 +226,51 @@ metadata:
     io.kompose.service: medplum
 spec:
   ports:
-    - protocol: TCP
+    - name: "3000"
+      protocol: TCP
       port: 3000
+      targetPort: 3000
+    - name: "8103"
+      protocol: TCP
+      port: 8103
+      targetPort: 8103
+    - name: "80"
+      protocol: TCP
+      port: 80
       targetPort: 80
   selector:
     io.kompose.service: medplum
 status:
   loadBalancer: {}
+
+---
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: medplum
+    component: api
+data:
+  nginx.conf: |
+    events {}
+    http {
+      server {
+        listen 80;
+        server_name {{ $medplumDomain }};
+
+        location /server/ {
+          proxy_pass http://localhost:8103/;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+        }
+
+        location / {
+          proxy_pass http://localhost:3000/;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+        }
+      }
+    }

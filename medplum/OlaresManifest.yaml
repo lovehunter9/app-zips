@@ -32,12 +32,12 @@ spec:
   locale:
   - en-US
   - zh-CN
-  requiredMemory: 256Mi
-  limitedMemory: 2Gi
-  requiredDisk: 128Mi
+  requiredMemory: 1Gi
+  limitedMemory: 3Gi
+  requiredDisk: 256Mi
   limitedDisk: 5Gi
-  requiredCpu: 0.1
-  limitedCpu: 1
+  requiredCpu: 0.2
+  limitedCpu: 2
   doc: https://www.medplum.com/docs
   supportArch:
   - amd64
@@ -49,7 +49,7 @@ options:
     version: '>=1.10.1-0'
 entrances:
 - name: medplum
-  port: 3000
+  port: 80
   host: medplum
   title: medplum
   icon: https://app.cdn.olares.com/appstore/default/defaulticon.webp
@@ -62,22 +62,3 @@ middleware:
     username: medplum
     databases:
     - name: medplumdb
-#envs:
-#  - envName: CONTACT_EMAIL
-#    type: email
-#    required: true
-#    editable: false
-#  - envName: ADMIN_EMAIL
-#    type: email
-#    required: true
-#    editable: false
-#  - envName: ADMIN_NAME
-#    type: string
-#    required: true
-#    editable: false
-#  - envName: ADMIN_PASSWORD
-#    type: password
-#    required: true
-#    editable: false
-#    description: "Password must be at least 8 characters long"
-#    regex: '^[\w\-!@#$%^&*()+={}\[\]:,.?~]{8,}$'

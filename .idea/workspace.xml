@@ -5,43 +5,25 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="e9836655-cb5c-456b-aef7-0ca255338318" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/.idea/go.imports.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/modules.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/answer/.helmignore" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/answer/Chart.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/answer/OlaresManifest.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/answer/i18n/en-US/OlaresManifest.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/answer/i18n/zh-CN/OlaresManifest.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/answer/owners" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/answer/templates/answer.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/answer/values.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/jsonhero/.helmignore" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/jsonhero/Chart.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/jsonhero/OlaresManifest.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/jsonhero/i18n/en-US/OlaresManifest.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/jsonhero/i18n/zh-CN/OlaresManifest.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/jsonhero/owners" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/jsonhero/templates/jsonhero.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/jsonhero/values.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/medplum/.helmignore" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/medplum/Chart.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/medplum/OlaresManifest.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/medplum/i18n/en-US/OlaresManifest.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/medplum/i18n/zh-CN/OlaresManifest.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/medplum/owners" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/medplum/templates/medplum.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/medplum/values.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/memos/.helmignore" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/memos/Chart.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/memos/OlaresManifest.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/memos/i18n/en-US/OlaresManifest.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/memos/i18n/zh-CN/OlaresManifest.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/memos/owners" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/memos/templates/memos.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/memos/values.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/app-zips.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/app-zips.iml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/formbricks/.helmignore" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/formbricks/Chart.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/formbricks/OlaresManifest.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/formbricks/i18n/en-US/OlaresManifest.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/formbricks/i18n/zh-CN/OlaresManifest.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/formbricks/owners" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/formbricks/templates/formbricks.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/formbricks/values.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/jackett/.helmignore" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/jackett/Chart.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/jackett/OlaresManifest.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/jackett/i18n/en-US/OlaresManifest.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/jackett/i18n/zh-CN/OlaresManifest.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/jackett/owners" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/jackett/templates/formbricks.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/jackett/values.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/olares/difyfusionclient/templates/dify_fe_deploy.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/olares/difyfusionclient/templates/dify_fe_deploy.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/medplum/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/medplum/OlaresManifest.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/medplum/templates/medplum.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/medplum/templates/medplum.yaml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -49,7 +31,7 @@
     <option name="LAST_RESOLUTION" value="IGNORE" />
   </component>
   <component name="EmbeddingIndexingInfo">
-    <option name="cachedIndexableFilesCount" value="142" />
+    <option name="cachedIndexableFilesCount" value="152" />
     <option name="fileBasedEmbeddingIndicesEnabled" value="true" />
   </component>
   <component name="GOROOT" url="file://$USER_HOME$/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.7.darwin-arm64" />
@@ -432,6 +414,13 @@
       <workItem from="1765282092445" duration="597000" />
       <workItem from="1765542011796" duration="597000" />
       <workItem from="1765769346374" duration="594000" />
+      <workItem from="1766997174917" duration="597000" />
+      <workItem from="1767065734382" duration="593000" />
+      <workItem from="1767152335299" duration="594000" />
+      <workItem from="1767497198987" duration="594000" />
+      <workItem from="1767583794336" duration="590000" />
+      <workItem from="1767670463772" duration="592000" />
+      <workItem from="1767756648473" duration="581000" />
     </task>
     <servers />
   </component>
