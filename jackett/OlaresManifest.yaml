@@ -4,7 +4,7 @@ metadata:
   description: Jackett works as a proxy server.
   icon: https://app.cdn.olares.com/appstore/default/defaulticon.webp
   appid: jackett
-  version: '1.0.0'
+  version: '1.0.1'
   title: Jackett
   categories:
   - Productivity_v112

@@ -5,7 +5,18 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="e9836655-cb5c-456b-aef7-0ca255338318" name="Changes" comment="">
+      <change afterPath="$PROJECT_DIR$/metube/.helmignore" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/metube/Chart.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/metube/OlaresManifest.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/metube/i18n/en-US/OlaresManifest.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/metube/i18n/zh-CN/OlaresManifest.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/metube/owners" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/metube/templates/metube.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/metube/values.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/jackett/Chart.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/jackett/Chart.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/jackett/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/jackett/OlaresManifest.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/jackett/templates/jackett.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/jackett/templates/jackett.yaml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -13,7 +24,7 @@
     <option name="LAST_RESOLUTION" value="IGNORE" />
   </component>
   <component name="EmbeddingIndexingInfo">
-    <option name="cachedIndexableFilesCount" value="161" />
+    <option name="cachedIndexableFilesCount" value="181" />
     <option name="fileBasedEmbeddingIndicesEnabled" value="true" />
   </component>
   <component name="GOROOT" url="file://$USER_HOME$/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.7.darwin-arm64" />
@@ -403,6 +414,11 @@
       <workItem from="1767583794336" duration="590000" />
       <workItem from="1767670463772" duration="592000" />
       <workItem from="1767756648473" duration="581000" />
+      <workItem from="1767929410573" duration="585000" />
+      <workItem from="1768188544439" duration="589000" />
+      <workItem from="1768275668395" duration="596000" />
+      <workItem from="1768361860644" duration="597000" />
+      <workItem from="1768448244920" duration="594000" />
     </task>
     <servers />
   </component>
