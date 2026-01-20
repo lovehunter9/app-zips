@@ -21,98 +21,6 @@ spec:
       labels:
         io.kompose.service: freshrss
     spec:
-      initContainers:
-        - name: pre-config
-          image: docker.io/beclab/freshrss-freshrss:1.28.0 # busybox:1.36
-          command:
-            - sh
-            - -c
-            - |
-              # 启用详细错误追踪并强制重定向所有输出到标准输出
-              set -euxo pipefail
-              exec &> /proc/1/fd/1
-
-              echo "🚀 初始化开始"
-
-              # 创建并授权所有必要目录
-              for dir in favicons tokens cache users extensions; do
-              mkdir -p /var/www/FreshRSS/data/$dir
-              chown -R www-data:www-data /var/www/FreshRSS/data/$dir
-              chmod -R 775 /var/www/FreshRSS/data/$dir
-              echo "✅ 目录处理完成: $dir"
-              done
-
-              # 创建用户专用目录（包括系统目录）
-              # mkdir -p /var/www/FreshRSS/data/users/{{ .Values.olaresEnv.ADMIN_NAME }}
-              # mkdir -p /var/www/FreshRSS/data/users/_
-              #for user_dir in {{ .Values.olaresEnv.ADMIN_NAME }} _; do
-              #chown -R www-data:www-data /var/www/FreshRSS/data/users/$user_dir
-              #chmod -R 775 /var/www/FreshRSS/data/users/$user_dir
-              #echo "✅ 用户目录处理完成: $user_dir"
-              #done
-
-              # 终极错误保护安装逻辑
-              install_output=$(php /var/www/FreshRSS/cli/do-install.php \
-              --default-user {{ .Values.olaresEnv.ADMIN_NAME }} \
-              --environment production \
-              --base-url 'https://{{ $freshrssDomain }}' \
-              --language en \
-              --title 'FreshRSS' \
-              --allow-anonymous false \
-              --allow-anonymous-refresh false \
-              --auth-type form \
-              --api-enabled true \
-              --allow-robots false \
-              --disable-update false \
-              --db-type pgsql \
-              --db-host '{{ .Values.postgres.host }}' \
-              --db-user '{{ .Values.postgres.username }}' \
-              --db-password '{{ .Values.postgres.password }}' \
-              --db-base '{{ .Values.postgres.databases.freshrssdb }}' \
-              --db-prefix freshrss_ 2>&1)
-
-              install_status=$?
-
-              # 增强型错误分类处理
-              if [ $install_status -eq 3 ]; then  # 对应EXIT_CODE_ALREADY_EXISTS
-              echo "⚠️ 检测到已安装: FreshRSS (代码: 3)"
-              echo "详细错误信息: $install_output"
-              echo "🚨 继续执行后续操作"
-              elif [ $install_status -ne 0 ]; then
-              echo "❌ 安装失败 (代码: $install_status): $install_output"
-              echo "🚨 继续执行后续操作"
-              else
-              echo "✅ 安装成功: $install_output"
-              fi
-
-              # 带错误保护的用户创建逻辑
-              user_output=$(php /var/www/FreshRSS/cli/create-user.php \
-              --user {{ .Values.olaresEnv.ADMIN_NAME }} \
-              --password {{ .Values.olaresEnv.ADMIN_PASSWORD }} \
-              --api-password {{ .Values.olaresEnv.ADMIN_API_PASSWORD }} \
-              --email {{ .Values.olaresEnv.ADMIN_EMAIL }} 2>&1)
-
-              user_status=$?
-
-              # 增强型用户创建错误处理
-              if [ $user_status -eq 3 ]; then
-              echo "⚠️ 检测到用户已存在: {{ .Values.olaresEnv.ADMIN_NAME }}"
-                echo "详细错误信息: $user_output"
-              echo "🚨 继续执行后续操作"
-              elif [ $user_status -ne 0 ]; then
-              echo "❌ 用户创建失败 (代码: $user_status): $user_output"
-              echo "🚨 继续执行后续操作"
-              else
-              echo "✅ 用户创建成功: $user_output"
-              fi
-
-              # 强制标记初始化完成
-              echo "🚨 所有初始化步骤完成"
-              exit 0
-          volumeMounts:
-            - name: freshrss-data
-              mountPath: /var/www/FreshRSS/data
-              subPath: data
       containers:
         - name: freshrss
           image: docker.io/beclab/freshrss-freshrss:1.28.0
@@ -141,36 +49,24 @@ spec:
                value: {{ .Values.postgres.username }}
              - name: DB_PASSWORD
                value: {{ .Values.postgres.password }}
-{{/*          lifecycle:*/}}
-{{/*            postStart:*/}}
-{{/*              exec:*/}}
-{{/*                command:*/}}
-{{/*                  - sh*/}}
-{{/*                    - -c*/}}
-{{/*                    - |*/}}
-{{/*                    php /var/www/FreshRSS/cli/do-install.php \*/}}
-{{/*                    --default-user {{ .Values.olaresEnv.ADMIN_NAME }} \*/}}
-{{/*                    --environment production \*/}}
-{{/*                    --base-url 'https://{{ $freshrssDomain }}' \*/}}
-{{/*                    --language en \*/}}
-{{/*                    --title 'FreshRSS' \*/}}
-{{/*                    --allow-anonymous false \*/}}
-{{/*                    --allow-anonymous-refresh false \*/}}
-{{/*                    --auth-type form \*/}}
-{{/*                    --api-enabled true \*/}}
-{{/*                    --allow-robots false \*/}}
-{{/*                    --disable-update false \*/}}
-{{/*                    --db-type pgsql \*/}}
-{{/*                    --db-host '{{ .Values.postgres.host }}' \*/}}
-{{/*                    --db-user '{{ .Values.postgres.username }}' \*/}}
-{{/*                    --db-password '{{ .Values.postgres.password }}' \*/}}
-{{/*                    --db-base '{{ .Values.postgres.databases.freshrssdb }}' \*/}}
-{{/*                    --db-prefix freshrss_*/}}
-{{/*                    php /var/www/FreshRSS/cli/create-user.php \*/}}
-{{/*                    --user {{ .Values.olaresEnv.ADMIN_NAME }} \*/}}
-{{/*                    --password {{ .Values.olaresEnv.ADMIN_PASSWORD }} \*/}}
-{{/*                    --api-password {{ .Values.olaresEnv.ADMIN_API_PASSWORD }}*/}}
-{{/*                    --email {{ .Values.olaresEnv.ADMIN_EMAIL }}*/}}
+             - name: FRESHRSS_INSTALL
+               value: |-
+                 --api-enabled
+                 --base-url 'https://{{ $freshrssDomain }}'
+                 --db-base {{ .Values.postgres.databases.freshrssdb }}
+                 --db-host {{ .Values.postgres.host }}
+                 --db-password {{ .Values.postgres.password }}
+                 --db-type pgsql
+                 --db-user {{ .Values.postgres.username }}
+                 --default-user {{ .Values.olaresEnv.ADMIN_NAME }}
+                 --language en
+             - name: FRESHRSS_USER
+               value: |-
+                 --api-password {{ .Values.olaresEnv.ADMIN_API_PASSWORD }}
+                 --email {{ .Values.olaresEnv.ADMIN_EMAIL }}
+                 --language en
+                 --password {{ .Values.olaresEnv.ADMIN_PASSWORD }}
+                 --user {{ .Values.olaresEnv.ADMIN_NAME }}
           livenessProbe:
             exec:
               command:
@@ -196,12 +92,6 @@ spec:
             - name: freshrss-data
               mountPath: /var/www/FreshRSS/extensions
               subPath: extensions
-{{/*            - name: freshrss-config*/}}
-{{/*              mountPath: /var/www/FreshRSS/readonly/config.custom.php*/}}
-{{/*              subPath: config.custom.php*/}}
-{{/*            - name: freshrss-config*/}}
-{{/*              mountPath: /var/www/FreshRSS/readonly/config-user.custom.php*/}}
-{{/*              subPath: config-user.custom.php*/}}
       restartPolicy: Always
       volumes:
         - name: freshrss-data
@@ -216,15 +106,6 @@ spec:
                 {{- else }}
             path: '{{ .Values.userspace.appCache }}/freshrss'
                 {{- end }}
-{{/*        - name: freshrss-config*/}}
-{{/*          configMap:*/}}
-{{/*            name: freshrss-config*/}}
-{{/*            items:*/}}
-{{/*              - key: config.custom.php*/}}
-{{/*                path: config.custom.php*/}}
-{{/*              - key: config-user.custom.php*/}}
-{{/*                path: config-user.custom.php*/}}
-{{/*            defaultMode: 420*/}}
 
 ---
 apiVersion: v1
@@ -244,231 +125,3 @@ spec:
     io.kompose.service: freshrss
 status:
   loadBalancer: {}
-
----
-{{/*kind: ConfigMap*/}}
-{{/*apiVersion: v1*/}}
-{{/*metadata:*/}}
-{{/*  name: freshrss-config*/}}
-{{/*  namespace: {{ .Release.Namespace }}*/}}
-{{/*  labels:*/}}
-{{/*    io.kompose.service: freshrss*/}}
-{{/*data:*/}}
-{{/*  config.custom.php: |-*/}}
-{{/*    <?php*/}}
-{{/*    return array (*/}}
-{{/*      'environment' => 'production',*/}}
-{{/*      'salt' => '9526fc8870ddfcc8b2a46a5011a8115d8b49cd5fe9749b79bc612f1cc8ec54eb',*/}}
-{{/*      'base_url' => 'https://{{ $freshrssDomain }}',*/}}
-{{/*      'auto_update_url' => 'https://update.freshrss.org',*/}}
-{{/*      'language' => 'en',*/}}
-{{/*      'title' => 'FreshRSS',*/}}
-{{/*      'meta_description' => '',*/}}
-{{/*      'logo_html' => '',*/}}
-{{/*      'default_user' => '{{ .Values.olaresEnv.ADMIN_NAME }}',*/}}
-{{/*      'force_email_validation' => false,*/}}
-{{/*      'allow_anonymous' => false,*/}}
-{{/*      'allow_anonymous_refresh' => false,*/}}
-{{/*      'auth_type' => 'form',*/}}
-{{/*      'reauth_required' => true,*/}}
-{{/*      'reauth_time' => 1200,*/}}
-{{/*      'http_auth_auto_register' => true,*/}}
-{{/*      'http_auth_auto_register_email_field' => '',*/}}
-{{/*      'api_enabled' => false,*/}}
-{{/*      'suppress_csp_warning' => false,*/}}
-{{/*      'csp.frame-ancestors' => '\'none\'',*/}}
-{{/*      'simplepie_syslog_enabled' => true,*/}}
-{{/*      'pubsubhubbub_enabled' => false,*/}}
-{{/*      'allow_robots' => false,*/}}
-{{/*      'allow_referrer' => false,*/}}
-{{/*      'nb_parallel_refresh' => 10,*/}}
-{{/*      'limits' =>*/}}
-{{/*      array (*/}}
-{{/*        'cookie_duration' => 7776000,*/}}
-{{/*        'cache_duration' => 800,*/}}
-{{/*        'cache_duration_min' => 60,*/}}
-{{/*        'cache_duration_max' => 86400,*/}}
-{{/*        'retry_after_default' => 1500,*/}}
-{{/*        'retry_after_max' => 172800,*/}}
-{{/*        'timeout' => 20,*/}}
-{{/*        'max_inactivity' => 9223372036854775807,*/}}
-{{/*        'max_feeds' => 131072,*/}}
-{{/*        'max_categories' => 16384,*/}}
-{{/*        'max_registrations' => 1,*/}}
-{{/*        'max_favicon_upload_size' => 1048576,*/}}
-{{/*      ),*/}}
-{{/*      'curl_options' =>*/}}
-{{/*      array (*/}}
-{{/*      ),*/}}
-{{/*      'db' =>*/}}
-{{/*      array (*/}}
-{{/*        'type' => 'pgsql',*/}}
-{{/*        'host' => '{{ .Values.postgres.host }}',*/}}
-{{/*        'user' => '{{ .Values.postgres.username }}',*/}}
-{{/*        'password' => '{{ .Values.postgres.password }}',*/}}
-{{/*        'base' => '{{ .Values.postgres.databases.freshrssdb }}',*/}}
-{{/*        'prefix' => 'freshrss_',*/}}
-{{/*        'connection_uri_params' => '',*/}}
-{{/*        'pdo_options' =>*/}}
-{{/*        array (*/}}
-{{/*        ),*/}}
-{{/*      ),*/}}
-{{/*      'mailer' => 'mail',*/}}
-{{/*      'smtp' =>*/}}
-{{/*      array (*/}}
-{{/*        'hostname' => '',*/}}
-{{/*        'host' => 'localhost',*/}}
-{{/*        'port' => 25,*/}}
-{{/*        'auth' => false,*/}}
-{{/*        'auth_type' => '',*/}}
-{{/*        'username' => '',*/}}
-{{/*        'password' => '',*/}}
-{{/*        'secure' => '',*/}}
-{{/*        'from' => 'root@localhost',*/}}
-{{/*      ),*/}}
-{{/*      'extensions_enabled' =>*/}}
-{{/*      array (*/}}
-{{/*      ),*/}}
-{{/*      'extensions' =>*/}}
-{{/*      array (*/}}
-{{/*      ),*/}}
-{{/*      'disable_update' => true,*/}}
-{{/*      'trusted_sources' =>*/}}
-{{/*      array (*/}}
-{{/*        0 => '127.0.0.0/8',*/}}
-{{/*        1 => '::1/128',*/}}
-{{/*      ),*/}}
-{{/*    );*/}}
-{{/*  config-user.custom.php: |-*/}}
-{{/*    <?php*/}}
-{{/*    return array (*/}}
-{{/*      'enabled' => true,*/}}
-{{/*      'is_admin' => true,*/}}
-{{/*      'language' => 'en',*/}}
-{{/*      'timezone' => '',*/}}
-{{/*      'archiving' =>*/}}
-{{/*      array (*/}}
-{{/*        'keep_period' => 'P3M',*/}}
-{{/*        'keep_max' => 200,*/}}
-{{/*        'keep_min' => 50,*/}}
-{{/*        'keep_favourites' => true,*/}}
-{{/*        'keep_labels' => true,*/}}
-{{/*        'keep_unreads' => false,*/}}
-{{/*      ),*/}}
-{{/*      'ttl_default' => 3600,*/}}
-{{/*      'dynamic_opml_ttl_default' => 43200,*/}}
-{{/*      'mail_login' => '{{ .Values.olaresEnv.ADMIN_EMAIL }}',*/}}
-{{/*      'email_validation_token' => '',*/}}
-{{/*      'token' => '',*/}}
-{{/*      'passwordHash' => '{{ .Values.olaresEnv.ADMIN_PASSWORD }}',*/}}
-{{/*      'apiPasswordHash' => '{{ .Values.olaresEnv.ADMIN_API_PASSWORD }}',*/}}
-{{/*      'feverKey' => '',*/}}
-{{/*      'posts_per_page' => 20,*/}}
-{{/*      'since_hours_posts_per_rss' => 168,*/}}
-{{/*      'max_posts_per_rss' => 400,*/}}
-{{/*      'view_mode' => 'normal',*/}}
-{{/*      'default_view' => 'adaptive',*/}}
-{{/*      'default_state' => 2,*/}}
-{{/*      'show_fav_unread' => false,*/}}
-{{/*      'auto_load_more' => true,*/}}
-{{/*      'display_posts' => false,*/}}
-{{/*      'display_categories' => 'active',*/}}
-{{/*      'show_tags' => 'f',*/}}
-{{/*      'show_tags_max' => 7,*/}}
-{{/*      'show_author_date' => 'h',*/}}
-{{/*      'show_feed_name' => 'a',*/}}
-{{/*      'show_article_icons' => 't',*/}}
-{{/*      'hide_read_feeds' => true,*/}}
-{{/*      'onread_jump_next' => true,*/}}
-{{/*      'lazyload' => true,*/}}
-{{/*      'sides_close_article' => false,*/}}
-{{/*      'sticky_post' => true,*/}}
-{{/*      'reading_confirm' => false,*/}}
-{{/*      'auto_remove_article' => false,*/}}
-{{/*      'mark_updated_article_unread' => false,*/}}
-{{/*      'sort' => 'id',*/}}
-{{/*      'mark_read_button' => 'big',*/}}
-{{/*      'sort_order' => 'DESC',*/}}
-{{/*      'anon_access' => false,*/}}
-{{/*      'mark_when' =>*/}}
-{{/*      array (*/}}
-{{/*        'article' => true,*/}}
-{{/*        'gone' => false,*/}}
-{{/*        'max_n_unread' => false,*/}}
-{{/*        'reception' => false,*/}}
-{{/*        'same_title_in_feed' => false,*/}}
-{{/*        'scroll' => false,*/}}
-{{/*        'focus' => false,*/}}
-{{/*        'site' => true,*/}}
-{{/*      ),*/}}
-{{/*      'filters' =>*/}}
-{{/*      array (*/}}
-{{/*      ),*/}}
-{{/*      'theme' => 'Origine',*/}}
-{{/*      'darkMode' => 'auto',*/}}
-{{/*      'content_width' => 'thin',*/}}
-{{/*      'shortcuts' =>*/}}
-{{/*      array (*/}}
-{{/*        'actualize' => 'q',*/}}
-{{/*        'mark_read' => 'r',*/}}
-{{/*        'mark_favorite' => 'f',*/}}
-{{/*        'go_website' => 'space',*/}}
-{{/*        'next_entry' => 'j',*/}}
-{{/*        'next_unread_entry' => 'h',*/}}
-{{/*        'prev_entry' => 'k',*/}}
-{{/*        'skip_next_entry' => 'n',*/}}
-{{/*        'skip_prev_entry' => 'p',*/}}
-{{/*        'first_entry' => 'home',*/}}
-{{/*        'last_entry' => 'end',*/}}
-{{/*        'collapse_entry' => 'c',*/}}
-{{/*        'load_more' => 'm',*/}}
-{{/*        'mylabels' => 'l',*/}}
-{{/*        'auto_share' => 's',*/}}
-{{/*        'focus_search' => 'a',*/}}
-{{/*        'user_filter' => 'u',*/}}
-{{/*        'help' => 'f1',*/}}
-{{/*        'close_menus' => 'escape',*/}}
-{{/*        'normal_view' => '1',*/}}
-{{/*        'global_view' => '2',*/}}
-{{/*        'reading_view' => '3',*/}}
-{{/*        'toggle_media' => 'v',*/}}
-{{/*        'toggle_aside' => 't',*/}}
-{{/*      ),*/}}
-{{/*      'show_favicons' => true,*/}}
-{{/*      'icons_as_emojis' => false,*/}}
-{{/*      'simplify_over_n_feeds' => 1000,*/}}
-{{/*      'topline_read' => true,*/}}
-{{/*      'topline_favorite' => true,*/}}
-{{/*      'topline_myLabels' => false,*/}}
-{{/*      'topline_sharing' => false,*/}}
-{{/*      'topline_website' => 'full',*/}}
-{{/*      'topline_thumbnail' => 'none',*/}}
-{{/*      'topline_summary' => false,*/}}
-{{/*      'topline_display_authors' => false,*/}}
-{{/*      'topline_date' => true,*/}}
-{{/*      'topline_link' => true,*/}}
-{{/*      'bottomline_read' => true,*/}}
-{{/*      'bottomline_favorite' => true,*/}}
-{{/*      'bottomline_sharing' => true,*/}}
-{{/*      'bottomline_tags' => true,*/}}
-{{/*      'bottomline_myLabels' => true,*/}}
-{{/*      'bottomline_date' => true,*/}}
-{{/*      'bottomline_link' => true,*/}}
-{{/*      'sharing' =>*/}}
-{{/*      array (*/}}
-{{/*      ),*/}}
-{{/*      'queries' =>*/}}
-{{/*      array (*/}}
-{{/*      ),*/}}
-{{/*      'html5_notif_timeout' => 0,*/}}
-{{/*      'good_notification_timeout' => 3,*/}}
-{{/*      'bad_notification_timeout' => 8,*/}}
-{{/*      'show_nav_buttons' => true,*/}}
-{{/*      'extensions_enabled' =>*/}}
-{{/*      array (*/}}
-{{/*      ),*/}}
-{{/*      'retrieve_extension_list' => true,*/}}
-{{/*      'extensions' =>*/}}
-{{/*      array (*/}}
-{{/*      ),*/}}
-{{/*    );*/}}

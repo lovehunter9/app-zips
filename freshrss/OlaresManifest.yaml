@@ -31,9 +31,9 @@ spec:
   locale:
   - en-US
   - zh-CN
-  requiredMemory: 256Mi
+  requiredMemory: 128Mi
   limitedMemory: 1Gi
-  requiredDisk: 256Mi
+  requiredDisk: 128Mi
   limitedDisk: 1Gi
   requiredCpu: 0.2
   limitedCpu: 1

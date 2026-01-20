@@ -5,15 +5,9 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="e9836655-cb5c-456b-aef7-0ca255338318" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/freshrss/.helmignore" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/freshrss/Chart.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/freshrss/OlaresManifest.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/freshrss/i18n/en-US/OlaresManifest.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/freshrss/i18n/zh-CN/OlaresManifest.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/freshrss/owners" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/freshrss/templates/freshrss.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/freshrss/values.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/freshrss/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/freshrss/OlaresManifest.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/freshrss/templates/freshrss.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/freshrss/templates/freshrss.yaml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -418,7 +412,7 @@
       <workItem from="1768448244920" duration="594000" />
       <workItem from="1768534041173" duration="597000" />
       <workItem from="1768793441428" duration="6527000" />
-      <workItem from="1768881201986" duration="5863000" />
+      <workItem from="1768881201986" duration="6464000" />
     </task>
     <servers />
   </component>
