@@ -26,11 +26,15 @@ spec:
           image: docker.io/beclab/freshrss-freshrss:1.28.0
           env:
              - name: TZ
-               value: Europe/Paris
+               value: UTC # Europe/Paris
              - name: CRON_MIN
-               value: "3,33"
+               value: "2,32"
+             - name: FRESHRSS_ENV
+               value: production
              - name: TRUSTED_PROXY
                value: 172.16.0.1/12 192.168.0.1/16
+             - name: ADMIN_NAME
+               value: {{ .Values.olaresEnv.ADMIN_NAME }}
              - name: ADMIN_EMAIL
                value: {{ .Values.olaresEnv.ADMIN_EMAIL }}
              - name: ADMIN_PASSWORD
@@ -52,21 +56,22 @@ spec:
              - name: FRESHRSS_INSTALL
                value: |-
                  --api-enabled
-                 --base-url 'https://{{ $freshrssDomain }}'
-                 --db-base {{ .Values.postgres.databases.freshrssdb }}
-                 --db-host {{ .Values.postgres.host }}
-                 --db-password {{ .Values.postgres.password }}
-                 --db-type pgsql
-                 --db-user {{ .Values.postgres.username }}
-                 --default-user {{ .Values.olaresEnv.ADMIN_NAME }}
-                 --language en
+                 --base-url=https://{{ $freshrssDomain }}
+                 --db-base={{ .Values.postgres.databases.freshrssdb }}
+                 --db-host={{ .Values.postgres.host }}
+                 --db-password={{ .Values.postgres.password }}
+                 --db-type=pgsql
+                 --db-user={{ .Values.postgres.username }}
+                 --db-prefix={{ .Values.olaresEnv.DB_PREFIX }}
+                 --default-user={{ .Values.olaresEnv.ADMIN_NAME }}
+                 --language=en
              - name: FRESHRSS_USER
                value: |-
-                 --api-password {{ .Values.olaresEnv.ADMIN_API_PASSWORD }}
-                 --email {{ .Values.olaresEnv.ADMIN_EMAIL }}
-                 --language en
-                 --password {{ .Values.olaresEnv.ADMIN_PASSWORD }}
-                 --user {{ .Values.olaresEnv.ADMIN_NAME }}
+                 --api-password={{ .Values.olaresEnv.ADMIN_API_PASSWORD }}
+                 --email={{ .Values.olaresEnv.ADMIN_EMAIL }}
+                 --language=en
+                 --password={{ .Values.olaresEnv.ADMIN_PASSWORD }}
+                 --user={{ .Values.olaresEnv.ADMIN_NAME }}
           livenessProbe:
             exec:
               command:

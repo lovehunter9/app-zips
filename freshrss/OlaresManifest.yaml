@@ -81,3 +81,7 @@ envs:
     editable: false
     description: "Password must be at least 7 characters long"
     regex: '^[\w\-!@#$%^&*()+={}\[\]:,.?~]{7,}$'
+  - envName: DB_PREFIX
+    type: string
+    required: true
+    editable: false
