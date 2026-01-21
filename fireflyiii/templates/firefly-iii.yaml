@@ -1,0 +1,151 @@
+﻿{{- $fireflyiiiDomainENV := split  ","  .Values.domain.fireflyiii -}}
+{{- $fireflyiiiDomain := index $fireflyiiiDomainENV "_0" -}}
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fireflyiii
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: fireflyiii
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: fireflyiii
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: fireflyiii
+    spec:
+      containers:
+        - name: fireflyiii
+          image: docker.io/beclab/fireflyiii-core:version-6.4.16
+          envFrom:
+            - configMapRef:
+                name: fireflyiii-config
+            - secretRef:
+                name: fireflyiii-secrets
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: 2000m
+              memory: 2Gi
+          ports:
+            - containerPort: 8080
+              name: http
+          volumeMounts:
+            - name: fireflyiii-data
+              mountPath: /var/www/html/storage/upload
+              subPath: upload
+      restartPolicy: Always
+      volumes:
+        - name: fireflyiii-data
+          hostPath:
+            type: DirectoryOrCreate
+                {{- if .Values.sysVersion }}
+                  {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: '{{ .Values.userspace.appCache }}'
+                  {{- else }}
+            path: '{{ .Values.userspace.appCache }}/fireflyiii'
+                  {{- end }}
+                {{- else }}
+            path: '{{ .Values.userspace.appCache }}/fireflyiii'
+                {{- end }}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fireflyiii
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: fireflyiii
+spec:
+  ports:
+    - name: "80"
+      protocol: TCP
+      port: 80
+      targetPort: 8080
+  selector:
+    io.kompose.service: fireflyiii
+status:
+  loadBalancer: {}
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fireflyiii-config
+  namespace: {{ .Release.Namespace }}
+data:
+  APP_ENV: "production"
+  APP_DEBUG: "false"
+  SITE_OWNER: "mail@example.com"
+  DEFAULT_LANGUAGE: "en_US"
+  DEFAULT_LOCALE: "equal"
+  TZ: "Europe/Amsterdam"
+  TRUSTED_PROXIES: "**"
+  LOG_CHANNEL: "stack"
+  APP_LOG_LEVEL: "notice"
+  AUDIT_LOG_LEVEL: "emergency"
+  DB_CONNECTION: "pgsql"
+  DB_HOST: "{{ .Values.postgres.host }}"
+  DB_PORT: "{{ .Values.postgres.port }}"
+  DB_DATABASE: "{{ .Values.postgres.databases.fireflyiiidb }}"
+  DB_USERNAME: "{{ .Values.postgres.username }}"
+  DB_PASSWORD: "{{ .Values.postgres.password }}"
+  MAP_DEFAULT_LAT: "51.983333"
+  MAP_DEFAULT_LONG: "5.916667"
+  MAP_DEFAULT_ZOOM: "6"
+  AUTHENTICATION_GUARD: "web"
+  APP_URL: "https://{{ $fireflyiiiDomain }}"
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: fireflyiii-secrets
+  namespace: {{ .Release.Namespace }}
+type: Opaque
+data:
+  APP_KEY: "MDcwRkVCMTI1NzA4RURFMkREMTVGODRCQ0U4NDJFQkY="
+  STATIC_CRON_TOKEN: "NENGRDZCRjY0MENGRkM5RkU3RTBBNTZDQjg2MzI4QkU="
+
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: fireflyiii-cron
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: fireflyiii-cron
+spec:
+  schedule: "0 3 * * *"  # 每天凌晨3点执行
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: fireflyiii-cron
+        spec:
+          containers:
+            - name: cron
+              image: alpine
+              command: [
+                "sh",
+                "-c",
+                "wget -qO- http://fireflyiii:80/api/v1/cron/$STATIC_CRON_TOKEN"
+              ]
+              env:
+                - name: STATIC_CRON_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: fireflyiii-secrets
+                      key: STATIC_CRON_TOKEN
+          restartPolicy: OnFailure

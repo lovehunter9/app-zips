@@ -1,0 +1,92 @@
+olaresManifest.version: '0.10.0'
+metadata:
+  name: fireflyiii
+  description: Firefly III is a (self-hosted) manager for your personal finances.
+  icon: https://app.cdn.olares.com/appstore/default/defaulticon.webp
+  appid: fireflyiii
+  version: '1.0.0'
+  title: Firefly III
+  categories:
+  - Productivity_v112
+  - Utilities
+permission:
+  appData: true
+  appCache: true
+  userData:
+  - Home
+spec:
+  versionName: '6.4.16'
+  fullDescription: |
+    Firefly III is a (self-hosted) manager for your personal finances.
+    It can help you keep track of your expenses and income, so you can spend less and save more.
+    Firefly III supports the use of budgets, categories and tags.
+    Using a bunch of external tools, you can import data. It also has many neat financial reports available.
+    
+    Firefly III should give you insight into and control over your finances. Money should be useful, not scary.
+    You should be able to see where it is going, to feel your expenses and to... wow, I'm going overboard with this aren't I?
+    
+    But you get the idea: this is your money. These are your expenses. Stop them from controlling you. 
+    I built this tool because I started to dislike money. 
+    Having money, not having money, paying bills with money, you get the idea. But no more.
+    I want to feel "safe", whatever my balance is.
+    And I hope this tool can help you. I know it helps me.
+  developer: James Cole
+  website: https://firefly-iii.org/
+  submitter: Olares
+  locale:
+  - en-US
+  - zh-CN
+  requiredMemory: 512Mi
+  limitedMemory: 2Gi
+  requiredDisk: 512Mi
+  limitedDisk: 2Gi
+  requiredCpu: 0.5
+  limitedCpu: 2
+  doc: https://docs.firefly-iii.org/
+  supportArch:
+  - amd64
+  - arm64
+options:
+  dependencies:
+  - name: olares
+    type: system
+    version: '>=1.12.3-0'
+entrances:
+- name: fireflyiii
+  port: 80
+  host: fireflyiii
+  title: fireflyiii
+  icon: https://app.cdn.olares.com/appstore/default/defaulticon.webp
+  openMethod: window
+olaresManifest.type: app
+middleware:
+  postgres:
+    username: fireflyiii
+    databases:
+      - name: fireflyiiidb
+        distributed: false
+#envs:
+#  - envName: ADMIN_EMAIL
+#    type: email
+#    required: true
+#    editable: false
+#  - envName: ADMIN_NAME
+#    type: string
+#    required: true
+#    editable: false
+#  - envName: ADMIN_PASSWORD
+#    type: password
+#    required: true
+#    editable: false
+#    description: "Password must be at least 7 characters long"
+#    regex: '^[\w\-!@#$%^&*()+={}\[\]:,.?~]{7,}$'
+#  - envName: ADMIN_API_PASSWORD
+#    type: password
+#    required: true
+#    editable: false
+#    description: "Password must be at least 7 characters long"
+#    regex: '^[\w\-!@#$%^&*()+={}\[\]:,.?~]{7,}$'
+#  - envName: DB_PREFIX
+#    type: string
+#    required: true
+#    editable: false

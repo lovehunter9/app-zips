@@ -5,9 +5,15 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="e9836655-cb5c-456b-aef7-0ca255338318" name="Changes" comment="">
+      <change afterPath="$PROJECT_DIR$/fireflyiii/.helmignore" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/fireflyiii/Chart.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/fireflyiii/OlaresManifest.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/fireflyiii/i18n/en-US/OlaresManifest.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/fireflyiii/i18n/zh-CN/OlaresManifest.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/fireflyiii/owners" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/fireflyiii/templates/firefly-iii.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/fireflyiii/values.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/freshrss/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/freshrss/OlaresManifest.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/freshrss/templates/freshrss.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/freshrss/templates/freshrss.yaml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -61,6 +67,7 @@
       <recent name="$PROJECT_DIR$/olares" />
     </key>
     <key name="MoveFile.RECENT_KEYS">
+      <recent name="$PROJECT_DIR$" />
       <recent name="$PROJECT_DIR$/teminus" />
     </key>
   </component>
@@ -413,6 +420,7 @@
       <workItem from="1768534041173" duration="597000" />
       <workItem from="1768793441428" duration="6527000" />
       <workItem from="1768881201986" duration="7793000" />
+      <workItem from="1768966291930" duration="2996000" />
     </task>
     <servers />
   </component>
