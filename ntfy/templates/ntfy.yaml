@@ -1,8 +1,4 @@
-﻿{{- $ntfyDomainENV := split  ","  .Values.domain.ntfy -}}
-{{- $ntfyDomain := index $ntfyDomainENV "_0" -}}
-
----
-apiVersion: apps/v1
+﻿apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: ntfy
@@ -23,15 +19,36 @@ spec:
     spec:
       containers:
         - name: ntfy
-          image: docker.io/beclab/binwiederhier-ntfy:v2.15.0
+          image: docker.io/beclab/binwiederhier-ntfy:v2.16.0
           args: [ "serve" ]
+          envFrom:
+            - configMapRef:
+                name: ntfy-env
+          readinessProbe:
+            httpGet:
+              path: /
+              port: {{ .Values.port | default 3000 }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: {{ .Values.port | default 3000 }}
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 5
           resources:
-            requests:
-              cpu: 500m
-              memory: 128Mi
             limits:
-              cpu: 1000m
+              cpu: 900m
               memory: 1Gi
+            requests:
+              cpu: 400m
+              memory: 128Mi
           ports:
             - containerPort: 80
               name: http
@@ -69,26 +86,11 @@ metadata:
     io.kompose.service: ntfy
 spec:
   ports:
-    - name: "80"
+    - name: "{{ .Values.port | default 3000 }}"
+      port: {{ .Values.port | default 3000 }}
+      targetPort: {{ .Values.port | default 3000 }}
       protocol: TCP
-      port: 80
-      targetPort: 80
   selector:
     io.kompose.service: ntfy
 status:
   loadBalancer: {}
-
----
-kind: ConfigMap
-apiVersion: v1
-metadata:
-  name: ntfy-config
-  namespace: {{ .Release.Namespace }}
-  labels:
-    io.kompose.service: ntfy
-data:
-  server.yml: |
-    # Template: https://github.com/binwiederhier/ntfy/blob/main/server/server.yml
-    base-url: 'https://{{ $ntfyDomain }}'
-    cache-file: "/var/cache/ntfy/cache.db"
-    attachment-cache-dir: "/var/cache/ntfy/attachments"
