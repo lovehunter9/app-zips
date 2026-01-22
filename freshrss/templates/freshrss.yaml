@@ -24,69 +24,34 @@ spec:
       containers:
         - name: freshrss
           image: docker.io/beclab/freshrss-freshrss:1.28.0
-          env:
-             - name: TZ
-               value: UTC # Europe/Paris
-             - name: CRON_MIN
-               value: "2,32"
-             - name: FRESHRSS_ENV
-               value: production
-             - name: TRUSTED_PROXY
-               value: 172.16.0.1/12 192.168.0.1/16
-             - name: ADMIN_NAME
-               value: {{ .Values.olaresEnv.ADMIN_NAME }}
-             - name: ADMIN_EMAIL
-               value: {{ .Values.olaresEnv.ADMIN_EMAIL }}
-             - name: ADMIN_PASSWORD
-               value: {{ .Values.olaresEnv.ADMIN_PASSWORD }}
-             - name: ADMIN_API_PASSWORD
-               value: {{ .Values.olaresEnv.ADMIN_API_PASSWORD }}
-             - name: BASE_URL
-               value: 'https://{{ $freshrssDomain }}'
-             - name: SERVER_DNS
-               value: {{ $freshrssDomain }}
-             - name: DB_HOST
-               value: {{ .Values.postgres.host }}
-             - name: DB_BASE
-               value: {{ .Values.postgres.databases.freshrssdb }}
-             - name: DB_USER
-               value: {{ .Values.postgres.username }}
-             - name: DB_PASSWORD
-               value: {{ .Values.postgres.password }}
-             - name: FRESHRSS_INSTALL
-               value: |-
-                 --api-enabled
-                 --base-url=https://{{ $freshrssDomain }}
-                 --db-base={{ .Values.postgres.databases.freshrssdb }}
-                 --db-host={{ .Values.postgres.host }}
-                 --db-password={{ .Values.postgres.password }}
-                 --db-type=pgsql
-                 --db-user={{ .Values.postgres.username }}
-                 --db-prefix={{ .Values.olaresEnv.DB_PREFIX }}
-                 --default-user={{ .Values.olaresEnv.ADMIN_NAME }}
-                 --language=en
-             - name: FRESHRSS_USER
-               value: |-
-                 --api-password={{ .Values.olaresEnv.ADMIN_API_PASSWORD }}
-                 --email={{ .Values.olaresEnv.ADMIN_EMAIL }}
-                 --language=en
-                 --password={{ .Values.olaresEnv.ADMIN_PASSWORD }}
-                 --user={{ .Values.olaresEnv.ADMIN_NAME }}
+          envFrom:
+            - configMapRef:
+                name: freshrss-env
+          readinessProbe:
+            exec:
+              command:
+                - cli/health.php
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 10
           livenessProbe:
             exec:
               command:
                 - cli/health.php
-            failureThreshold: 3
             initialDelaySeconds: 60
             periodSeconds: 75
             timeoutSeconds: 10
+            successThreshold: 1
+            failureThreshold: 3
           resources:
+            limits:
+              cpu: 900m
+              memory: 1Gi
             requests:
               cpu: 100m
               memory: 128Mi
-            limits:
-              cpu: 1000m
-              memory: 1Gi
           ports:
             - containerPort: 80
               name: http
@@ -97,6 +62,9 @@ spec:
             - name: freshrss-data
               mountPath: /var/www/FreshRSS/extensions
               subPath: extensions
+            - name: freshrss-config
+              mountPath: /var/www/FreshRSS/data/config.custom.php
+              subPath: config.custom.php
       restartPolicy: Always
       volumes:
         - name: freshrss-data
@@ -111,7 +79,13 @@ spec:
                 {{- else }}
             path: '{{ .Values.userspace.appCache }}/freshrss'
                 {{- end }}
-
+        - name: freshrss-config
+          configMap:
+            name: freshrss-config
+            items:
+              - key: config.custom.php
+                path: config.custom.php
+            defaultMode: 420
 ---
 apiVersion: v1
 kind: Service
@@ -122,10 +96,28 @@ metadata:
     io.kompose.service: freshrss
 spec:
   ports:
-    - name: "80"
+    - name: "{{ .Values.port | default 3000 }}"
+      port: {{ .Values.port | default 3000 }}
+      targetPort: {{ .Values.port | default 3000 }}
       protocol: TCP
+  selector:
+    io.kompose.service: freshrss
+status:
+  loadBalancer: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sharedentrances-freshrss
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: freshrss
+spec:
+  ports:
+    - name: "{{ .Values.port | default 3000 }}"
       port: 80
-      targetPort: 80
+      targetPort: {{ .Values.port | default 3000 }}
   selector:
     io.kompose.service: freshrss
 status:
