@@ -25,11 +25,11 @@ spec:
   locale:
   - en-US
   - zh-CN
-  requiredMemory: 256Mi
+  requiredMemory: 512Mi
   limitedMemory: 2Gi
   requiredDisk: 256Mi
   limitedDisk: 5Gi
-  requiredCpu: 0.5
+  requiredCpu: 0.6
   limitedCpu: 2
   doc: https://github.com/alexta69/metube
   supportArch:
@@ -39,12 +39,13 @@ options:
   dependencies:
   - name: olares
     type: system
-    version: '>=1.10.1-0'
+    version: '>=1.12.3-0'
 entrances:
-- name: metube
-  port: 8081
-  host: metube
-  title: metube
-  icon: https://app.cdn.olares.com/appstore/default/defaulticon.webp
-  openMethod: window
+  - authLevel: internal
+    host: metubeingress
+    icon: https://app.cdn.olares.com/appstore/bluesky/icon.png
+    name: metube
+    openMethod: window
+    port: 8080
+    title: Metube
 olaresManifest.type: app

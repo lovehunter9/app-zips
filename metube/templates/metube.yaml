@@ -20,9 +20,27 @@ spec:
       containers:
         - name: metube
           image: docker.io/beclab/alexta69-metube:2026.01.11
-          env:
-            - name: YTDL_OPTIONS
-              value: '{"cookiefile":"/cookies/cookies.txt"}'
+          envFrom:
+            - configMapRef:
+                name: metube-env
+          readinessProbe:
+            httpGet:
+              path: /
+              port: {{ .Values.port | default 3000 }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: {{ .Values.port | default 3000 }}
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 5
           resources:
             requests:
               cpu: 500m
@@ -75,22 +93,11 @@ metadata:
     io.kompose.service: metube
 spec:
   ports:
-    - name: "8081"
+    - name: "{{ .Values.port | default 3000 }}"
+      port: {{ .Values.port | default 3000 }}
+      targetPort: {{ .Values.port | default 3000 }}
       protocol: TCP
-      port: 8081
-      targetPort: 8081
   selector:
     io.kompose.service: metube
 status:
   loadBalancer: {}
-
----
-kind: ConfigMap
-apiVersion: v1
-metadata:
-  name: metube-config
-  namespace: {{ .Release.Namespace }}
-  labels:
-    io.kompose.service: metube
-data:
-  cookies.txt: ""
