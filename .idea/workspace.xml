@@ -5,12 +5,12 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="e9836655-cb5c-456b-aef7-0ca255338318" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/freshrss/templates/configmap.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/freshrss/templates/ingress.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/fireflyiii/templates/configmap.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/fireflyiii/templates/ingress.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/freshrss/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/freshrss/OlaresManifest.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/freshrss/templates/freshrss.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/freshrss/templates/freshrss.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/freshrss/values.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/freshrss/values.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/fireflyiii/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/fireflyiii/OlaresManifest.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/fireflyiii/templates/firefly-iii.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/fireflyiii/templates/firefly-iii.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/fireflyiii/values.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/fireflyiii/values.yaml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -49,7 +49,7 @@
     &quot;SHARE_PROJECT_CONFIGURATION_FILES&quot;: &quot;true&quot;,
     &quot;git-widget-placeholder&quot;: &quot;apps&quot;,
     &quot;go.sdk.automatically.set&quot;: &quot;true&quot;,
-    &quot;last_opened_file_path&quot;: &quot;/Users/wangrongxiang/beclab/app-zips/freshrss/templates&quot;,
+    &quot;last_opened_file_path&quot;: &quot;/Users/wangrongxiang/beclab/app-zips/fireflyiii/templates&quot;,
     &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
     &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,
     &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
@@ -60,11 +60,11 @@
 }</component>
   <component name="RecentsManager">
     <key name="CopyFile.RECENT_KEYS">
+      <recent name="$PROJECT_DIR$/fireflyiii/templates" />
       <recent name="$PROJECT_DIR$/freshrss/templates" />
       <recent name="$PROJECT_DIR$/ntfy/templates" />
       <recent name="$PROJECT_DIR$/metube/templates" />
       <recent name="$PROJECT_DIR$" />
-      <recent name="$PROJECT_DIR$/olares" />
     </key>
     <key name="MoveFile.RECENT_KEYS">
       <recent name="$PROJECT_DIR$" />
@@ -421,7 +421,7 @@
       <workItem from="1768793441428" duration="6527000" />
       <workItem from="1768881201986" duration="7793000" />
       <workItem from="1768966291930" duration="3784000" />
-      <workItem from="1769052647931" duration="4651000" />
+      <workItem from="1769052647931" duration="5850000" />
     </task>
     <servers />
   </component>

@@ -26,16 +26,34 @@ spec:
           image: docker.io/beclab/fireflyiii-core:version-6.4.16
           envFrom:
             - configMapRef:
-                name: fireflyiii-config
+                name: fireflyiii-env
             - secretRef:
                 name: fireflyiii-secrets
+          readinessProbe:
+            httpGet:
+              path: /
+              port: {{ .Values.port | default 3000 }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: {{ .Values.port | default 3000 }}
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 5
           resources:
+            limits:
+              cpu: 1900m
+              memory: 1.75Gi
             requests:
               cpu: 500m
               memory: 512Mi
-            limits:
-              cpu: 2000m
-              memory: 2Gi
           ports:
             - containerPort: 8080
               name: http
@@ -68,54 +86,14 @@ metadata:
     io.kompose.service: fireflyiii
 spec:
   ports:
-    - name: "80"
+    - name: "{{ .Values.port | default 3000 }}"
+      port: {{ .Values.port | default 3000 }}
+      targetPort: {{ .Values.port | default 3000 }}
       protocol: TCP
-      port: 80
-      targetPort: 8080
   selector:
     io.kompose.service: fireflyiii
 status:
   loadBalancer: {}
-
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: fireflyiii-config
-  namespace: {{ .Release.Namespace }}
-data:
-  APP_ENV: "production"
-  APP_DEBUG: "false"
-  SITE_OWNER: "mail@example.com"
-  DEFAULT_LANGUAGE: "en_US"
-  DEFAULT_LOCALE: "equal"
-  TZ: "Europe/Amsterdam"
-  TRUSTED_PROXIES: "**"
-  LOG_CHANNEL: "stack"
-  APP_LOG_LEVEL: "notice"
-  AUDIT_LOG_LEVEL: "emergency"
-  DB_CONNECTION: "pgsql"
-  DB_HOST: "{{ .Values.postgres.host }}"
-  DB_PORT: "{{ .Values.postgres.port }}"
-  DB_DATABASE: "{{ .Values.postgres.databases.fireflyiiidb }}"
-  DB_USERNAME: "{{ .Values.postgres.username }}"
-  DB_PASSWORD: "{{ .Values.postgres.password }}"
-  MAP_DEFAULT_LAT: "51.983333"
-  MAP_DEFAULT_LONG: "5.916667"
-  MAP_DEFAULT_ZOOM: "6"
-  AUTHENTICATION_GUARD: "web"
-  APP_URL: "https://{{ $fireflyiiiDomain }}"
-
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: fireflyiii-secrets
-  namespace: {{ .Release.Namespace }}
-type: Opaque
-data:
-  APP_KEY: "MDcwRkVCMTI1NzA4RURFMkREMTVGODRCQ0U4NDJFQkY="
-  STATIC_CRON_TOKEN: "NENGRDZCRjY0MENGRkM5RkU3RTBBNTZDQjg2MzI4QkU="
 
 ---
 apiVersion: batch/v1
@@ -126,7 +104,7 @@ metadata:
   labels:
     app: fireflyiii-cron
 spec:
-  schedule: "0 3 * * *"  # 每天凌晨3点执行
+  schedule: "0 3 * * *"
   jobTemplate:
     spec:
       template:
@@ -140,7 +118,7 @@ spec:
               command: [
                 "sh",
                 "-c",
-                "wget -qO- http://fireflyiii:80/api/v1/cron/$STATIC_CRON_TOKEN"
+                "wget -qO- http://fireflyiii:8080/api/v1/cron/$STATIC_CRON_TOKEN"
               ]
               env:
                 - name: STATIC_CRON_TOKEN
