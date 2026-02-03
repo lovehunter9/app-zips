@@ -1,0 +1,225 @@
+﻿{{- $solidtimeDomainENV := split  ","  .Values.domain.solidtime -}}
+{{- $solidtimeDomain := index $solidtimeDomainENV "_0" -}}
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: solidtime
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: solidtime
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: solidtime
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: solidtime
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      initContainers:
+        - name: solidtime-init
+          image: solidtime/solidtime:0.10.0
+          command: ["sh", "-c"]
+          args:
+            - |-
+              php /var/www/html/artisan migrate --force
+              echo $ADMIN_PASSWORD | php /var/www/html/artisan admin:user:create "{{ .Values.olaresEnv.ADMIN_NAME }}" "{{ .Values.olaresEnv.ADMIN_EMAIL }}" --verify-email --ask-for-password
+          env:
+            - name: CONTAINER_MODE
+              value: scheduler
+            - name: ADMIN_PASSWORD
+              value: "{{ .Values.olaresEnv.ADMIN_PASSWORD }}"
+            - name: AUTO_DB_MIGRATE
+              value: "true"
+          envFrom:
+            - configMapRef:
+                name: solidtime-env
+          volumeMounts:
+            - name: solidtime-data
+              mountPath: /var/www/html/storage/app
+              subPath: app-storage
+            - name: solidtime-data
+              mountPath: /var/www/html/storage/logs
+              subPath: logs
+      containers:
+        - name: solidtime
+          image: solidtime/solidtime:0.10.0
+          env:
+            - name: CONTAINER_MODE
+              value: http
+            - name: AUTO_DB_MIGRATE
+              value: "true"
+          envFrom:
+            - configMapRef:
+                name: solidtime-env
+          readinessProbe:
+            httpGet:
+              path: /health-check/up
+              port: {{ .Values.port | default 3000 }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 10
+          livenessProbe:
+            httpGet:
+              path: /health-check/up
+              port: {{ .Values.port | default 3000 }}
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 5
+          resources:
+            limits:
+              cpu: 1900m
+              memory: 1.75Gi
+            requests:
+              cpu: 500m
+              memory: 512Mi
+          ports:
+            - containerPort: 8080
+              name: http
+          volumeMounts:
+            - name: solidtime-data
+              mountPath: /var/www/html/storage/app
+              subPath: app-storage
+            - name: solidtime-data
+              mountPath: /var/www/html/storage/logs
+              subPath: logs
+
+        - name: solidtime-scheduler
+          image: solidtime/solidtime:0.10.0
+          env:
+            - name: CONTAINER_MODE
+              value: scheduler
+          envFrom:
+            - configMapRef:
+                name: solidtime-env
+          volumeMounts:
+            - name: solidtime-data
+              mountPath: /var/www/html/storage/app
+              subPath: app-storage
+            - name: solidtime-data
+              mountPath: /var/www/html/storage/logs
+              subPath: logs
+          readinessProbe:
+            exec:
+              command:
+                - healthcheck
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 10
+          livenessProbe:
+            exec:
+              command:
+                - healthcheck
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 5
+
+        - name: solidtime-queue
+          image: solidtime/solidtime:0.10.0
+          env:
+            - name: CONTAINER_MODE
+              value: worker
+            - name: WORKER_COMMAND
+              value: php /var/www/html/artisan queue:work
+          envFrom:
+            - configMapRef:
+                name: solidtime-env
+          volumeMounts:
+            - name: solidtime-data
+              mountPath: /var/www/html/storage/app
+              subPath: app-storage
+            - name: solidtime-data
+              mountPath: /var/www/html/storage/logs
+              subPath: logs
+          readinessProbe:
+            exec:
+              command:
+                - healthcheck
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 10
+          livenessProbe:
+            exec:
+              command:
+                - healthcheck
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 5
+
+        - name: gotenberg
+          image: gotenberg/gotenberg:8
+          ports:
+            - containerPort: 3000
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 5
+
+      restartPolicy: Always
+      volumes:
+        - name: solidtime-data
+          hostPath:
+            type: DirectoryOrCreate
+                {{- if .Values.sysVersion }}
+                  {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: '{{ .Values.userspace.appCache }}'
+                  {{- else }}
+            path: '{{ .Values.userspace.appCache }}/solidtime'
+                  {{- end }}
+                {{- else }}
+            path: '{{ .Values.userspace.appCache }}/solidtime'
+                {{- end }}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: solidtime
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: solidtime
+spec:
+  ports:
+    - name: "{{ .Values.port | default 3000 }}"
+      port: {{ .Values.port | default 3000 }}
+      targetPort: {{ .Values.port | default 3000 }}
+      protocol: TCP
+  selector:
+    io.kompose.service: solidtime
+status:
+  loadBalancer: {}

@@ -1,0 +1,143 @@
+﻿{{/*{{- $fireflyiiiDomainENV := split  ","  .Values.domain.fireflyiii -}}*/}}
+{{/*{{- $fireflyiiiDomain := index $fireflyiiiDomainENV "_0" -}}*/}}
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rna_sequencing
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: rna_sequencing
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: rna_sequencing
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: rna_sequencing
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: nvidia.com/gpu.present
+                    operator: In
+                    values:
+                      - "true"
+      containers:
+        - name: rna_sequencing
+          image: lovehunter9/rna-sequencing:v0.0.1
+          env:
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: "all" # 或者 "0", "1" 等，取决于你想用哪个 GPU
+            - name: PARENT_DIR
+              value: "/home/rapids/notebooks/playbook"
+          readinessProbe:
+            httpGet:
+              path: /lab
+              port: {{ .Values.port | default 3000 }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 10
+          livenessProbe:
+            httpGet:
+              path: /lab
+              port: {{ .Values.port | default 3000 }}
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 5
+          resources:
+            limits:
+              cpu: 1900m
+              memory: 1.75Gi
+              nvidia.com/gpu: 1
+            requests:
+              cpu: 500m
+              memory: 512Mi
+              nvidia.com/gpu: 1
+          securityContext:
+            capabilities: { } # 默认 capabilities
+            # 设置 ulimits，对应 docker-compose 中的 ulimits
+            # memlock: -1 (unlimited), stack: 67108864 (64MB)
+            # 注意：在某些 Kubernetes 环境中，设置 ulimits 可能需要集群管理员权限
+            runAsUser: 0 # 以 root 用户运行，以确保有权限设置 ulimits 和访问设备
+            runAsGroup: 0
+          ports:
+            - containerPort: 8888 # Jupyter Notebook
+            - containerPort: 8787 # Dask Dashboard
+            - containerPort: 8786 # Dask Scheduler
+            - containerPort: 8501 # Streamlit
+            - containerPort: 8050 # Plotly Dash
+          volumeMounts:
+            - name: rna_sequencing-data
+              mountPath: /home/rapids/notebooks/playbook
+              subPath: notebook
+            - name: rna_sequencing-data # 用于 shm_size
+              mountPath: /dev/shm
+              subPath: dshm
+      restartPolicy: Always
+      volumes:
+        - name: rna_sequencing-data
+          hostPath:
+            type: DirectoryOrCreate
+                {{- if .Values.sysVersion }}
+                  {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: '{{ .Values.userspace.appCache }}'
+                  {{- else }}
+            path: '{{ .Values.userspace.appCache }}/rna_sequencing'
+                  {{- end }}
+                {{- else }}
+            path: '{{ .Values.userspace.appCache }}/rna_sequencing'
+                {{- end }}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rna_sequencing
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: rna_sequencing
+spec:
+  ports:
+    - name: "{{ .Values.port | default 3000 }}"
+      port: {{ .Values.port | default 3000 }}
+      targetPort: {{ .Values.port | default 3000 }}
+      protocol: TCP
+    - name: dask-dashboard
+      protocol: TCP
+      port: 8787
+      targetPort: 8787
+      # nodePort: 30087 # 如果需要外部访问，可以取消注释并分配端口
+
+    - name: dask-scheduler
+      protocol: TCP
+      port: 8786
+      targetPort: 8786
+      # nodePort: 30086
+
+    - name: streamlit
+      protocol: TCP
+      port: 8501
+      targetPort: 8501
+      # nodePort: 30085
+
+    - name: plotly-dash
+      protocol: TCP
+      port: 8050
+      targetPort: 8050
+      # nodePort: 30080
+  selector:
+    io.kompose.service: rna_sequencing
+status:
+  loadBalancer: {}
