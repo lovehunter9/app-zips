@@ -1,11 +1,11 @@
 olaresManifest.version: '0.10.0'
 metadata:
-  name: isaaclab
+  name: rapidssinglecell
   description: Unified framework for robot learning built on NVIDIA Isaac Sim
   icon: https://app.cdn.olares.com/appstore/default/defaulticon.webp
-  appid: isaaclab
-  version: '1.0.0'
-  title: IsaacLab
+  appid: rapidssinglecell
+  version: '1.0.1'
+  title: rapidssinglecell
   categories:
   - Productivity_v112
   - Utilities
@@ -15,7 +15,7 @@ permission:
   userData:
   - Home
 spec:
-  versionName: '2.3.2'
+  versionName: '0.14.0'
   fullDescription: |
     Isaac Lab is a GPU-accelerated, open-source framework designed to unify and simplify robotics research workflows,
     such as reinforcement learning, imitation learning, and motion planning.
@@ -35,19 +35,19 @@ spec:
   - zh-CN
   {{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
   requiredMemory: 15Gi
-  limitedMemory: 40Gi
+  limitedMemory: 24Gi
   requiredDisk: 10Gi
   limitedDisk: 20Gi
-  requiredCpu: 8
+  requiredCpu: 7
   limitedCpu: 20
-  requiredGpu: 10Gi
+  requiredGpu: 2Gi
   limitedGpu: 24Gi
   {{- else }}
   requiredMemory: 15Gi
-  limitedMemory: 40Gi
+  limitedMemory: 24Gi
   requiredDisk: 10Gi
   limitedDisk: 20Gi
-  requiredCpu: 8
+  requiredCpu: 7
   limitedCpu: 20
   {{- end }}
   doc: https://isaac-sim.github.io/IsaacLab/main/index.html
@@ -63,8 +63,8 @@ options:
 entrances:
   - name: terminal
     port: 8080
-    host: isaaclabingress
-    title: IsaacLab Terminal
+    host: rapidssinglecellingress
+    title: Rapids Single Cell Terminal
     icon: https://app.cdn.olares.com/appstore/default/defaulticon.webp
     openMethod: window
 #  - authLevel: internal
@@ -75,15 +75,15 @@ entrances:
 #    port: 80
 #    title: IsaacLab
 #    invisible: true
-ports:
-  - name: isaaclab_udp
-    host: isaaclab
-    port: 47998
-    protocol: udp
-    exposePort: 47998
-  - name: isaaclab_tcp
-    host: isaaclab
-    port: 49100
-    protocol: tcp
-    exposePort: 49100
+#ports:
+#  - name: isaaclab_udp
+#    host: isaaclab
+#    port: 47998
+#    protocol: udp
+#    exposePort: 47998
+#  - name: isaaclab_tcp
+#    host: isaaclab
+#    port: 49100
+#    protocol: tcp
+#    exposePort: 49100
 olaresManifest.type: app

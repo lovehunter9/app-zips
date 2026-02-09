@@ -1,10 +1,10 @@
 olaresManifest.version: '0.10.0'
 metadata:
   name: rna_sequencing
-  description: Firefly III is a (self-hosted) manager for your personal finances.
+  description: rna_sequencing is a (self-hosted) manager for your personal finances.
   icon: https://app.cdn.olares.com/appstore/default/defaulticon.webp
   appid: rna_sequencing
-  version: '1.0.0'
+  version: '1.0.1'
   title: RNA Sequencing
   categories:
   - Productivity_v112
@@ -15,14 +15,14 @@ permission:
   userData:
   - Home
 spec:
-  versionName: '0.0.1'
+  versionName: '0.0.3'
   fullDescription: |
-    Firefly III is a (self-hosted) manager for your personal finances.
+    rna_sequencing is a (self-hosted) manager for your personal finances.
     It can help you keep track of your expenses and income, so you can spend less and save more.
-    Firefly III supports the use of budgets, categories and tags.
+    rna_sequencing supports the use of budgets, categories and tags.
     Using a bunch of external tools, you can import data. It also has many neat financial reports available.
     
-    Firefly III should give you insight into and control over your finances. Money should be useful, not scary.
+    rna_sequencing should give you insight into and control over your finances. Money should be useful, not scary.
     You should be able to see where it is going, to feel your expenses and to... wow, I'm going overboard with this aren't I?
     
     But you get the idea: this is your money. These are your expenses. Stop them from controlling you. 
@@ -36,12 +36,23 @@ spec:
   locale:
   - en-US
   - zh-CN
-  requiredMemory: 768Mi
-  limitedMemory: 2Gi
-  requiredDisk: 512Mi
-  limitedDisk: 2Gi
-  requiredCpu: 0.6
+  {{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
+  requiredMemory: 2Gi
+  limitedMemory: 20Gi
+  requiredDisk: 6Gi
+  limitedDisk: 15Gi
+  requiredCpu: 1
   limitedCpu: 2
+  requiredGpu: 2Gi
+  limitedGpu: 24Gi
+  {{- else }}
+  requiredMemory: 2Gi
+  limitedMemory: 20Gi
+  requiredDisk: 6Gi
+  limitedDisk: 15Gi
+  requiredCpu: 1
+  limitedCpu: 2
+  {{- end }}
   doc: https://docs.firefly-iii.org/
   supportArch:
   - amd64

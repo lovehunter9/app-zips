@@ -16,26 +16,41 @@ spec:
     type: Recreate
   template:
     metadata:
+      creationTimestamp: null
       labels:
+        io.kompose.network/chrome-default: "true"
         io.kompose.service: isaaclab
+        bytetrade.io/terminal: isaaclab
     spec:
       containers:
         - name: isaaclab
-          image: docker.io/beclab/nvidia-isaac-lab:2.3.0-amd64
-          command: [ "/bin/bash" ]  # 移除-it参数
-          args: [ "-c", "sleep infinity" ]  # 保持容器运行
+          image: docker.io/beclab/nvidia-isaac-lab:2.3.2
+          command: [ "/bin/bash" ]
+          args:
+            - "-c"
+            - "mount --bind /dev/null /etc/ld.so.preload && sleep infinity"
           env:
             - name: ACCEPT_EULA
               value: "Y"
             - name: PRIVACY_CONSENT
               value: "Y"
+            - name: PUBLIC_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
           resources:
             limits:
-              cpu: 1900m
-              memory: 64Gi
+              cpu: 20000m
+              memory: 40Gi
+              nvidia.com/gpu: 1
             requests:
-              cpu: 1000m
-              memory: 1.9Gi
+              cpu: 8000m
+              memory: 15Gi
+              nvidia.com/gpu: 1
+          securityContext:
+            privileged: true
+            capabilities:
+              add: [ "SYS_ADMIN" ]
           ports:
             - containerPort: {{ .Values.port | default 3000 }}
               protocol: TCP
@@ -68,7 +83,6 @@ spec:
             - mountPath: /root/Documents
               name: isaaclab-data
               subPath: documents
-{{/*      hostNetwork: true*/}}
       restartPolicy: Always
       volumes:
         - name: isaaclab-data

@@ -1,27 +1,27 @@
 ﻿apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: rna
+  name: rnasequencing
   namespace: {{ .Release.Namespace }}
   labels:
-    io.kompose.service: rna
+    io.kompose.service: rnasequencing
   annotations:
     applications.app.bytetrade.io/gpu-inject: "true"
 spec:
   replicas: 1
   selector:
     matchLabels:
-      io.kompose.service: rna
+      io.kompose.service: rnasequencing
   strategy:
     type: Recreate
   template:
     metadata:
       labels:
-        io.kompose.service: rna
+        io.kompose.service: rnasequencing
     spec:
       containers:
-        - name: rna
-          image: docker.io/beclab/lovehunter9-rna-sequencing:v0.0.1
+        - name: rnasequencing
+          image: docker.io/beclab/lovehunter9-rna-sequencing:v0.0.5
           env:
             - name: NVIDIA_VISIBLE_DEVICES
               value: "all" # 或者 "0", "1" 等，取决于你想用哪个 GPU
@@ -48,16 +48,16 @@ spec:
           resources:
             limits:
               cpu: 1900m
-              memory: 19.5Gi
+              memory: 40Gi
               nvidia.com/gpu: 1
             requests:
               cpu: 1000m
-              memory: 1.9Gi
+              memory: 20Gi
               nvidia.com/gpu: 1
           securityContext:
+            privileged: true
             capabilities:
-              add:
-                - SYS_ADMIN
+              add: [ "SYS_ADMIN" ]
             runAsUser: 0
             runAsGroup: 0
           ports:
@@ -67,35 +67,38 @@ spec:
             - containerPort: 8501 # Streamlit
             - containerPort: 8050 # Plotly Dash
           volumeMounts:
-            - name: rna-data
-              mountPath: /home/rapids/notebooks/playbook
-              subPath: notebook
-            - name: rna-data
+{{/*            - name: rnasequencing-data*/}}
+{{/*              mountPath: /home/rapids/notebooks/playbook*/}}
+{{/*              subPath: notebook*/}}
+            - name: rnasequencing-data
+              mountPath: /home/rapids/notebooks
+              subPath: notebooks
+            - name: rnasequencing-data
               mountPath: /dev/shm
               subPath: dshm
       restartPolicy: Always
       volumes:
-        - name: rna-data
+        - name: rnasequencing-data
           hostPath:
             type: DirectoryOrCreate
                 {{- if .Values.sysVersion }}
                   {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
             path: '{{ .Values.userspace.appCache }}'
                   {{- else }}
-            path: '{{ .Values.userspace.appCache }}/rna'
+            path: '{{ .Values.userspace.appCache }}/rnasequencing'
                   {{- end }}
                 {{- else }}
-            path: '{{ .Values.userspace.appCache }}/rna'
+            path: '{{ .Values.userspace.appCache }}/rnasequencing'
                 {{- end }}
 
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: rna
+  name: rnasequencing
   namespace: {{ .Release.Namespace }}
   labels:
-    io.kompose.service: rna
+    io.kompose.service: rnasequencing
 spec:
   ports:
     - name: "{{ .Values.port | default 3000 }}"
@@ -123,6 +126,6 @@ spec:
       port: 8050
       targetPort: 8050
   selector:
-    io.kompose.service: rna
+    io.kompose.service: rnasequencing
 status:
   loadBalancer: {}
