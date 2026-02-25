@@ -61,7 +61,7 @@ envs:
     valueFrom:
       envName: OLARES_USER_SMTP_PORT
     applyOnChange: true
-  - envName: SMTP_LOGIN
+  - envName: SMTP_USERNAME
     required: false
     valueFrom:
       envName: OLARES_USER_SMTP_USERNAME

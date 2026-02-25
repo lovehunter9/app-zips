@@ -5,39 +5,21 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="e9836655-cb5c-456b-aef7-0ca255338318" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/isaaclab/templates/ingress.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/isaaclab/templates/terminal.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/rapidssinglecell/Chart.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/rapidssinglecell/OlaresManifest.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/rapidssinglecell/i18n/en-US/OlaresManifest.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/rapidssinglecell/i18n/zh-CN/OlaresManifest.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/rapidssinglecell/templates/rapidssinglecell.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/rapidssinglecell/templates/terminal.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/rapidssinglecell/values.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/rnasequencing/.helmignore" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/rnasequencing/owners" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/rnasequencing/templates/ingress.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/llamafactory/Chart.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/llamafactory/OlaresManifest.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/llamafactory/i18n/en-US/OlaresManifest.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/llamafactory/i18n/zh-CN/OlaresManifest.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/llamafactory/owners" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/llamafactory/templates/clientproxy.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/llamafactory/templates/deployment.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/llamafactory/values.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/isaaclab/Chart.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/isaaclab/Chart.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/freshrss/Chart.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/freshrss/Chart.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/freshrss/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/freshrss/OlaresManifest.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/freshrss/templates/configmap.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/freshrss/templates/configmap.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/isaaclab/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/isaaclab/OlaresManifest.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/isaaclab/i18n/en-US/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/isaaclab/i18n/en-US/OlaresManifest.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/isaaclab/i18n/zh-CN/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/isaaclab/i18n/zh-CN/OlaresManifest.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/isaaclab/templates/isaaclab.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/isaaclab/templates/isaaclab.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/rna/.helmignore" beforeDir="false" afterPath="$PROJECT_DIR$/rapidssinglecell/.helmignore" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/rna/Chart.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/rnasequencing/Chart.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/rna/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/rnasequencing/OlaresManifest.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/rna/i18n/en-US/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/rnasequencing/i18n/en-US/OlaresManifest.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/rna/i18n/zh-CN/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/rnasequencing/i18n/zh-CN/OlaresManifest.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/rna/owners" beforeDir="false" afterPath="$PROJECT_DIR$/rapidssinglecell/owners" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/rna/templates/ingress.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/rapidssinglecell/templates/ingress.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/rna/templates/rna.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/rnasequencing/templates/rnasequencing.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/rna/values.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/rnasequencing/values.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/rna_sequencing/Chart.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/rna_sequencing/Chart.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/rna_sequencing/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/rna_sequencing/OlaresManifest.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/rna_sequencing/i18n/en-US/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/rna_sequencing/i18n/en-US/OlaresManifest.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/rna_sequencing/i18n/zh-CN/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/rna_sequencing/i18n/zh-CN/OlaresManifest.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/rna_sequencing/templates/configmap.yaml" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/rna_sequencing/templates/rna_sequencing.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/rna_sequencing/templates/rna_sequencing.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/ntfy/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/ntfy/OlaresManifest.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/ntfy/templates/configmap.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/ntfy/templates/configmap.yaml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -45,8 +27,7 @@
     <option name="LAST_RESOLUTION" value="IGNORE" />
   </component>
   <component name="EmbeddingIndexingInfo">
-    <option name="cachedIndexableFilesCount" value="723" />
-    <option name="fileBasedEmbeddingIndicesEnabled" value="true" />
+    <option name="cachedIndexableFilesCount" value="978" />
   </component>
   <component name="FileTemplateManagerImpl">
     <option name="RECENT_TEMPLATES">
@@ -84,7 +65,7 @@
     &quot;SHARE_PROJECT_CONFIGURATION_FILES&quot;: &quot;true&quot;,
     &quot;git-widget-placeholder&quot;: &quot;apps&quot;,
     &quot;go.sdk.automatically.set&quot;: &quot;true&quot;,
-    &quot;last_opened_file_path&quot;: &quot;/Users/wangrongxiang/beclab/app-zips/isaaclab/templates&quot;,
+    &quot;last_opened_file_path&quot;: &quot;/Users/wangrongxiang/beclab/app-zips&quot;,
     &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
     &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,
     &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
@@ -96,8 +77,8 @@
 }</component>
   <component name="RecentsManager">
     <key name="CopyFile.RECENT_KEYS">
-      <recent name="$PROJECT_DIR$/isaaclab/templates" />
       <recent name="$PROJECT_DIR$" />
+      <recent name="$PROJECT_DIR$/isaaclab/templates" />
       <recent name="$PROJECT_DIR$/rna-docker/dgx-spark-playbooks/nvidia/single-cell" />
       <recent name="$PROJECT_DIR$/fireflyiii/templates" />
       <recent name="$PROJECT_DIR$/freshrss/templates" />
@@ -110,8 +91,8 @@
   <component name="SharedIndexes">
     <attachedChunks>
       <set>
-        <option value="bundled-js-predefined-d6986cc7102b-c7e53b3be11b-JavaScript-PY-253.28294.336" />
-        <option value="bundled-python-sdk-0978a7220b69-9867c7d4c0a4-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-253.28294.336" />
+        <option value="bundled-gosdk-72a9cf600ed8-448e06e64ec5-org.jetbrains.plugins.go.sharedIndexes.bundled-GO-253.28294.337" />
+        <option value="bundled-js-predefined-d6986cc7102b-c7e53b3be11b-JavaScript-GO-253.28294.337" />
       </set>
     </attachedChunks>
   </component>
@@ -467,6 +448,8 @@
       <workItem from="1770262394276" duration="598000" />
       <workItem from="1770348585739" duration="598000" />
       <workItem from="1770607697684" duration="596000" />
+      <workItem from="1770694659369" duration="595000" />
+      <workItem from="1770781386394" duration="585000" />
     </task>
     <servers />
   </component>

@@ -36,8 +36,8 @@ spec:
   {{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
   requiredMemory: 15Gi
   limitedMemory: 40Gi
-  requiredDisk: 10Gi
-  limitedDisk: 20Gi
+  requiredDisk: 15Gi
+  limitedDisk: 25Gi
   requiredCpu: 8
   limitedCpu: 20
   requiredGpu: 10Gi
@@ -45,8 +45,8 @@ spec:
   {{- else }}
   requiredMemory: 15Gi
   limitedMemory: 40Gi
-  requiredDisk: 10Gi
-  limitedDisk: 20Gi
+  requiredDisk: 15Gi
+  limitedDisk: 25Gi
   requiredCpu: 8
   limitedCpu: 20
   {{- end }}
