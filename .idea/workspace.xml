@@ -9,6 +9,7 @@
       <change beforePath="$PROJECT_DIR$/solidtime/Chart.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/solidtime/Chart.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/solidtime/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/solidtime/OlaresManifest.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/solidtime/templates/configmap.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/solidtime/templates/configmap.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/solidtime/templates/ingress.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/solidtime/templates/ingress.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/solidtime/templates/solidtime.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/solidtime/templates/solidtime.yaml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />

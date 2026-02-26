@@ -59,52 +59,36 @@ spec:
           securityContext:
             runAsUser: 0
         - name: solidtime-init
-          image: solidtime/solidtime:0.11.5
+          image: docker.io/beclab/solidtime-solidtime:0.11.5
           command: ["sh", "-c"]
           args:
             - |-
               set -e
 
               echo "=== Running database migrations ==="
-
               php /var/www/html/artisan migrate --force
 
               echo "=== Creating admin user ==="
-
               echo $ADMIN_PASSWORD | php /var/www/html/artisan admin:user:create "{{ .Values.olaresEnv.ADMIN_NAME }}" "{{ .Values.olaresEnv.ADMIN_EMAIL }}" --verify-email --ask-for-password || true
 
               echo "=== Checking if keys already exist ==="
-
               KEY_FILE="/etc/app-keys/.env"
 
               if [ -f "$KEY_FILE" ]; then
-
                 echo "✓ Keys already exist in PVC, skipping generation..."
-
                 cat "$KEY_FILE"
-
               else
-
                 echo "Generating new application keys..."
-
                 php /var/www/html/artisan self-host:generate-keys > "$KEY_FILE" 2>&1 || true
 
                 if [ ! -s "$KEY_FILE" ]; then
-
                   echo "ERROR: Failed to generate keys file or file is empty!"
-
                   exit 1
-
                 fi
 
                 echo "✓ Keys generated successfully:"
-
                 cat "$KEY_FILE"
-              
               fi
-{{/*            - |-*/}}
-{{/*              php /var/www/html/artisan migrate --force*/}}
-{{/*              echo $ADMIN_PASSWORD | php /var/www/html/artisan admin:user:create "{{ .Values.olaresEnv.ADMIN_NAME }}" "{{ .Values.olaresEnv.ADMIN_EMAIL }}" --verify-email --ask-for-password || true*/}}
           env:
             - name: CONTAINER_MODE
               value: scheduler
@@ -126,7 +110,7 @@ spec:
               subPath: logs
       containers:
         - name: solidtime
-          image: solidtime/solidtime:0.11.5
+          image: docker.io/beclab/solidtime-solidtime:0.11.5
           env:
             - name: CONTAINER_MODE
               value: http
@@ -155,10 +139,10 @@ spec:
             failureThreshold: 5
           resources:
             limits:
-              cpu: 1900m
-              memory: 1.75Gi
-            requests:
               cpu: 500m
+              memory: 1Gi
+            requests:
+              cpu: 100m
               memory: 512Mi
           ports:
             - containerPort: 8000
@@ -176,18 +160,16 @@ spec:
               subPath: logs
 
         - name: solidtime-scheduler
-          image: solidtime/solidtime:0.11.5
+          image: docker.io/beclab/solidtime-solidtime:0.11.5
           command:
             - /bin/sh
             - '-c'
           args:
-            - >
+            - |-
               echo "Changing supervisor port for worker to 9002"
-
               sed -i "s/^port = 127.0.0.1:9001/port = 127.0.0.1:9002/" /etc/supervisord.conf
 
               echo "New supervisor config:"
-
               grep "port =" /etc/supervisord.conf
 
               start-container
@@ -199,6 +181,13 @@ spec:
           envFrom:
             - configMapRef:
                 name: solidtime-env
+          resources:
+            limits:
+              cpu: 500m
+              memory: 512Mi
+            requests:
+              cpu: 100m
+              memory: 256Mi
           volumeMounts:
             - name: solidtime-keys
               mountPath: /var/www/html/.env
@@ -233,18 +222,16 @@ spec:
             failureThreshold: 5
 
         - name: solidtime-queue
-          image: solidtime/solidtime:0.11.5
+          image: docker.io/beclab/solidtime-solidtime:0.11.5
           command:
             - /bin/sh
             - '-c'
           args:
-            - >
+            - |-
               echo "Changing supervisor port for worker to 9003"
-
               sed -i "s/^port = 127.0.0.1:9001/port = 127.0.0.1:9003/" /etc/supervisord.conf
 
               echo "New supervisor config:"
-
               grep "port =" /etc/supervisord.conf
 
               start-container
@@ -258,6 +245,13 @@ spec:
           envFrom:
             - configMapRef:
                 name: solidtime-env
+          resources:
+            limits:
+              cpu: 500m
+              memory: 512Mi
+            requests:
+              cpu: 100m
+              memory: 256Mi
           volumeMounts:
             - name: solidtime-keys
               mountPath: /var/www/html/.env
@@ -292,7 +286,7 @@ spec:
             failureThreshold: 5
 
         - name: gotenberg
-          image: gotenberg/gotenberg:8
+          image: docker.io/beclab/gotenberg-gotenberg:8
           ports:
             - containerPort: 3000
           readinessProbe:
@@ -313,6 +307,13 @@ spec:
             timeoutSeconds: 5
             successThreshold: 1
             failureThreshold: 5
+          resources:
+            limits:
+              cpu: 100m
+              memory: 256Mi
+            requests:
+              cpu: 10m
+              memory: 64Mi
 
       restartPolicy: Always
       volumes:
@@ -350,6 +351,24 @@ spec:
       port: {{ .Values.port | default 3000 }}
       targetPort: {{ .Values.port | default 3000 }}
       protocol: TCP
+  selector:
+    io.kompose.service: solidtime
+status:
+  loadBalancer: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sharedentrances-solidtime
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: solidtime
+spec:
+  ports:
+    - name: "{{ .Values.port | default 3000 }}"
+      port: 80
+      targetPort: {{ .Values.port | default 3000 }}
   selector:
     io.kompose.service: solidtime
 status:

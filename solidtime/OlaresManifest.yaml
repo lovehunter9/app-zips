@@ -4,7 +4,7 @@ metadata:
   description: solidtime is a modern open-source time tracking application for Freelancers and Agencies.
   icon: https://app.cdn.olares.com/appstore/default/defaulticon.webp
   appid: solidtime
-  version: '1.0.1'
+  version: '1.0.0'
   title: solidtime
   categories:
   - Productivity_v112
@@ -34,11 +34,11 @@ spec:
   locale:
   - en-US
   - zh-CN
-  requiredMemory: 768Mi
-  limitedMemory: 2Gi
-  requiredDisk: 512Mi
-  limitedDisk: 2Gi
-  requiredCpu: 0.6
+  requiredMemory: 1.5Gi
+  limitedMemory: 3Gi
+  requiredDisk: 2.5Gi
+  limitedDisk: 4Gi
+  requiredCpu: 0.5
   limitedCpu: 2
   doc: https://docs.solidtime.io/
   supportArch:
@@ -49,6 +49,14 @@ options:
   - name: olares
     type: system
     version: '>=1.12.3-0'
+sharedEntrances:
+  - name: solidtime
+    host: sharedentrances-solidtime
+    port: 0
+    title: solidtime
+    icon: https://app.cdn.olares.com/appstore/default/defaulticon.webp
+    invisible: true
+    authLevel: internal
 entrances:
   - authLevel: internal
     host: solidtimeingress

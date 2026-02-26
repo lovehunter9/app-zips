@@ -83,9 +83,18 @@ spec:
               port: 8080
             failureThreshold: 30
             periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health-check/up
+              port: 8080
+            initialDelaySeconds: 15
+            timeoutSeconds: 5
+            periodSeconds: 10
+            successThreshold: 1
+            failureThreshold: 10
           livenessProbe:
             httpGet:
-              path: /
+              path: /health-check/up
               port: 8080
             initialDelaySeconds: 30
             timeoutSeconds: 60
