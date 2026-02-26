@@ -4,7 +4,7 @@ metadata:
   description: solidtime is a modern open-source time tracking application for Freelancers and Agencies.
   icon: https://app.cdn.olares.com/appstore/default/defaulticon.webp
   appid: solidtime
-  version: '1.0.0'
+  version: '1.0.1'
   title: solidtime
   categories:
   - Productivity_v112
@@ -15,7 +15,7 @@ permission:
   userData:
   - Home
 spec:
-  versionName: '0.10.0'
+  versionName: '0.11.5'
   fullDescription: |
     solidtime is a modern open-source time tracking application for Freelancers and Agencies.
   

@@ -34,75 +34,75 @@ data:
   TRUSTED_PROXIES: "0.0.0.0/0,2000:0:0:0:0:0:0:0/3"
   APP_DOMAIN: "{{ $solidtimeDomain }}"
 
-  APP_KEY: "base64:8zlOGpEiWZ2ZRXl7NCmkb2aVz7S9y3oDzSzKnmCmyeo="
-  PASSPORT_PRIVATE_KEY: |
-    -----BEGIN PRIVATE KEY-----
-    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
-    S354Sn1/DUQ5ImtqbO7C82OIpadMdQ==
-    -----END PRIVATE KEY-----
-  PASSPORT_PUBLIC_KEY: |
-    -----BEGIN PUBLIC KEY-----
-    MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAzlwXXXrTepltRD2cUd4Z
-    tQX51M09XrgM49EYY/w+z1qS0K8bZIv5QnK+ltT4MAYBQ7Wj+6LdxEeABEchtUJP
-    o7AH4bR+7bxZMzs4U+NI0KZ8Z7btf0ClCiYkNgfSEhPHGaaw+BaPFf3rSYCyuqYR
-    QCQt6TQr11bGbOA5iwwlsnrQgI8g7U5tYrgvhLGgV7WyVZBAFJJEJ2aN5qADUz62
-    RUzBHpOs+0FYIpY8aQmm5LVqd+YzQkj0iZLvGcsqMRvuTLHkN/5bNke5CXWJk7dS
-    J3nRoIMbTTERowHbxEZETMkKM8ccKZ7Fn2B0SFPuy1dgHd0Ns/YbG5Z0JkJ7+P1A
-    pJKB2Am0EZyuPfMGKvc0UpONW2DEXFjF9+kute8uglNd1nBDyPA1FYThCAp7WbMR
-    T2eee2GpDZ08Lx70DEE3MdL3umQ4YVufeMVQPi6i9R+rM/brVWMunzdivtI3NtkN
-    OQtt/gp4Aharsf6VArWCe8kNNs7UHu162wUCzJC+H1LPlYQelRLT2xoCgDI6HwFI
-    soT31lRyLr5JJ9dS6STxk/FfQeDUrGOMB4NVR2xfhejjhjbLjmTAOU0iBUJLT+Mg
-    OG/kd8Pc+mj8P+xVYjqxI9ZFx3yldNB+PcolouqCouEYsEbuxcNStRUMH6FIxryX
-    y3o5/NgqiO/JZCjl80kXT0MCAwEAAQ==
-    -----END PUBLIC KEY-----
+{{/*  APP_KEY: "base64:8zlOGpEiWZ2ZRXl7NCmkb2aVz7S9y3oDzSzKnmCmyeo="*/}}
+{{/*  PASSPORT_PRIVATE_KEY: |*/}}
+{{/*    -----BEGIN PRIVATE KEY-----*/}}
+{{/*    MIIJQgIBADANBgkqhkiG9w0BAQEFAASCCSwwggkoAgEAAoICAQDOXBddetN6mW1E*/}}
+{{/*    PZxR3hm1BfnUzT1euAzj0Rhj/D7PWpLQrxtki/lCcr6W1PgwBgFDtaP7ot3ER4AE*/}}
+{{/*    RyG1Qk+jsAfhtH7tvFkzOzhT40jQpnxntu1/QKUKJiQ2B9ISE8cZprD4Fo8V/etJ*/}}
+{{/*    gLK6phFAJC3pNCvXVsZs4DmLDCWyetCAjyDtTm1iuC+EsaBXtbJVkEAUkkQnZo3m*/}}
+{{/*    oANTPrZFTMEek6z7QVgiljxpCabktWp35jNCSPSJku8ZyyoxG+5MseQ3/ls2R7kJ*/}}
+{{/*    dYmTt1InedGggxtNMRGjAdvERkRMyQozxxwpnsWfYHRIU+7LV2Ad3Q2z9hsblnQm*/}}
+{{/*    Qnv4/UCkkoHYCbQRnK498wYq9zRSk41bYMRcWMX36S617y6CU13WcEPI8DUVhOEI*/}}
+{{/*    CntZsxFPZ557YakNnTwvHvQMQTcx0ve6ZDhhW594xVA+LqL1H6sz9utVYy6fN2K+*/}}
+{{/*    0jc22Q05C23+CngCFqux/pUCtYJ7yQ02ztQe7XrbBQLMkL4fUs+VhB6VEtPbGgKA*/}}
+{{/*    MjofAUiyhPfWVHIuvkkn11LpJPGT8V9B4NSsY4wHg1VHbF+F6OOGNsuOZMA5TSIF*/}}
+{{/*    QktP4yA4b+R3w9z6aPw/7FViOrEj1kXHfKV00H49yiWi6oKi4RiwRu7Fw1K1FQwf*/}}
+{{/*    oUjGvJfLejn82CqI78lkKOXzSRdPQwIDAQABAoICAGXzrJ2EEdh31bqJv+HYm5XK*/}}
+{{/*    eohO0BusTb3+L5Eybeuu4WsVoDB4UTEplIzbcjTzuoszwe0QJYWUF6TFadtuA/+o*/}}
+{{/*    d/RkYvNcgyti/iy/1Vk0b7Ej+MlObFuLxYcmLPy+ZbcAGl2vc4jXdvfNDEBXzJ0G*/}}
+{{/*    YuJc4q4Ukpr22qceXL+Fmt5xGED15ugHfH6P7Vp4C7/nMSmYq/BVZBUFiC8IBDBP*/}}
+{{/*    v/e12RgXTA5mcDkqyhgjoxLSmg+NELepbtStAc7acEzW9JxPX8v8+me4eLyQrReQ*/}}
+{{/*    wWcObx4feImy4NtjJdpT1uUG4ZyUcymPE1Qql4dBx1xpupvnIrRqDD9cyHgW0ui4*/}}
+{{/*    RQErjxgur6VqRR+nFHJdwIsgMKf7efN1ijM3jiOiF+yyqPMBYB6hGCGRyToHDIXQ*/}}
+{{/*    h3mK86yfMTjWLe40Zr7HWaz9jU7q8Gu/bBDftyRJXNo/luNPlaqqmhClnY+5OYdL*/}}
+{{/*    TmKPnYsHsM5su2HC1QJtyBdfXtf0/Y0q+1PMeciyHsV73snf6jIdTIMfrEuOgy8a*/}}
+{{/*    NkmPIJZAcTvqicGZqKjc5gTZjxJhPiMQ++oZMDpxHoUKkh3YSo248Z4DBfbfqAhS*/}}
+{{/*    5lgtYnlh1K/bhUZs3yMgrDs06ZPmjBbTJKGuwbZaqQiLApbykNQZQuMl9bcHiH8r*/}}
+{{/*    Wtgf+Dj5Hbf7ojny+unBAoIBAQD2tBEGWm52TTha3T3iTtLitvCKnd2b9ei0hFtA*/}}
+{{/*    SFibbcR10372vqphTP+BTEsi+lETWtiK0MHzWLEz7kNlJ+vIQD61j7uczzUiJei2*/}}
+{{/*    rGJ/duWL4XcPMEmXrmCnVmL47hhTjaaHXhvtRSEysHRDEyTdhjaeSdvAosOvz4kW*/}}
+{{/*    gXCpGCjWiiFOozD7J74GQhAszIpcDG61ZfIY8TaAkMESUSWDuA2oLtI3JpQ39Syq*/}}
+{{/*    hQJ/ADuJS1YnKu6DcIk7QFrQx0PbI1U3myQm9uaDbci1SlFQ2DXjgPd1UWmjIKp3*/}}
+{{/*    PhYeOKwbv4cH6QS+JDdwRpvoVeqsRlg0O1euZc0Rdq/LuW8DAoIBAQDWItTzo0vP*/}}
+{{/*    CplpILtNAguqYPGczWxZmEaWNNmbncYQOZwszDxvnbSt7oSMuDlUrhxy0APdPE7Z*/}}
+{{/*    2sNMV2Nor0qcbflQf4WpsVEXa3cRpTD7EINHAPFd+8dYN15M7AE1f2uyXTW/Wwsa*/}}
+{{/*    WBN5dx5yMQ7guRVHy5hTSQy+6vfsueddc2qFvKqlyQCfFbSzm/gl2UM/joJmtYH5*/}}
+{{/*    P0mYx7a003q48o8Gz1qVhEuJJh4j8Vee7shSp3XRJIOUg/yrNpH9mwar8FkPrnQ+*/}}
+{{/*    J3HIqLZDkmEQkDxUYrIFLit9UaotTt/1S6tY0NWG94utKWixVvLWYUj4ODxoIIFt*/}}
+{{/*    rPgvLhoJ0YrBAoIBAQDHD9qg5r01BfAQGW8CuZmeSADlyKX1X0IqzpWW1AlzOOoK*/}}
+{{/*    LOLIlGaEZo3QNdB248YhuO77a6DkC0/I2FtXNxQgm/49oEHBMMztxer14zkDItvr*/}}
+{{/*    t7zK66qmEpV40NLBi9TjLmwN1FjyZhJ4hTr6mGrpuI8/v9bqpCsEJJC4MS/HsW/a*/}}
+{{/*    VNC1VCaEsbe58vp8O3r09S8rfZwQlinlKWgwsHt1wkB60XTb/WwhjtpAqVyvP2/K*/}}
+{{/*    w5g7uH+GXXrN7YqZ5f+RxfvQB4XvTtAHgsEtz063zg4FiZ2i81MqxoPl/Zn5Pr9Z*/}}
+{{/*    EH0TW+lwx2ZYWREaMqFN6uDnHG8OkKQckEkfOHwjAoIBAA0YhD2CNxiqZUdwoQPM*/}}
+{{/*    pDn/Q8d7KK0yCt8UzFogBATqAQscUnXhBzO76o9QlPEA1OyQnCvjjE72egspLQMx*/}}
+{{/*    9TYr45twsRP3rCXqhJWnrJ8uG1k0TY6Z308d076QkGJdMJDv8mGJh9xMlqRPDKWf*/}}
+{{/*    KnHD3/FMGjy9svHaHN91Xxjv/gu/xg/tgwQ3p510ZHCsINi6Nm9hmllL7YxSanIU*/}}
+{{/*    nOTCsMyR0dBjDtuMYTuBfwJRSB8F7sajnQhwKfuukq8X1Aif4lJ7MNC8SNEkwEDR*/}}
+{{/*    qu4AZDAk+Q4oDLDVVbr/n+K4hfogi259pSUp6yUtVByYRoYnqkoT8tZqRaNdBmqj*/}}
+{{/*    TgECggEAdo1rX5l/Pcuy5zLHmGx8hBTITHNyfNDJr2wUJ2VChYBcpzWUkP0mTvgu*/}}
+{{/*    gD2RzOzT+Ad+BcheRanT7nA7UjmnowzqH+cLV/1NeldhxYRX2wwBJ6EBAHiYD8h9*/}}
+{{/*    GLMkUHIIV5CSEnwFxhX4kvLFkJrbZ6eAtrfkvw/vzXsbmd8+N3dfkmaufuOR4+Av*/}}
+{{/*    txNy2t+5PUoXjpm81rb/7hzJadT+njiN3KBBluxIL42y9Z1VukWLg+ddZEC2UeDB*/}}
+{{/*    uAUIFwpl6wgD3C2SPzJGVfUlMinqCoB6R5OcYAWGAng+q8hmhdG6RNcYN7flDKW0*/}}
+{{/*    S354Sn1/DUQ5ImtqbO7C82OIpadMdQ==*/}}
+{{/*    -----END PRIVATE KEY-----*/}}
+{{/*  PASSPORT_PUBLIC_KEY: |*/}}
+{{/*    -----BEGIN PUBLIC KEY-----*/}}
+{{/*    MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAzlwXXXrTepltRD2cUd4Z*/}}
+{{/*    tQX51M09XrgM49EYY/w+z1qS0K8bZIv5QnK+ltT4MAYBQ7Wj+6LdxEeABEchtUJP*/}}
+{{/*    o7AH4bR+7bxZMzs4U+NI0KZ8Z7btf0ClCiYkNgfSEhPHGaaw+BaPFf3rSYCyuqYR*/}}
+{{/*    QCQt6TQr11bGbOA5iwwlsnrQgI8g7U5tYrgvhLGgV7WyVZBAFJJEJ2aN5qADUz62*/}}
+{{/*    RUzBHpOs+0FYIpY8aQmm5LVqd+YzQkj0iZLvGcsqMRvuTLHkN/5bNke5CXWJk7dS*/}}
+{{/*    J3nRoIMbTTERowHbxEZETMkKM8ccKZ7Fn2B0SFPuy1dgHd0Ns/YbG5Z0JkJ7+P1A*/}}
+{{/*    pJKB2Am0EZyuPfMGKvc0UpONW2DEXFjF9+kute8uglNd1nBDyPA1FYThCAp7WbMR*/}}
+{{/*    T2eee2GpDZ08Lx70DEE3MdL3umQ4YVufeMVQPi6i9R+rM/brVWMunzdivtI3NtkN*/}}
+{{/*    OQtt/gp4Aharsf6VArWCe8kNNs7UHu162wUCzJC+H1LPlYQelRLT2xoCgDI6HwFI*/}}
+{{/*    soT31lRyLr5JJ9dS6STxk/FfQeDUrGOMB4NVR2xfhejjhjbLjmTAOU0iBUJLT+Mg*/}}
+{{/*    OG/kd8Pc+mj8P+xVYjqxI9ZFx3yldNB+PcolouqCouEYsEbuxcNStRUMH6FIxryX*/}}
+{{/*    y3o5/NgqiO/JZCjl80kXT0MCAwEAAQ==*/}}
+{{/*    -----END PUBLIC KEY-----*/}}
   SUPER_ADMINS: "{{ .Values.olaresEnv.ADMIN_EMAIL }}"
 
   LOG_CHANNEL: "stderr_daily"
@@ -140,6 +140,51 @@ data:
   FORWARD_APP_PORT: "{{ .Values.port }}"
   FORWARD_DB_PORT: "{{ .Values.postgres.port }}"
 
-  SOLIDTIME_IMAGE_TAG: "0.10.0"
+  SOLIDTIME_IMAGE_TAG: "0.11.5"
   APP_NAME: "solidtime"
   VITE_APP_NAME: "solidtime"
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: solidtime-healthcheck-script
+  namespace: {{ .Release.Namespace }}
+data:
+  healthcheck: |
+    #!/usr/bin/env sh
+    set -e
+
+    container_mode=${CONTAINER_MODE:-"http"}
+
+    SUPERVISOR_SERVER=${SUPERVISOR_SERVER:-"http://127.0.0.1:9001"}
+
+    if [ "${container_mode}" = "http" ]; then
+        php "${ROOT}/artisan" octane:status
+    elif [ "${container_mode}" = "horizon" ]; then
+        php "${ROOT}/artisan" horizon:status
+    elif [ "${container_mode}" = "scheduler" ]; then
+        if [ "$(supervisorctl -s $SUPERVISOR_SERVER status scheduler:scheduler_0 | awk '{print tolower($2)}')" = "running" ]; then
+            exit 0
+        else
+            echo "Healthcheck failed."
+            exit 1
+        fi
+    elif [ "${container_mode}" = "reverb" ]; then
+        if [ "$(supervisorctl -s $SUPERVISOR_SERVER status reverb:reverb_0 | awk '{print tolower($2)}')" = "running" ]; then
+            exit 0
+        else
+            echo "Healthcheck failed."
+            exit 1
+        fi
+    elif [ "${container_mode}" = "worker" ]; then
+        if [ "$(supervisorctl -s $SUPERVISOR_SERVER status worker:worker_0 | awk '{print tolower($2)}')" = "running" ]; then
+            exit 0
+        else
+            echo "Healthcheck failed."
+            exit 1
+        fi
+    else
+        echo "Container mode mismatched."
+        exit 1
+    fi

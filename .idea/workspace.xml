@@ -5,21 +5,11 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="e9836655-cb5c-456b-aef7-0ca255338318" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/llamafactory/Chart.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/llamafactory/OlaresManifest.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/llamafactory/i18n/en-US/OlaresManifest.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/llamafactory/i18n/zh-CN/OlaresManifest.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/llamafactory/owners" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/llamafactory/templates/clientproxy.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/llamafactory/templates/deployment.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/llamafactory/values.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/freshrss/Chart.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/freshrss/Chart.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/freshrss/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/freshrss/OlaresManifest.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/freshrss/templates/configmap.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/freshrss/templates/configmap.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/isaaclab/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/isaaclab/OlaresManifest.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/ntfy/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/ntfy/OlaresManifest.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/ntfy/templates/configmap.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/ntfy/templates/configmap.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/solidtime/Chart.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/solidtime/Chart.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/solidtime/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/solidtime/OlaresManifest.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/solidtime/templates/configmap.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/solidtime/templates/configmap.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/solidtime/templates/solidtime.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/solidtime/templates/solidtime.yaml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -27,7 +17,8 @@
     <option name="LAST_RESOLUTION" value="IGNORE" />
   </component>
   <component name="EmbeddingIndexingInfo">
-    <option name="cachedIndexableFilesCount" value="978" />
+    <option name="cachedIndexableFilesCount" value="980" />
+    <option name="fileBasedEmbeddingIndicesEnabled" value="true" />
   </component>
   <component name="FileTemplateManagerImpl">
     <option name="RECENT_TEMPLATES">
@@ -450,6 +441,7 @@
       <workItem from="1770607697684" duration="596000" />
       <workItem from="1770694659369" duration="595000" />
       <workItem from="1770781386394" duration="585000" />
+      <workItem from="1771990093654" duration="578000" />
     </task>
     <servers />
   </component>
