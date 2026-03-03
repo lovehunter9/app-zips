@@ -4,7 +4,7 @@ metadata:
   description: TensorZero is an open-source stack for industrial-grade LLM applications
   icon: https://app.cdn.olares.com/appstore/default/defaulticon.webp
   appid: tensorzero
-  version: '1.0.0'
+  version: '1.0.5'
   title: TensorZero
   categories:
   - Productivity_v112
@@ -30,12 +30,12 @@ spec:
   locale:
   - en-US
   - zh-CN
-  requiredMemory: 1.5Gi
-  limitedMemory: 7Gi
-  requiredDisk: 512Mi
-  limitedDisk: 2Gi
-  requiredCpu: 0.5
-  limitedCpu: 4
+  requiredMemory: 5Gi
+  limitedMemory: 9Gi
+  requiredDisk: 5Gi
+  limitedDisk: 10Gi
+  requiredCpu: 3
+  limitedCpu: 5
   doc: https://www.tensorzero.com/docs
   supportArch:
   - amd64
@@ -69,4 +69,4 @@ middleware:
       - name: tensorzerodb
         distributed: false
         extensions:
-          - vector
+          - pg_cron

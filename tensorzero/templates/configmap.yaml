@@ -1,118 +1,108 @@
-{{/*{{- $solidtimeDomainENV := split  ","  .Values.domain.solidtime -}}*/}}
-{{/*{{- $solidtimeDomain := index $solidtimeDomainENV "_0" -}}*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gateway-startups
+  namespace: {{ .Release.Namespace }}
+data:
+  tensorzero.toml: |
+    # ┌────────────────────────────────────────────────────────────────────────────┐
+    # │                                   MODELS                                   │
+    # └────────────────────────────────────────────────────────────────────────────┘
 
-{{/*{{- $smtpServer := .Values.olaresEnv.SMTP_SERVER | default "" }}*/}}
-{{/*{{- $defaultSmtpPort := "" }}*/}}
-{{/*{{- $enableRegistration := "false" }}*/}}
-{{/*{{- if (ne $smtpServer "") }}*/}}
-{{/*  {{- $defaultSmtpPort = "25" }}*/}}
-{{/*  {{- $enableRegistration = "true" }}*/}}
-{{/*{{- end }}*/}}
-{{/*{{- $smtpPort := .Values.olaresEnv.SMTP_PORT | default $defaultSmtpPort }}*/}}
-{{/*{{- $smtpSecure := "null" }}*/}}
+    # [models."gpt-4o-mini-2024-07-18"]
+    # routing = ["openai"]
 
-{{/*{{- $smtpUseSSL := .Values.olaresEnv.SMTP_SSL | default "" }}*/}}
-{{/*{{- $smtpUseTLS := .Values.olaresEnv.SMTP_TLS | default "" }}*/}}
-{{/*{{- if or (eq (lower $smtpUseSSL) "true") (eq $smtpUseSSL "1") (eq $smtpPort "465") }}*/}}
-{{/*  {{- $smtpSecure = "ssl" }}*/}}
-{{/*  {{- $smtpPort = "465" }}*/}}
-{{/*{{- else if or (eq (lower $smtpUseTLS) "true") (eq $smtpUseTLS "1") (eq $smtpPort "587") }}*/}}
-{{/*  {{- $smtpSecure = "tls" }}*/}}
-{{/*  {{- $smtpPort = "587" }}*/}}
-{{/*{{- end }}*/}}
+    # [models."gpt-4o-mini-2024-07-18".providers.openai]
+    # type = "openai"
+    # model_name = "gpt-4o-mini-2024-07-18"
 
-{{/*---*/}}
-{{/*apiVersion: v1*/}}
-{{/*kind: ConfigMap*/}}
-{{/*metadata:*/}}
-{{/*  name: solidtime-env*/}}
-{{/*  namespace: {{ .Release.Namespace }}*/}}
-{{/*data:*/}}
-{{/*  APP_NAME: "solidtime"*/}}
-{{/*  VITE_APP_NAME: "solidtime"*/}}
-{{/*  APP_ENV: "production"*/}}
-{{/*  APP_DEBUG: "false"*/}}
-{{/*  APP_URL: "https://{{ $solidtimeDomain }}"*/}}
-{{/*  APP_FORCE_HTTPS: "true"*/}}
-{{/*  APP_ENABLE_REGISTRATION: "{{ $enableRegistration }}"*/}}
-{{/*  TRUSTED_PROXIES: "0.0.0.0/0,2000:0:0:0:0:0:0:0/3"*/}}
-{{/*  APP_DOMAIN: "{{ $solidtimeDomain }}"*/}}
+    # ┌────────────────────────────────────────────────────────────────────────────┐
+    # │                                 FUNCTIONS                                  │
+    # └────────────────────────────────────────────────────────────────────────────┘
 
-{{/*  SUPER_ADMINS: "{{ .Values.olaresEnv.ADMIN_EMAIL }}"*/}}
+    # [functions.simple_llm_call]
+    # type = "chat"
 
-{{/*  LOG_CHANNEL: "stderr_daily"*/}}
-{{/*  LOG_LEVEL: "debug"*/}}
+    # [functions.simple_llm_call.variants.baseline]
+    # type = "chat_completion"
+    # model = "gpt-4o-mini-2024-07-18"
 
-{{/*  DB_CONNECTION: "pgsql"*/}}
-{{/*  DB_HOST: "{{ .Values.postgres.host }}"*/}}
-{{/*  DB_PORT: "{{ .Values.postgres.port }}"*/}}
-{{/*  DB_SSLMODE: "require"*/}}
-{{/*  DB_DATABASE: "{{ .Values.postgres.databases.solidtimedb }}"*/}}
-{{/*  DB_USERNAME: "{{ .Values.postgres.username }}"*/}}
-{{/*  DB_PASSWORD: "{{ .Values.postgres.password }}"*/}}
+    # ┌────────────────────────────────────────────────────────────────────────────┐
+    # │                                  METRICS                                   │
+    # └────────────────────────────────────────────────────────────────────────────┘
 
-{{/*  GOTENBERG_URL: "http://127.0.0.1:3000"*/}}
+    [metrics.task_success]
+    type = "boolean"
+    optimize = "max"
+    level = "episode"
 
-{{/*  MAIL_MAILER: "smtp"*/}}
-{{/*  MAIL_HOST: "{{ $smtpServer }}"*/}}
-{{/*  MAIL_PORT: "{{ $smtpPort }}"*/}}
-{{/*  MAIL_ENCRYPTION: "{{ $smtpSecure }}"*/}}
-{{/*  MAIL_FROM_ADDRESS: "{{ .Values.olaresEnv.SMTP_FROM_ADDRESS }}"*/}}
-{{/*  MAIL_FROM_NAME: "{{ .Values.olaresEnv.SMTP_FROM_NAME }}"*/}}
-{{/*  MAIL_USERNAME: "{{ .Values.olaresEnv.SMTP_LOGIN }}"*/}}
-{{/*  MAIL_PASSWORD: "{{ .Values.olaresEnv.SMTP_PASSWORD }}"*/}}
+  start.sh: |
+    #!/bin/bash
+    set -e
 
-{{/*  QUEUE_CONNECTION: "database"*/}}
+    # 等待 postgres 就绪（尝试连接）
+    echo "Waiting for PostgreSQL..."
+    for i in {1..30}; do
+      if echo > /dev/tcp/{{ .Values.postgres.host }}/{{ .Values.postgres.port }} 2>/dev/null; then
+        echo "PostgreSQL is ready!"
+        break
+      fi
+      echo "Waiting... ($i/30)"
+      sleep 2
+    done
+    sleep 2
 
-{{/*  FILESYSTEM_DISK: "local"*/}}
-{{/*  PUBLIC_FILESYSTEM_DISK: "public"*/}}
-{{/*  # S3_REGION: "fr-par" # fr-par, nl-ams, pl-waw*/}}
-{{/*  # S3_BUCKET: "your-bucket-name"*/}}
-{{/*  # S3_ENDPOINT: "https://s3.fr-par.scw.cloud" # Replace fr-par with your region*/}}
-{{/*  # S3_ACCESS_KEY_ID: "***"*/}}
-{{/*  # S3_SECRET_ACCESS_KEY: "***"*/}}
+    # 运行迁移
+    echo "Running database migrations..."
+    gateway --run-postgres-migrations --enable-optimization-postgres-migrations
 
-{{/*---*/}}
-{{/*apiVersion: v1*/}}
-{{/*kind: ConfigMap*/}}
-{{/*metadata:*/}}
-{{/*  name: solidtime-healthcheck-script*/}}
-{{/*  namespace: {{ .Release.Namespace }}*/}}
-{{/*data:*/}}
-{{/*  healthcheck: |*/}}
-{{/*    #!/usr/bin/env sh*/}}
-{{/*    set -e*/}}
+    echo "Running clickhouse migrations..."
+    gateway --run-clickhouse-migrations
 
-{{/*    container_mode=${CONTAINER_MODE:-"http"}*/}}
+    # 启动主程序（假设 gateway 命令不带参数会启动服务）
+    echo "Starting gateway server..."
+    # exec gateway --default-config
+    exec gateway --config-file /app/config/tensorzero.toml
 
-{{/*    SUPERVISOR_SERVER=${SUPERVISOR_SERVER:-"http://127.0.0.1:9001"}*/}}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tensorzero-env
+  namespace: {{ .Release.Namespace }}
+data:
+  TENSORZERO_GATEWAY_URL: "http://localhost:3000"
 
-{{/*    if [ "${container_mode}" = "http" ]; then*/}}
-{{/*        php "${ROOT}/artisan" octane:status*/}}
-{{/*    elif [ "${container_mode}" = "horizon" ]; then*/}}
-{{/*        php "${ROOT}/artisan" horizon:status*/}}
-{{/*    elif [ "${container_mode}" = "scheduler" ]; then*/}}
-{{/*        if [ "$(supervisorctl -s $SUPERVISOR_SERVER status scheduler:scheduler_0 | awk '{print tolower($2)}')" = "running" ]; then*/}}
-{{/*            exit 0*/}}
-{{/*        else*/}}
-{{/*            echo "Healthcheck failed."*/}}
-{{/*            exit 1*/}}
-{{/*        fi*/}}
-{{/*    elif [ "${container_mode}" = "reverb" ]; then*/}}
-{{/*        if [ "$(supervisorctl -s $SUPERVISOR_SERVER status reverb:reverb_0 | awk '{print tolower($2)}')" = "running" ]; then*/}}
-{{/*            exit 0*/}}
-{{/*        else*/}}
-{{/*            echo "Healthcheck failed."*/}}
-{{/*            exit 1*/}}
-{{/*        fi*/}}
-{{/*    elif [ "${container_mode}" = "worker" ]; then*/}}
-{{/*        if [ "$(supervisorctl -s $SUPERVISOR_SERVER status worker:worker_0 | awk '{print tolower($2)}')" = "running" ]; then*/}}
-{{/*            exit 0*/}}
-{{/*        else*/}}
-{{/*            echo "Healthcheck failed."*/}}
-{{/*            exit 1*/}}
-{{/*        fi*/}}
-{{/*    else*/}}
-{{/*        echo "Container mode mismatched."*/}}
-{{/*        exit 1*/}}
-{{/*    fi*/}}
+  # ┌────────────────────────────────────────────────────────────────────────────┐
+  # │                                 CLICKHOUSE                                 │
+  # └────────────────────────────────────────────────────────────────────────────┘
+  TENSORZERO_CLICKHOUSE_URL: "http://chuser:chpassword@localhost:8123/tensorzero"
+
+  # ┌────────────────────────────────────────────────────────────────────────────┐
+  # │                                 POSTGRESQL                                 │
+  # └────────────────────────────────────────────────────────────────────────────┘
+  TENSORZERO_POSTGRES_URL: "postgres://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.tensorzerodb }}?sslmode=disable"
+
+  # ┌────────────────────────────────────────────────────────────────────────────┐
+  # │                              MODEL PROVIDERS                               │
+  # └────────────────────────────────────────────────────────────────────────────┘
+
+  # Each of these is optional but necessary to infer using the provider
+
+  # ANTHROPIC_API_KEY=example
+  # AWS_ACCESS_KEY_ID=example
+  # AWS_REGION=us-east-1
+  # AWS_SECRET_ACCESS_KEY=example
+  # AZURE_API_KEY=example
+  # DEEPSEEK_API_KEY=example
+  # FIREWORKS_API_KEY=example
+  # GCP_VERTEX_CREDENTIALS_PATH=/path/to/credentials.json
+  # GOOGLE_AI_STUDIO_API_KEY=example
+  # HYPERBOLIC_API_KEY=example
+  # MISTRAL_API_KEY=example
+  # OPENAI_API_KEY=example
+  # TGI_API_KEY=example
+  # TOGETHER_API_KEY=example
+  # VLLM_API_KEY=example
+  # VOYAGE_API_KEY=example
+  # XAI_API_KEY=example

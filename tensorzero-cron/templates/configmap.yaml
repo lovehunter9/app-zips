@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gateway-startup-script
+  namespace: {{ .Release.Namespace }}
+data:
+  start.sh: |
+    #!/bin/bash
+    set -e
+
+    # 等待 postgres 就绪（尝试连接）
+    echo "Waiting for PostgreSQL..."
+    for i in {1..30}; do
+      if echo > /dev/tcp/localhost/5432 2>/dev/null; then
+        echo "PostgreSQL is ready!"
+        break
+      fi
+      echo "Waiting... ($i/30)"
+      sleep 2
+    done
+    sleep 2
+
+    # 运行迁移
+    echo "Running database migrations..."
+    gateway --default-config --run-postgres-migrations
+
+    # 启动主程序（假设 gateway 命令不带参数会启动服务）
+    echo "Starting gateway server..."
+    exec gateway --default-config
