@@ -35,7 +35,7 @@ spec:
   requiredDisk: 512Mi
   limitedDisk: 2Gi
   requiredCpu: 0.5
-  limitedCpu: 4
+  limitedCpu: 4.5
   doc: https://www.tensorzero.com/docs
   supportArch:
   - amd64

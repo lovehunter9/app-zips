@@ -5,22 +5,12 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="e9836655-cb5c-456b-aef7-0ca255338318" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/tensorzero-cron/.helmignore" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/tensorzero-cron/Chart.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/tensorzero-cron/OlaresManifest.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/tensorzero-cron/i18n/en-US/OlaresManifest.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/tensorzero-cron/i18n/zh-CN/OlaresManifest.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/tensorzero-cron/owners" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/tensorzero-cron/templates/configmap.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/tensorzero-cron/templates/ingress.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/tensorzero-cron/templates/tensorzero.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/tensorzero-cron/values.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/bifrost/templates/configmap.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/bifrost/templates/ingress.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/bifrost/templates/ingress.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tensorzero/Chart.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/tensorzero/Chart.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/bifrost/Chart.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/bifrost/Chart.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/bifrost/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/bifrost/OlaresManifest.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/bifrost/templates/bifrost.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/bifrost/templates/bifrost.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/tensorzero/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/tensorzero/OlaresManifest.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tensorzero/templates/configmap.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/tensorzero/templates/configmap.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tensorzero/templates/tensorzero.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/tensorzero/templates/tensorzero.yaml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -28,7 +18,7 @@
     <option name="LAST_RESOLUTION" value="IGNORE" />
   </component>
   <component name="EmbeddingIndexingInfo">
-    <option name="cachedIndexableFilesCount" value="1007" />
+    <option name="cachedIndexableFilesCount" value="1023" />
     <option name="fileBasedEmbeddingIndicesEnabled" value="true" />
   </component>
   <component name="FileTemplateManagerImpl">
@@ -93,8 +83,8 @@
   <component name="SharedIndexes">
     <attachedChunks>
       <set>
-        <option value="bundled-js-predefined-d6986cc7102b-c7e53b3be11b-JavaScript-PY-253.28294.336" />
-        <option value="bundled-python-sdk-0978a7220b69-9867c7d4c0a4-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-253.28294.336" />
+        <option value="bundled-gosdk-72a9cf600ed8-448e06e64ec5-org.jetbrains.plugins.go.sharedIndexes.bundled-GO-253.28294.337" />
+        <option value="bundled-js-predefined-d6986cc7102b-c7e53b3be11b-JavaScript-GO-253.28294.337" />
       </set>
     </attachedChunks>
   </component>
