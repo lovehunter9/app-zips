@@ -5,12 +5,12 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="e9836655-cb5c-456b-aef7-0ca255338318" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/bifrost/templates/configmap.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/bifrost/Chart.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/bifrost/Chart.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/bifrost/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/bifrost/OlaresManifest.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/bifrost/templates/bifrost.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/bifrost/templates/bifrost.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tensorzero/Chart.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/tensorzero/Chart.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/tensorzero/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/tensorzero/OlaresManifest.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tensorzero/templates/configmap.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/tensorzero/templates/configmap.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tensorzero/templates/ingress.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/tensorzero/templates/ingress.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tensorzero/templates/tensorzero.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/tensorzero/templates/tensorzero.yaml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -18,7 +18,7 @@
     <option name="LAST_RESOLUTION" value="IGNORE" />
   </component>
   <component name="EmbeddingIndexingInfo">
-    <option name="cachedIndexableFilesCount" value="1023" />
+    <option name="cachedIndexableFilesCount" value="1024" />
     <option name="fileBasedEmbeddingIndicesEnabled" value="true" />
   </component>
   <component name="FileTemplateManagerImpl">
@@ -447,6 +447,7 @@
       <workItem from="1772163147711" duration="597000" />
       <workItem from="1772249276961" duration="585000" />
       <workItem from="1772422654268" duration="600000" />
+      <workItem from="1772595110877" duration="539000" />
     </task>
     <servers />
   </component>
