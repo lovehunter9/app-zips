@@ -5,15 +5,6 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="e9836655-cb5c-456b-aef7-0ca255338318" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/agentzero/.helmignore" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/agentzero/Chart.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/agentzero/OlaresManifest.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/agentzero/i18n/en-US/OlaresManifest.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/agentzero/i18n/zh-CN/OlaresManifest.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/agentzero/owners" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/agentzero/templates/agentzero.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/agentzero/templates/ingress.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/agentzero/values.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
