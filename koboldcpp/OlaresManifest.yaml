@@ -35,6 +35,8 @@ spec:
   limitedDisk: 50Gi
   requiredCpu: 2.1
   limitedCpu: 4.1
+  requiredGpu: 4Gi
+  limitedGpu: 24Gi
   doc: https://github.com/LostRuins/koboldcpp/wiki
   supportArch:
   - amd64

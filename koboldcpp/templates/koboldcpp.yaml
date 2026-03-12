@@ -7,6 +7,8 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     io.kompose.service: koboldcpp
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "true"
 spec:
   replicas: 1
   selector:
@@ -26,13 +28,30 @@ spec:
       containers:
         - name: koboldcpp
           image: docker.io/beclab/koboldai-koboldcpp:latest
+          env:
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: "all"
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: "compute,utility"
+            - name: KCPP_MODEL
+              value: ""
+            - name: KCPP_DONT_UPDATE
+              value: "true"
+            - name: KCPP_DONT_TUNNEL
+              value: "true"
           resources:
             limits:
               cpu: 4
               memory: 8Gi
+              nvidia.com/gpu: 1
             requests:
               cpu: 2
               memory: 4Gi
+              nvidia.com/gpu: 1
+{{/*          securityContext:*/}}
+{{/*            privileged: true*/}}
+{{/*            capabilities:*/}}
+{{/*              add: [ "SYS_ADMIN" ]*/}}
           ports:
             - containerPort: 5001
               protocol: TCP
@@ -40,9 +59,8 @@ spec:
             - name: koboldcpp-data
               mountPath: /app/models
               subPath: models
-            - name: koboldcpp-data
-              mountPath: /app/saves
-              subPath: saves
+            - name: user-home
+              mountPath: /home/user
           livenessProbe:
             tcpSocket:
               port: 5001
@@ -61,15 +79,11 @@ spec:
         - name: koboldcpp-data
           hostPath:
             type: DirectoryOrCreate
-                {{- if .Values.sysVersion }}
-                  {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
-            path: '{{ .Values.userspace.appCache }}'
-                  {{- else }}
-            path: '{{ .Values.userspace.appCache }}/koboldcpp'
-                  {{- end }}
-                {{- else }}
-            path: '{{ .Values.userspace.appCache }}/koboldcpp'
-                {{- end }}
+            path: '{{ .Values.userspace.appData }}'
+        - name: user-home
+          hostPath:
+            type: Directory
+            path: '{{ .Values.userspace.userData }}'
 
 ---
 apiVersion: v1

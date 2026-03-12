@@ -6,6 +6,8 @@
   <component name="ChangeListManager">
     <list default="true" id="e9836655-cb5c-456b-aef7-0ca255338318" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/koboldcpp/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/koboldcpp/OlaresManifest.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/koboldcpp/templates/koboldcpp.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/koboldcpp/templates/koboldcpp.yaml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -13,7 +15,7 @@
     <option name="LAST_RESOLUTION" value="IGNORE" />
   </component>
   <component name="EmbeddingIndexingInfo">
-    <option name="cachedIndexableFilesCount" value="1034" />
+    <option name="cachedIndexableFilesCount" value="1044" />
     <option name="fileBasedEmbeddingIndicesEnabled" value="true" />
   </component>
   <component name="FileTemplateManagerImpl">
