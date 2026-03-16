@@ -11,6 +11,7 @@ data:
       access_log /opt/bitnami/openresty/nginx/logs/access.log;
       error_log /opt/bitnami/openresty/nginx/logs/error.log;
 
+      # Support large file uploads
       client_max_body_size 100m;
 
       proxy_connect_timeout                          30s;
@@ -23,6 +24,7 @@ data:
 
       proxy_http_version 1.1;
 
+      # WebSocket support for SSE/live updates
       proxy_set_header upgrade $http_upgrade;
       proxy_set_header connection "upgrade";
 
@@ -32,6 +34,8 @@ data:
           proxy_connect_timeout 60s;
           proxy_read_timeout 300s;
           proxy_send_timeout 300s;
+          # Support large file uploads
+          client_max_body_size 100m;
       }
     }
 
@@ -39,6 +43,7 @@ data:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  creationTimestamp: null
   labels:
     io.kompose.service: opencodeingress
   name: opencodeingress
@@ -52,6 +57,7 @@ spec:
     type: Recreate
   template:
     metadata:
+      creationTimestamp: null
       labels:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: opencodeingress

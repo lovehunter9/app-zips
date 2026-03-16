@@ -19,6 +19,8 @@ spec:
         io.kompose.service: opencode
     spec:
       securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
         fsGroup: 1000
 
       initContainers:
@@ -37,12 +39,17 @@ spec:
               mountPath: /home/opencode
             - name: opencode-workspace
               mountPath: /home/opencode/workspace
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
           securityContext:
             runAsUser: 0
 
       containers:
         - name: opencode
-          image: "docker.io/beclab/anomalyco-opencode:1.2.27"
+          # Official image from GitHub Container Registry
+          # https://github.com/anomalyco/opencode/pkgs/container/opencode
+          image: "ghcr.io/anomalyco/opencode:1.2.27"
           command: ["opencode"]
           args: ["web", "--hostname", "0.0.0.0", "--port", "3000"]
           env:
@@ -114,3 +121,5 @@ spec:
       targetPort: 3000
   selector:
     io.kompose.service: opencode
+status:
+  loadBalancer: {}
