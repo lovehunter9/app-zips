@@ -1,0 +1,20 @@
+metadata:
+  title: OpenCode
+  description: 开源 AI 编程助手
+spec:
+  fullDescription: |
+    OpenCode 是一款开源的 AI 编程助手。
+
+    主要特性
+    - 100% 开源，不绑定任何单一供应商。
+    - 支持 Claude、OpenAI、Google 以及本地模型。
+    - 内置 agent：build（完整权限，用于开发）和 plan（只读，用于分析和规划）。
+    - 开箱即用的 LSP 支持，提供智能代码导航。
+    - 客户端/服务端架构，支持移动端远程访问。
+    - 完整 Web UI，可从任意浏览器访问。
+
+    使用方法
+    - 打开应用后直接在浏览器中使用 Web UI。
+    - 在应用设置中配置 API 密钥（如 ANTHROPIC_API_KEY、OPENAI_API_KEY）。
+    - 通过 Web UI 管理会话、切换 agent、交互式编程。
+    - 代码工作区挂载在 /home/opencode/workspace（关联到 Home/Code 目录）。

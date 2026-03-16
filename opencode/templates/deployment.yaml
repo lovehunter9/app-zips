@@ -1,0 +1,116 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opencode
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    io.kompose.service: opencode
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: opencode
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: opencode
+    spec:
+      securityContext:
+        fsGroup: 1000
+
+      initContainers:
+        - name: init-chmod-data
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
+          command:
+            - sh
+            - "-c"
+            - |
+              mkdir -p /home/opencode/workspace /home/opencode/.opencode
+              chown -R 1000:1000 /home/opencode || true
+              chmod -R 755 /home/opencode || true
+          resources: {}
+          volumeMounts:
+            - name: opencode-home
+              mountPath: /home/opencode
+            - name: opencode-workspace
+              mountPath: /home/opencode/workspace
+          securityContext:
+            runAsUser: 0
+
+      containers:
+        - name: opencode
+          image: "docker.io/beclab/anomalyco-opencode:1.2.27"
+          command: ["opencode"]
+          args: ["web", "--hostname", "0.0.0.0", "--port", "3000"]
+          env:
+            - name: HOME
+              value: /home/opencode
+            - name: TERM
+              value: xterm-256color
+            {{- if .Values.olaresEnv }}
+            {{- if .Values.olaresEnv.ANTHROPIC_API_KEY }}
+            - name: ANTHROPIC_API_KEY
+              value: "{{ .Values.olaresEnv.ANTHROPIC_API_KEY }}"
+            {{- end }}
+            {{- if .Values.olaresEnv.OPENAI_API_KEY }}
+            - name: OPENAI_API_KEY
+              value: "{{ .Values.olaresEnv.OPENAI_API_KEY }}"
+            {{- end }}
+            {{- end }}
+          resources:
+            limits:
+              cpu: "4"
+              memory: 4Gi
+            requests:
+              cpu: 100m
+              memory: 512Mi
+          ports:
+            - containerPort: 3000
+              protocol: TCP
+          volumeMounts:
+            - name: opencode-home
+              mountPath: /home/opencode
+            - name: opencode-workspace
+              mountPath: /home/opencode/workspace
+          livenessProbe:
+            tcpSocket:
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+          readinessProbe:
+            tcpSocket:
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+
+      restartPolicy: Always
+      volumes:
+        - name: opencode-home
+          hostPath:
+            path: "{{ .Values.userspace.appData }}"
+            type: DirectoryOrCreate
+        - name: opencode-workspace
+          hostPath:
+            path: "{{ .Values.userspace.userData }}/Code"
+            type: DirectoryOrCreate
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: opencode
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    io.kompose.service: opencode
+spec:
+  ports:
+    - name: web
+      port: 3000
+      targetPort: 3000
+  selector:
+    io.kompose.service: opencode

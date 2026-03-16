@@ -1,0 +1,6 @@
+apiVersion: v2
+name: opencode
+description: The open source AI coding agent.
+type: application
+version: '1.0.0'
+appVersion: "1.2.27"

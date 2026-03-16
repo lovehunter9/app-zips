@@ -1,0 +1,82 @@
+olaresManifest.version: '0.11.0'
+olaresManifest.type: app
+metadata:
+  name: opencode
+  icon: https://app.cdn.olares.com/appstore/default/defaulticon.webp
+  description: The open source AI coding agent
+  appid: opencode
+  title: OpenCode
+  version: '1.0.0'
+  categories:
+  - Developer Tools
+  - Productivity_v112
+entrances:
+- name: opencode
+  port: 8080
+  host: opencodeingress
+  title: OpenCode
+  icon: https://app.cdn.olares.com/appstore/default/defaulticon.webp
+  openMethod: window
+  authLevel: internal
+spec:
+  versionName: '1.2.27'
+  fullDescription: |
+    OpenCode is the open source AI coding agent.
+
+    Key Features
+    - 100% open source, not coupled to any provider.
+    - Supports Claude, OpenAI, Google, or even local models.
+    - Built-in agents: build (full-access for development) and plan (read-only for analysis).
+    - Out-of-the-box LSP support for intelligent code navigation.
+    - Client/server architecture allows remote access from mobile apps.
+    - General subagent for complex searches and multistep tasks.
+
+    Usage
+    - Open the app and use the Web UI directly in your browser.
+    - Configure your API keys in the app settings (ANTHROPIC_API_KEY, OPENAI_API_KEY, etc.).
+    - Use the Web UI to manage sessions, switch between agents, and code interactively.
+    - Your code workspace is mounted at /home/opencode/workspace (linked to your Home/Code directory).
+  developer: Anomaly
+  website: https://opencode.ai/
+  sourceCode: https://github.com/anomalyco/opencode
+  submitter: Olares
+  locale:
+  - en-US
+  - zh-CN
+  doc: https://opencode.ai/docs
+  license:
+  - text: MIT
+    url: https://github.com/anomalyco/opencode/blob/dev/LICENSE
+  requiredMemory: 512Mi
+  limitedMemory: 4Gi
+  requiredDisk: 128Mi
+  limitedDisk: 5Gi
+  requiredCpu: 0.5
+  limitedCpu: 4
+  supportArch:
+  - amd64
+  - arm64
+permission:
+  appData: true
+  appCache: true
+  userData:
+  - Home
+options:
+  apiTimeout: 0
+  dependencies:
+  - name: olares
+    type: system
+    version: '>=1.12.3-0'
+envs:
+  - envName: ANTHROPIC_API_KEY
+    required: false
+    applyOnChange: true
+    type: string
+    editable: true
+    description: "Anthropic API key for Claude models"
+  - envName: OPENAI_API_KEY
+    required: false
+    applyOnChange: true
+    type: string
+    editable: true
+    description: "OpenAI API key"
