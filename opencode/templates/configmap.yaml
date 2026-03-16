@@ -1,0 +1,42 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: opencode-env
+  namespace: {{ .Release.Namespace }}
+data:
+  # OPENCODE_MODE controls how the application starts:
+  #   "web" - Start Web UI server (access via OpenCode Web entrance)
+  #   "tui" - Keep container alive for interactive TUI (access via OpenCode Terminal entrance)
+  # To switch mode: edit this value, then restart the deployment:
+  #   kubectl rollout restart deployment opencode -n <namespace>
+  OPENCODE_MODE: "tui"
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: opencode-startup
+  namespace: {{ .Release.Namespace }}
+data:
+  start.sh: |
+    #!/bin/sh
+    set -e
+    echo "OPENCODE_MODE=${OPENCODE_MODE}"
+    if [ "${OPENCODE_MODE}" = "web" ]; then
+      echo "Starting OpenCode Web UI on port 3000..."
+      exec opencode web --hostname 0.0.0.0 --port 3000
+    else
+      echo "Starting in TUI mode. Use the Terminal entrance to run 'opencode'."
+      exec sleep infinity
+    fi
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bash-wrapper
+  namespace: {{ .Release.Namespace }}
+data:
+  bash: |
+    #!/bin/sh
+    exec /bin/sh "$@"

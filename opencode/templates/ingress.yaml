@@ -6,12 +6,12 @@ metadata:
   namespace: {{ .Release.Namespace }}
 data:
   nginx.conf: |
-    upstream webui {
-        server opencode:3000;
-    }
-
-    upstream terminal {
-        server terminal:80;
+    # Auto-failover upstream: try Web UI first, fallback to Terminal
+    # In web mode: opencode:3000 is active, requests go there directly
+    # In tui mode: opencode:3000 is down, nginx auto-failovers to terminal:80
+    upstream backend {
+        server opencode:3000 max_fails=1 fail_timeout=5s;
+        server terminal:80 backup;
     }
 
     server {
@@ -35,22 +35,10 @@ data:
       proxy_set_header upgrade $http_upgrade;
       proxy_set_header connection "upgrade";
 
-      # Primary location: try Web UI first, fallback to Terminal on connection error
       location / {
-          proxy_pass http://webui;
+          proxy_pass http://backend;
+          proxy_next_upstream error timeout;
           proxy_connect_timeout 2s;
-          proxy_read_timeout 300s;
-          proxy_send_timeout 300s;
-          client_max_body_size 100m;
-
-          proxy_intercept_errors on;
-          error_page 502 = @terminal_fallback;
-      }
-
-      # Fallback: route to Terminal UI when Web UI is not running (TUI mode)
-      location @terminal_fallback {
-          proxy_pass http://terminal;
-          proxy_connect_timeout 30s;
           proxy_read_timeout 300s;
           proxy_send_timeout 300s;
           client_max_body_size 100m;

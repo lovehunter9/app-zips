@@ -15,14 +15,12 @@ spec:
     type: Recreate
   template:
     metadata:
+      creationTimestamp: null
       labels:
+        io.kompose.network/chrome-default: "true"
         io.kompose.service: opencode
-        # Required for the terminal component to exec into this container
         bytetrade.io/terminal: opencode
     spec:
-      securityContext:
-        fsGroup: 1000
-
       initContainers:
         - name: init-chmod-data
           image: "docker.io/beclab/aboveos-busybox:1.37.0"
@@ -89,6 +87,10 @@ spec:
               mountPath: /etc/opencode/start.sh
               subPath: start.sh
               readOnly: true
+            - name: bash-wrapper
+              mountPath: /bin/bash
+              subPath: bash
+              readOnly: true
           # tcpSocket probe works for both modes:
           # - web mode: port 3000 is listening
           # - tui mode: probe fails but container stays alive via restartPolicy
@@ -124,6 +126,10 @@ spec:
         - name: startup-script
           configMap:
             name: opencode-startup
+            defaultMode: 0755
+        - name: bash-wrapper
+          configMap:
+            name: bash-wrapper
             defaultMode: 0755
 
 ---
