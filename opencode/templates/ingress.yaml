@@ -6,12 +6,19 @@ metadata:
   namespace: {{ .Release.Namespace }}
 data:
   nginx.conf: |
+    upstream webui {
+        server opencode:3000;
+    }
+
+    upstream terminal {
+        server terminal:80;
+    }
+
     server {
       listen 8080;
       access_log /opt/bitnami/openresty/nginx/logs/access.log;
       error_log /opt/bitnami/openresty/nginx/logs/error.log;
 
-      # Support large file uploads
       client_max_body_size 100m;
 
       proxy_connect_timeout                          30s;
@@ -24,17 +31,28 @@ data:
 
       proxy_http_version 1.1;
 
-      # WebSocket support for SSE/live updates
+      # WebSocket support for both Web UI (SSE) and Terminal (xterm.js)
       proxy_set_header upgrade $http_upgrade;
       proxy_set_header connection "upgrade";
 
+      # Primary location: try Web UI first, fallback to Terminal on connection error
       location / {
-          proxy_pass http://opencode:3000;
-          proxy_next_upstream error timeout http_500 http_502 http_503 http_504;
-          proxy_connect_timeout 60s;
+          proxy_pass http://webui;
+          proxy_connect_timeout 2s;
           proxy_read_timeout 300s;
           proxy_send_timeout 300s;
-          # Support large file uploads
+          client_max_body_size 100m;
+
+          proxy_intercept_errors on;
+          error_page 502 = @terminal_fallback;
+      }
+
+      # Fallback: route to Terminal UI when Web UI is not running (TUI mode)
+      location @terminal_fallback {
+          proxy_pass http://terminal;
+          proxy_connect_timeout 30s;
+          proxy_read_timeout 300s;
+          proxy_send_timeout 300s;
           client_max_body_size 100m;
       }
     }
