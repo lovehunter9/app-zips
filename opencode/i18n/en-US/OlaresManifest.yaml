@@ -11,10 +11,10 @@ spec:
     - Built-in agents: build (full-access for development) and plan (read-only for analysis).
     - Out-of-the-box LSP support for intelligent code navigation.
     - Client/server architecture allows remote access from mobile apps.
-    - Full Web UI accessible from any browser.
+    - Dual mode: switch between Web UI and TUI via ConfigMap.
 
     Usage
-    - Open the app and use the Web UI directly in your browser.
+    - Two entrances are provided: "OpenCode Web" for the browser UI, "OpenCode Terminal" for TUI access.
+    - Default mode is Web UI. To switch to TUI mode, edit the ConfigMap (OPENCODE_MODE=tui) and restart.
     - Configure your API keys in the app settings (ANTHROPIC_API_KEY, OPENAI_API_KEY, etc.).
-    - Use the Web UI to manage sessions, switch between agents, and code interactively.
     - Your code workspace is mounted at /home/opencode/workspace (linked to your Home/Code directory).
