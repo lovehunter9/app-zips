@@ -39,4 +39,9 @@ metadata:
 data:
   bash: |
     #!/bin/sh
+    # Interactive terminal with no args → launch opencode TUI directly
+    if [ -t 0 ] && [ $# -eq 0 ]; then
+      cd /home/opencode/workspace 2>/dev/null
+      exec opencode
+    fi
     exec /bin/sh "$@"
