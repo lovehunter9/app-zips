@@ -1,1 +1,2 @@
-
+olaresEnv:
+  OLLAMA_URL: ""

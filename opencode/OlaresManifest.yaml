@@ -6,7 +6,7 @@ metadata:
   description: The open source AI coding agent
   appid: opencode
   title: OpenCode
-  version: '1.0.0'
+  version: '1.0.3'
   categories:
   - Developer Tools
   - Productivity_v112
@@ -59,6 +59,14 @@ permission:
   appCache: true
   userData:
   - Home
+envs:
+- envName: OLLAMA_URL
+  type: string
+  required: false
+  editable: true
+  applyOnChange: true
+  description: "Ollama API URL for local model access (e.g. http://xxx.shared.olares.com/v1)"
+  default: ""
 options:
   apiTimeout: 0
   allowedOutboundPorts:
