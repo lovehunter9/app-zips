@@ -7,12 +7,21 @@ spec:
 
     Key Features
     - 100% open source, not coupled to any provider.
-    - Supports Claude, OpenAI, Google, or even local models.
+    - Supports Claude, OpenAI, Google, or even local models (including Ollama).
     - Built-in agents: build (full-access for development) and plan (read-only for analysis).
     - Out-of-the-box LSP support for intelligent code navigation.
     - Client/server architecture allows remote access from mobile apps.
+    - General subagent for complex searches and multistep tasks.
 
     Usage
     - Open the app and use the Web UI directly in your browser.
-    - Configure your API keys in the app settings (ANTHROPIC_API_KEY, OPENAI_API_KEY, etc.).
+    - Configure your LLM provider and API keys via the /connect command in the Web UI, or by editing opencode.json inside the container.
     - Your code workspace is mounted at /home/opencode/workspace (linked to your Home/Code directory).
+
+    Ollama Integration
+    - To use local Ollama models, set the OLLAMA_URL environment variable during installation (or edit it post-install via app settings).
+    - Example value: http://xxx.shared.olares.com/v1
+    - After setting OLLAMA_URL, configure OpenCode to use it by creating opencode.json in /home/opencode/workspace with the following structure:
+      {"provider":{"ollama":{"npm":"@ai-sdk/openai-compatible","models":{"your-model-id":{"name":"display-name"}},"options":{"baseURL":"https://your-opencode-domain/ollama"}}}}
+    - The /ollama path is a reverse proxy automatically configured by the OLLAMA_URL variable.
+    - After changing OLLAMA_URL, restart the opencodeingress deployment to apply.
