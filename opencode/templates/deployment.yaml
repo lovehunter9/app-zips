@@ -19,7 +19,6 @@ spec:
       labels:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: opencode
-        bytetrade.io/terminal: opencode
     spec:
       initContainers:
         - name: init-chmod-data
@@ -48,26 +47,13 @@ spec:
           # Official image from GitHub Container Registry
           # https://github.com/anomalyco/opencode/pkgs/container/opencode
           image: "ghcr.io/anomalyco/opencode:1.2.27"
-          command: ["/bin/sh"]
-          args: ["/etc/opencode/start.sh"]
-          envFrom:
-            - configMapRef:
-                name: opencode-env
+          command: ["opencode"]
+          args: ["web", "--hostname", "0.0.0.0", "--port", "3000"]
           env:
             - name: HOME
               value: /home/opencode
             - name: TERM
               value: xterm-256color
-            {{- if .Values.olaresEnv }}
-            {{- if .Values.olaresEnv.ANTHROPIC_API_KEY }}
-            - name: ANTHROPIC_API_KEY
-              value: "{{ .Values.olaresEnv.ANTHROPIC_API_KEY }}"
-            {{- end }}
-            {{- if .Values.olaresEnv.OPENAI_API_KEY }}
-            - name: OPENAI_API_KEY
-              value: "{{ .Values.olaresEnv.OPENAI_API_KEY }}"
-            {{- end }}
-            {{- end }}
           resources:
             limits:
               cpu: "4"
@@ -83,32 +69,15 @@ spec:
               mountPath: /home/opencode
             - name: opencode-workspace
               mountPath: /home/opencode/workspace
-            - name: startup-script
-              mountPath: /etc/opencode/start.sh
-              subPath: start.sh
-              readOnly: true
-            - name: bash-wrapper
-              mountPath: /bin/bash
-              subPath: bash
-              readOnly: true
-          # tcpSocket probe works for both modes:
-          # - web mode: port 3000 is listening
-          # - tui mode: probe fails but container stays alive via restartPolicy
           livenessProbe:
-            exec:
-              command:
-                - /bin/sh
-                - -c
-                - "[ \"$OPENCODE_MODE\" = 'tui' ] || nc -z 127.0.0.1 3000"
+            tcpSocket:
+              port: 3000
             initialDelaySeconds: 30
             periodSeconds: 15
             timeoutSeconds: 5
           readinessProbe:
-            exec:
-              command:
-                - /bin/sh
-                - -c
-                - "[ \"$OPENCODE_MODE\" = 'tui' ] || nc -z 127.0.0.1 3000"
+            tcpSocket:
+              port: 3000
             initialDelaySeconds: 10
             periodSeconds: 10
             timeoutSeconds: 5
@@ -123,14 +92,6 @@ spec:
           hostPath:
             path: "{{ .Values.userspace.userData }}/Code"
             type: DirectoryOrCreate
-        - name: startup-script
-          configMap:
-            name: opencode-startup
-            defaultMode: 0755
-        - name: bash-wrapper
-          configMap:
-            name: bash-wrapper
-            defaultMode: 0755
 
 ---
 apiVersion: v1

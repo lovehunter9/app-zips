@@ -30,11 +30,8 @@ spec:
     - Out-of-the-box LSP support for intelligent code navigation.
     - Client/server architecture allows remote access from mobile apps.
     - General subagent for complex searches and multistep tasks.
-    - Dual mode: switch between Web UI and TUI via ConfigMap, single entrance auto-adapts.
-
     Usage
-    - One unified entrance: auto-detects Web UI or Terminal based on OPENCODE_MODE.
-    - Default mode is Web UI. To switch to TUI mode, edit the ConfigMap (OPENCODE_MODE=tui) and restart.
+    - Open the app and use the Web UI directly in your browser.
     - Configure your API keys in the app settings (ANTHROPIC_API_KEY, OPENAI_API_KEY, etc.).
     - Your code workspace is mounted at /home/opencode/workspace (linked to your Home/Code directory).
   developer: Anomaly
@@ -64,20 +61,10 @@ permission:
   - Home
 options:
   apiTimeout: 0
+  allowedOutboundPorts:
+  - 80
+  - 443
   dependencies:
   - name: olares
     type: system
     version: '>=1.12.3-0'
-envs:
-  - envName: ANTHROPIC_API_KEY
-    required: false
-    applyOnChange: true
-    type: string
-    editable: true
-    description: "Anthropic API key for Claude models"
-  - envName: OPENAI_API_KEY
-    required: false
-    applyOnChange: true
-    type: string
-    editable: true
-    description: "OpenAI API key"

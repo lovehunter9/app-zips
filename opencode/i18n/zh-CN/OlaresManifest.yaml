@@ -11,10 +11,8 @@ spec:
     - 内置 agent：build（完整权限，用于开发）和 plan（只读，用于分析和规划）。
     - 开箱即用的 LSP 支持，提供智能代码导航。
     - 客户端/服务端架构，支持移动端远程访问。
-    - 双模式：通过 ConfigMap 在 Web UI 和 TUI 之间切换，统一入口自动适配。
 
     使用方法
-    - 统一入口：根据 OPENCODE_MODE 自动检测并展示 Web UI 或终端。
-    - 默认为 Web UI 模式。如需切换为 TUI 模式，编辑 ConfigMap（OPENCODE_MODE=tui）后重启即可。
+    - 打开应用，直接在浏览器中使用 Web UI。
     - 在应用设置中配置 API 密钥（如 ANTHROPIC_API_KEY、OPENAI_API_KEY）。
     - 代码工作区挂载在 /home/opencode/workspace（关联到 Home/Code 目录）。
