@@ -6,7 +6,7 @@ metadata:
   description: The open source AI coding agent
   appid: opencode
   title: OpenCode
-  version: '1.0.3'
+  version: '1.0.0'
   categories:
   - Developer Tools
   - Productivity_v112
@@ -33,16 +33,8 @@ spec:
 
     Usage
     - Open the app and use the Web UI directly in your browser.
-    - Configure your LLM provider and API keys via the /connect command in the Web UI, or by editing opencode.json inside the container.
+    - Configure your LLM provider and API keys in the Web UI.
     - Your code workspace is mounted at /home/opencode/workspace (linked to your Home/Code directory).
-
-    Ollama Integration
-    - To use local Ollama models, set the OLLAMA_URL environment variable during installation (or edit it post-install via app settings).
-    - Example value: http://xxx.shared.olares.com/v1
-    - After setting OLLAMA_URL, configure OpenCode to use it by creating opencode.json in /home/opencode/workspace with the following structure:
-      {"provider":{"ollama":{"npm":"@ai-sdk/openai-compatible","models":{"your-model-id":{"name":"display-name"}},"options":{"baseURL":"https://your-opencode-domain/ollama"}}}}
-    - The /ollama path is a reverse proxy automatically configured by the OLLAMA_URL variable.
-    - After changing OLLAMA_URL, restart the opencodeingress deployment to apply.
   developer: Anomaly
   website: https://opencode.ai/
   sourceCode: https://github.com/anomalyco/opencode
@@ -68,14 +60,6 @@ permission:
   appCache: true
   userData:
   - Home
-envs:
-- envName: OLLAMA_URL
-  type: string
-  required: false
-  editable: true
-  applyOnChange: true
-  description: "Ollama API URL for local model access (e.g. http://xxx.shared.olares.com/v1)"
-  default: ""
 options:
   apiTimeout: 0
   allowedOutboundPorts:

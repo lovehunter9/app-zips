@@ -15,13 +15,5 @@ spec:
 
     使用方法
     - 打开应用，直接在浏览器中使用 Web UI。
-    - 通过 Web UI 中的 /connect 命令配置 LLM 提供商和 API 密钥，或在容器内编辑 opencode.json。
+    - 通过 Web UI 配置 LLM 提供商和 API 密钥。
     - 代码工作区挂载在 /home/opencode/workspace（关联到 Home/Code 目录）。
-
-    Ollama 集成
-    - 要使用本地 Ollama 模型，请在安装时设置 OLLAMA_URL 环境变量（或安装后在应用设置中修改）。
-    - 示例值：http://xxx.shared.olares.com/v1
-    - 设置 OLLAMA_URL 后，在 /home/opencode/workspace 下创建 opencode.json 来配置 OpenCode 使用 Ollama：
-      {"provider":{"ollama":{"npm":"@ai-sdk/openai-compatible","models":{"模型ID":{"name":"显示名称"}},"options":{"baseURL":"https://你的opencode域名/ollama"}}}}
-    - /ollama 路径是由 OLLAMA_URL 变量自动配置的反向代理。
-    - 修改 OLLAMA_URL 后，需要重启 opencodeingress 部署才能生效。
