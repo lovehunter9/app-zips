@@ -10,16 +10,15 @@ metadata:
   categories:
   - Developer Tools
   - Productivity_v112
-entrances:
-- name: opencode
-  port: 8080
-  host: opencodeingress
-  title: OpenCode
-  icon: https://app.cdn.olares.com/appstore/default/defaulticon.webp
-  openMethod: window
-  authLevel: internal
+permission:
+  appData: true
+  appCache: true
+  userData:
+  - Home
 spec:
   versionName: '1.2.27'
+  featuredImage:
+  promoteImage:
   fullDescription: |
     OpenCode is the open source AI coding agent.
 
@@ -46,20 +45,15 @@ spec:
   license:
   - text: MIT
     url: https://github.com/anomalyco/opencode/blob/dev/LICENSE
-  requiredMemory: 512Mi
-  limitedMemory: 4Gi
-  requiredDisk: 128Mi
-  limitedDisk: 5Gi
-  requiredCpu: 0.5
-  limitedCpu: 4
+  requiredMemory: 640Mi
+  limitedMemory: 2560Mi
+  requiredDisk: 512Mi
+  limitedDisk: 2Gi
+  requiredCpu: 0.2
+  limitedCpu: 3
   supportArch:
   - amd64
   - arm64
-permission:
-  appData: true
-  appCache: true
-  userData:
-  - Home
 options:
   apiTimeout: 0
   allowedOutboundPorts:
@@ -69,3 +63,11 @@ options:
   - name: olares
     type: system
     version: '>=1.12.3-0'
+entrances:
+- name: opencode
+  port: 8080
+  host: opencodeingress
+  title: OpenCode
+  icon: https://app.cdn.olares.com/appstore/default/defaulticon.webp
+  openMethod: window
+  authLevel: internal

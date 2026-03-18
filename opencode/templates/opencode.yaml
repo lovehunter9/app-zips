@@ -28,8 +28,6 @@ spec:
             - "-c"
             - |
               mkdir -p /home/opencode/workspace /home/opencode/.opencode /home/opencode/.config/opencode
-              chown -R 1000:1000 /home/opencode || true
-              chmod -R 755 /home/opencode || true
           resources: {}
           volumeMounts:
             - name: opencode-home
@@ -41,14 +39,14 @@ spec:
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsUser: 0
-
       containers:
         - name: opencode
-          # Official image from GitHub Container Registry
-          # https://github.com/anomalyco/opencode/pkgs/container/opencode
-          image: "ghcr.io/anomalyco/opencode:1.2.27"
+          image: "docker.io/beclab/anomalyco-opencode:1.2.27"
           command: ["opencode"]
           args: ["web", "--hostname", "0.0.0.0", "--port", "3000"]
+          workingDir: /home/opencode/workspace
+          securityContext:
+            runAsUser: 0
           env:
             - name: HOME
               value: /home/opencode
@@ -56,8 +54,8 @@ spec:
               value: xterm-256color
           resources:
             limits:
-              cpu: "4"
-              memory: 4Gi
+              cpu: "2"
+              memory: 2Gi
             requests:
               cpu: 100m
               memory: 512Mi
@@ -81,7 +79,6 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 10
             timeoutSeconds: 5
-
       restartPolicy: Always
       volumes:
         - name: opencode-home
