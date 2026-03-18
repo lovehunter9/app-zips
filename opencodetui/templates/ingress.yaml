@@ -6,11 +6,7 @@ metadata:
   namespace: {{ .Release.Namespace }}
 data:
   nginx.conf: |
-    upstream backend {
-        server opencodetui:3000 max_fails=1 fail_timeout=5s;
-        server terminal:80 backup;
-    }
-
+    # Web UI
     server {
       listen 8080;
       access_log /opt/bitnami/openresty/nginx/logs/access.log;
@@ -27,17 +23,44 @@ data:
       proxy_set_header      x-forwarded-for           $proxy_add_x_forwarded_for;
 
       proxy_http_version 1.1;
-
       proxy_set_header upgrade $http_upgrade;
       proxy_set_header connection "upgrade";
 
       location / {
-          proxy_pass http://backend;
-          proxy_next_upstream error timeout;
-          proxy_connect_timeout 2s;
+          proxy_pass http://opencodetui:3000;
+          proxy_next_upstream error timeout http_500 http_502 http_503 http_504;
+          proxy_connect_timeout 60s;
           proxy_read_timeout 300s;
           proxy_send_timeout 300s;
           client_max_body_size 100m;
+      }
+    }
+
+    # TUI (terminal)
+    server {
+      listen 8081;
+      access_log /opt/bitnami/openresty/nginx/logs/access.log;
+      error_log /opt/bitnami/openresty/nginx/logs/error.log;
+
+      client_max_body_size 100m;
+
+      proxy_connect_timeout                          30s;
+      proxy_send_timeout                             300s;
+      proxy_read_timeout                             300s;
+      proxy_set_header      host                      $host;
+      proxy_set_header      x-forwarded-host          $http_host;
+      proxy_set_header      x-real-ip                 $remote_addr;
+      proxy_set_header      x-forwarded-for           $proxy_add_x_forwarded_for;
+
+      proxy_http_version 1.1;
+      proxy_set_header upgrade $http_upgrade;
+      proxy_set_header connection "upgrade";
+
+      location / {
+          proxy_pass http://terminal:80;
+          proxy_connect_timeout 60s;
+          proxy_read_timeout 300s;
+          proxy_send_timeout 300s;
       }
     }
 
@@ -77,6 +100,8 @@ spec:
           image: "docker.io/beclab/aboveos-bitnami-openresty:1.25.3-2"
           ports:
             - containerPort: 8080
+              protocol: TCP
+            - containerPort: 8081
               protocol: TCP
           env:
             - name: OPENRESTY_CONF_FILE
@@ -129,7 +154,11 @@ spec:
   selector:
     io.kompose.service: opencodetuiingress
   ports:
-    - name: opencodetuiingress
+    - name: webui
       protocol: TCP
       port: 8080
       targetPort: 8080
+    - name: tui
+      protocol: TCP
+      port: 8081
+      targetPort: 8081
