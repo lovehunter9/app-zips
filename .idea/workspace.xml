@@ -5,11 +5,25 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="e9836655-cb5c-456b-aef7-0ca255338318" name="Changes" comment="">
-      <change beforePath="$PROJECT_DIR$/opencodetui/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opencodetui/OlaresManifest.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/opencodetui/templates/configmap.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opencodetui/templates/configmap.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/opencodetui/templates/ingress.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opencodetui/templates/ingress.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/opencodetui/templates/opencodetui.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opencodetui/templates/opencodetui.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/opencodetui/templates/terminal.yaml" beforeDir="false" />
+      <change afterPath="$PROJECT_DIR$/opencodebak/.helmignore" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/opencodebak/Chart.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/opencodebak/OlaresManifest.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/opencodebak/i18n/en-US/OlaresManifest.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/opencodebak/i18n/zh-CN/OlaresManifest.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/opencodebak/opencode/.helmignore" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/opencodebak/opencode/Chart.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/opencodebak/opencode/OlaresManifest.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/opencodebak/opencode/i18n/en-US/OlaresManifest.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/opencodebak/opencode/i18n/zh-CN/OlaresManifest.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/opencodebak/opencode/owners" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/opencodebak/opencode/templates/ingress.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/opencodebak/opencode/templates/opencode.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/opencodebak/opencode/values.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/opencodebak/owners" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/opencodebak/templates/ingress.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/opencodebak/templates/opencode.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/opencodebak/values.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
