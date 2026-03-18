@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: opencode-startup
+  namespace: {{ .Release.Namespace }}
+data:
+  start.sh: |
+    #!/bin/sh
+    /shared-bin/ttyd --port 7681 --base-path /tui --writable --ping-interval 30 opencode attach http://localhost:3000 &
+    exec opencode web --hostname 0.0.0.0 --port 3000

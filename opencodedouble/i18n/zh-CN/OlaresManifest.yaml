@@ -1,0 +1,21 @@
+metadata:
+  title: OpenCode
+  description: 开源 AI 编程助手
+spec:
+  fullDescription: |
+    OpenCode 是一款开源的 AI 编程助手，Web UI 和 TUI 共享同一后端。
+
+    主要特性
+    - 100% 开源，不绑定任何单一供应商。
+    - 支持 Claude、OpenAI、Google 以及本地模型（包括 Ollama）。
+    - 内置 agent：build（完整权限，用于开发）和 plan（只读，用于分析和规划）。
+    - 开箱即用的 LSP 支持，提供智能代码导航。
+    - Web UI 和 TUI 共享同一后端，会话同步。
+    - 通用子代理，适用于复杂搜索和多步骤任务。
+
+    使用方法
+    - 打开应用即可直接访问 Web UI。
+    - 在 URL 后追加 /tui 即可在浏览器中访问 TUI。
+    - 两种模式共享同一后端，会话保持同步。
+    - 通过 Web UI 设置或 TUI 中的 /connect 命令配置 LLM 提供商和 API 密钥。
+    - 代码工作区挂载在 /home/opencode/workspace（关联到 Home/Code 目录）。
