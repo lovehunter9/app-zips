@@ -6,7 +6,7 @@ metadata:
   description: The open source AI coding agent with Web UI and TUI
   appid: opencodetui
   title: OpenCode TUI
-  version: '1.0.1'
+  version: '1.0.2'
   categories:
   - Developer Tools
   - Productivity_v112
@@ -29,8 +29,8 @@ spec:
     - General subagent for complex searches and multistep tasks.
 
     Usage
-    - Open the app to access the Web UI directly.
-    - Append /tui to the URL to access the TUI in your browser.
+    - Use the OpenCode Web entrance to access the Web UI.
+    - Use the OpenCode TUI entrance to access the TUI in your browser.
     - Both modes share the same backend, sessions are synced.
     - Configure your LLM provider and API keys in the Web UI or via /connect in TUI.
     - Your code workspace is mounted at /home/opencode/workspace (linked to your Home/Code directory).
@@ -45,8 +45,8 @@ spec:
   license:
   - text: MIT
     url: https://github.com/anomalyco/opencode/blob/dev/LICENSE
-  requiredMemory: 640Mi
-  limitedMemory: 2560Mi
+  requiredMemory: 1Gi
+  limitedMemory: 3Gi
   requiredDisk: 512Mi
   limitedDisk: 2Gi
   requiredCpu: 0.2
@@ -62,10 +62,17 @@ options:
   dependencies:
   - name: olares
     type: system
-    version: '>=1.12.3-0'
+    version: '>=1.12.4-0'
 entrances:
 - name: opencodetui
   port: 8080
+  host: opencodetuiingress
+  title: OpenCode Web
+  icon: https://app.cdn.olares.com/appstore/default/defaulticon.webp
+  openMethod: window
+  authLevel: internal
+- name: terminal
+  port: 8081
   host: opencodetuiingress
   title: OpenCode TUI
   icon: https://app.cdn.olares.com/appstore/default/defaulticon.webp

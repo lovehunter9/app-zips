@@ -14,8 +14,8 @@ spec:
     - 通用子代理，适用于复杂搜索和多步骤任务。
 
     使用方法
-    - 打开应用即可直接访问 Web UI。
-    - 在 URL 后追加 /tui 即可在浏览器中访问 TUI。
+    - 通过 OpenCode Web 入口访问 Web UI。
+    - 通过 OpenCode TUI 入口在浏览器中访问 TUI。
     - 两种模式共享同一后端，会话保持同步。
     - 通过 Web UI 设置或 TUI 中的 /connect 命令配置 LLM 提供商和 API 密钥。
     - 代码工作区挂载在 /home/opencode/workspace（关联到 Home/Code 目录）。

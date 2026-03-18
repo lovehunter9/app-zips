@@ -14,8 +14,8 @@ spec:
     - General subagent for complex searches and multistep tasks.
 
     Usage
-    - Open the app to access the Web UI directly.
-    - Append /tui to the URL to access the TUI in your browser.
+    - Use the OpenCode Web entrance to access the Web UI.
+    - Use the OpenCode TUI entrance to access the TUI in your browser.
     - Both modes share the same backend, sessions are synced.
     - Configure your LLM provider and API keys in the Web UI or via /connect in TUI.
     - Your code workspace is mounted at /home/opencode/workspace (linked to your Home/Code directory).
