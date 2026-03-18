@@ -1,0 +1,73 @@
+olaresManifest.version: '0.11.0'
+olaresManifest.type: app
+metadata:
+  name: opencodetui
+  icon: https://app.cdn.olares.com/appstore/default/defaulticon.webp
+  description: The open source AI coding agent (TUI default, dual mode)
+  appid: opencodetui
+  title: OpenCode TUI
+  version: '1.0.0'
+  categories:
+  - Developer Tools
+  - Productivity_v112
+permission:
+  appData: true
+  appCache: true
+  userData:
+  - Home
+spec:
+  versionName: '1.2.27'
+  fullDescription: |
+    OpenCode is the open source AI coding agent.
+
+    Key Features
+    - 100% open source, not coupled to any provider.
+    - Supports Claude, OpenAI, Google, or even local models (including Ollama).
+    - Built-in agents: build (full-access for development) and plan (read-only for analysis).
+    - Out-of-the-box LSP support for intelligent code navigation.
+    - Client/server architecture allows remote access from mobile apps.
+    - General subagent for complex searches and multistep tasks.
+    - Dual mode: switch between Web UI and TUI via ConfigMap, single entrance auto-adapts.
+
+    Usage
+    - One unified entrance: auto-detects Web UI or Terminal based on OPENCODE_MODE.
+    - Default mode is TUI. To switch to Web UI, edit the ConfigMap (OPENCODE_MODE=web) and restart.
+    - Configure your LLM provider and API keys in the app (Web UI settings or TUI /connect command).
+    - Your code workspace is mounted at /home/opencode/workspace (linked to your Home/Code directory).
+  developer: Anomaly
+  website: https://opencode.ai/
+  sourceCode: https://github.com/anomalyco/opencode
+  submitter: Olares
+  locale:
+  - en-US
+  - zh-CN
+  doc: https://opencode.ai/docs
+  license:
+  - text: MIT
+    url: https://github.com/anomalyco/opencode/blob/dev/LICENSE
+  requiredMemory: 768Mi
+  limitedMemory: 3Gi
+  requiredDisk: 512Mi
+  limitedDisk: 2Gi
+  requiredCpu: 0.2
+  limitedCpu: 3
+  supportArch:
+  - amd64
+  - arm64
+options:
+  apiTimeout: 0
+  allowedOutboundPorts:
+  - 80
+  - 443
+  dependencies:
+  - name: olares
+    type: system
+    version: '>=1.12.3-0'
+entrances:
+- name: opencodetui
+  port: 8080
+  host: opencodetuiingress
+  title: OpenCode TUI
+  icon: https://app.cdn.olares.com/appstore/default/defaulticon.webp
+  openMethod: window
+  authLevel: internal

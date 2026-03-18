@@ -1,0 +1,21 @@
+metadata:
+  title: OpenCode TUI
+  description: The open source AI coding agent (TUI default, dual mode)
+spec:
+  fullDescription: |
+    OpenCode is the open source AI coding agent.
+
+    Key Features
+    - 100% open source, not coupled to any provider.
+    - Supports Claude, OpenAI, Google, or even local models (including Ollama).
+    - Built-in agents: build (full-access for development) and plan (read-only for analysis).
+    - Out-of-the-box LSP support for intelligent code navigation.
+    - Client/server architecture allows remote access from mobile apps.
+    - General subagent for complex searches and multistep tasks.
+    - Dual mode: switch between Web UI and TUI via ConfigMap, single entrance auto-adapts.
+
+    Usage
+    - One unified entrance: auto-detects Web UI or Terminal based on OPENCODE_MODE.
+    - Default mode is TUI. To switch to Web UI, edit the ConfigMap (OPENCODE_MODE=web) and restart.
+    - Configure your LLM provider and API keys in the app (Web UI settings or TUI /connect command).
+    - Your code workspace is mounted at /home/opencode/workspace (linked to your Home/Code directory).
