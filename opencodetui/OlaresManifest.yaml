@@ -6,7 +6,7 @@ metadata:
   description: The open source AI coding agent with Web UI and TUI
   appid: opencodetui
   title: OpenCode TUI
-  version: '1.0.0'
+  version: '1.0.1'
   categories:
   - Developer Tools
   - Productivity_v112
@@ -45,8 +45,8 @@ spec:
   license:
   - text: MIT
     url: https://github.com/anomalyco/opencode/blob/dev/LICENSE
-  requiredMemory: 768Mi
-  limitedMemory: 3Gi
+  requiredMemory: 640Mi
+  limitedMemory: 2560Mi
   requiredDisk: 512Mi
   limitedDisk: 2Gi
   requiredCpu: 0.2
@@ -66,13 +66,6 @@ options:
 entrances:
 - name: opencodetui
   port: 8080
-  host: opencodetuiingress
-  title: OpenCode Web
-  icon: https://app.cdn.olares.com/appstore/default/defaulticon.webp
-  openMethod: window
-  authLevel: internal
-- name: terminal
-  port: 8081
   host: opencodetuiingress
   title: OpenCode TUI
   icon: https://app.cdn.olares.com/appstore/default/defaulticon.webp

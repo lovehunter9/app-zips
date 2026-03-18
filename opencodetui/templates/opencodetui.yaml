@@ -19,7 +19,6 @@ spec:
       labels:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: opencodetui
-        bytetrade.io/terminal: opencodetui
     spec:
       initContainers:
         - name: init-chmod-data
@@ -40,11 +39,19 @@ spec:
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsUser: 0
+        - name: install-ttyd
+          image: "docker.io/beclab/tsl0922-ttyd:alpine"
+          command: ["cp", "/usr/bin/ttyd", "/shared-bin/ttyd"]
+          volumeMounts:
+            - name: shared-bin
+              mountPath: /shared-bin
+          securityContext:
+            runAsUser: 0
       containers:
         - name: opencodetui
           image: "docker.io/beclab/anomalyco-opencode:1.2.27"
-          command: ["opencode"]
-          args: ["web", "--hostname", "0.0.0.0", "--port", "3000"]
+          command: ["sh"]
+          args: ["/etc/opencode/start.sh"]
           workingDir: /home/opencode/workspace
           securityContext:
             runAsUser: 0
@@ -63,14 +70,19 @@ spec:
           ports:
             - containerPort: 3000
               protocol: TCP
+            - containerPort: 7681
+              protocol: TCP
           volumeMounts:
             - name: opencode-home
               mountPath: /home/opencode
             - name: opencode-workspace
               mountPath: /home/opencode/workspace
-            - name: bash-wrapper
-              mountPath: /bin/bash
-              subPath: bash
+            - name: shared-bin
+              mountPath: /shared-bin
+              readOnly: true
+            - name: startup-script
+              mountPath: /etc/opencode/start.sh
+              subPath: start.sh
               readOnly: true
           livenessProbe:
             tcpSocket:
@@ -94,9 +106,11 @@ spec:
           hostPath:
             path: "{{ .Values.userspace.userData }}/Code"
             type: DirectoryOrCreate
-        - name: bash-wrapper
+        - name: shared-bin
+          emptyDir: {}
+        - name: startup-script
           configMap:
-            name: bash-wrapper
+            name: opencodetui-startup
             defaultMode: 0755
 
 ---
@@ -112,6 +126,9 @@ spec:
     - name: web
       port: 3000
       targetPort: 3000
+    - name: ttyd
+      port: 7681
+      targetPort: 7681
   selector:
     io.kompose.service: opencodetui
 status:

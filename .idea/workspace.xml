@@ -5,13 +5,11 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="e9836655-cb5c-456b-aef7-0ca255338318" name="Changes" comment="">
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/opencodetui/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opencodetui/OlaresManifest.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/opencodetui/i18n/en-US/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opencodetui/i18n/en-US/OlaresManifest.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/opencodetui/i18n/zh-CN/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opencodetui/i18n/zh-CN/OlaresManifest.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/opencodetui/templates/configmap.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opencodetui/templates/configmap.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/opencodetui/templates/ingress.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opencodetui/templates/ingress.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/opencodetui/templates/opencodetui.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opencodetui/templates/opencodetui.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/opencodetui/templates/terminal.yaml" beforeDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
