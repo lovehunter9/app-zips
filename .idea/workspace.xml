@@ -5,14 +5,18 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="e9836655-cb5c-456b-aef7-0ca255338318" name="Changes" comment="">
+      <change afterPath="$PROJECT_DIR$/context7/.helmignore" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/context7/Chart.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/context7/OlaresManifest.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/context7/docker/Dockerfile" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/context7/i18n/en-US/OlaresManifest.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/context7/i18n/zh-CN/OlaresManifest.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/context7/owners" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/context7/templates/context7.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/context7/templates/ingress.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/context7/templates/terminal.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/context7/values.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/opencodetui/Chart.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opencodetui/Chart.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/opencodetui/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opencodetui/OlaresManifest.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/opencodetui/i18n/en-US/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opencodetui/i18n/en-US/OlaresManifest.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/opencodetui/i18n/zh-CN/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opencodetui/i18n/zh-CN/OlaresManifest.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/opencodetui/templates/configmap.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opencodetui/templates/configmap.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/opencodetui/templates/ingress.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opencodetui/templates/ingress.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/opencodetui/templates/opencodetui.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opencodetui/templates/opencodetui.yaml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -20,7 +24,7 @@
     <option name="LAST_RESOLUTION" value="IGNORE" />
   </component>
   <component name="EmbeddingIndexingInfo">
-    <option name="cachedIndexableFilesCount" value="1059" />
+    <option name="cachedIndexableFilesCount" value="1115" />
     <option name="fileBasedEmbeddingIndicesEnabled" value="true" />
   </component>
   <component name="FileTemplateManagerImpl">
@@ -457,6 +461,7 @@
       <workItem from="1773373054333" duration="561000" />
       <workItem from="1773543643195" duration="593000" />
       <workItem from="1773718547586" duration="593000" />
+      <workItem from="1773804723192" duration="528000" />
     </task>
     <servers />
   </component>
