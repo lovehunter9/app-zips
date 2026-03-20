@@ -6,7 +6,7 @@ metadata:
   description: Up-to-date code documentation for LLMs and AI code editors
   appid: context7
   title: Context7
-  version: '1.0.0'
+  version: '1.0.1'
   categories:
   - Developer Tools
   - Productivity_v112
@@ -61,14 +61,6 @@ options:
   - name: olares
     type: system
     version: '>=1.12.3-0'
-sharedEntrances:
-- name: context7
-  host: sharedentrances-context7
-  port: 0
-  title: Context7
-  icon: https://app.cdn.olares.com/appstore/default/defaulticon.webp
-  invisible: true
-  authLevel: internal
 entrances:
 - name: context7
   port: 8080

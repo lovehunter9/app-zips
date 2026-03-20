@@ -75,20 +75,3 @@ spec:
 status:
   loadBalancer: {}
 
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: sharedentrances-context7
-  namespace: "{{ .Release.Namespace }}"
-  labels:
-    io.kompose.service: context7
-spec:
-  ports:
-    - name: "8080"
-      port: 80
-      targetPort: 8080
-  selector:
-    io.kompose.service: context7
-status:
-  loadBalancer: {}
