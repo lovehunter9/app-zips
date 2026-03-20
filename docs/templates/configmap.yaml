@@ -90,10 +90,17 @@ data:
     #!/bin/sh
     set -e
 
+    cleanup() {
+      echo "=== Received shutdown signal, exiting ==="
+      exit 0
+    }
+    trap cleanup TERM INT
+
     echo "=== Waiting for PostgreSQL ==="
     until python manage.py check --database default 2>/dev/null; do
       echo "  PostgreSQL not ready, retrying in 3s..."
-      sleep 3
+      sleep 3 &
+      wait $!
     done
     echo "  PostgreSQL is ready."
 
@@ -145,7 +152,8 @@ data:
     echo "=== Waiting for MinIO ==="
     until wget -q --spider http://127.0.0.1:9000/minio/health/ready 2>/dev/null; do
       echo "  MinIO not ready, retrying in 3s..."
-      sleep 3
+      sleep 3 &
+      wait $!
     done
     echo "  MinIO is ready."
 
