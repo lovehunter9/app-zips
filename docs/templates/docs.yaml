@@ -1,0 +1,220 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: docs
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: docs
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: docs
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: docs
+    spec:
+      initContainers:
+        - name: fix-permissions
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
+          command: ["sh", "-c"]
+          args:
+            - |
+              mkdir -p /minio-data/docs-media-storage
+              chown -R 1000:1000 /minio-data
+              chmod -R 755 /minio-data
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 50m
+              memory: 64Mi
+          volumeMounts:
+            - name: minio-data
+              mountPath: /minio-data
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+
+      containers:
+        - name: frontend
+          image: docker.io/lasuite/impress-frontend:v4.8.2
+          command: ["/docker-entrypoint.sh"]
+          args: ["nginx", "-g", "daemon off;"]
+          env:
+            - name: DOCS_HOST
+              value: "localhost"
+            - name: BACKEND_HOST
+              value: "127.0.0.1"
+            - name: FRONTEND_HOST
+              value: "127.0.0.1"
+            - name: YPROVIDER_HOST
+              value: "127.0.0.1"
+            - name: S3_HOST
+              value: "127.0.0.1:9000"
+            - name: BUCKET_NAME
+              value: "docs-media-storage"
+          ports:
+            - containerPort: 8083
+              protocol: TCP
+          volumeMounts:
+            - name: nginx-routing
+              mountPath: /etc/nginx/conf.d/docs.conf
+              subPath: docs.conf
+          resources:
+            requests:
+              cpu: 20m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          readinessProbe:
+            tcpSocket:
+              port: 8083
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            tcpSocket:
+              port: 8083
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 5
+
+        - name: backend
+          image: docker.io/lasuite/impress-backend:v4.8.2
+          command: ["/usr/local/bin/entrypoint"]
+          args: ["sh", "/scripts/startup.sh"]
+          envFrom:
+            - configMapRef:
+                name: docs-env
+          ports:
+            - containerPort: 8000
+              protocol: TCP
+          volumeMounts:
+            - name: startup-script
+              mountPath: /scripts/startup.sh
+              subPath: startup.sh
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 768Mi
+          readinessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 5
+
+        - name: yprovider
+          image: docker.io/lasuite/impress-y-provider:v4.8.2
+          envFrom:
+            - configMapRef:
+                name: docs-yprovider-env
+          ports:
+            - containerPort: 4444
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 384Mi
+          readinessProbe:
+            tcpSocket:
+              port: 4444
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            tcpSocket:
+              port: 4444
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+
+        - name: minio
+          image: docker.io/minio/minio:latest
+          command: ["minio"]
+          args: ["server", "/data"]
+          env:
+            - name: MINIO_ROOT_USER
+              value: "minioadmin"
+            - name: MINIO_ROOT_PASSWORD
+              value: "minioadmin"
+          ports:
+            - containerPort: 9000
+              protocol: TCP
+          volumeMounts:
+            - name: minio-data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 30m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /minio/health/ready
+              port: 9000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /minio/health/live
+              port: 9000
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 5
+
+      restartPolicy: Always
+
+      volumes:
+        - name: nginx-routing
+          configMap:
+            name: docs-nginx-routing
+        - name: startup-script
+          configMap:
+            name: docs-startup
+            defaultMode: 0755
+        - name: minio-data
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appCache }}/minio'
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: docs
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: docs
+spec:
+  ports:
+    - name: http
+      port: 8083
+      targetPort: 8083
+      protocol: TCP
+  selector:
+    io.kompose.service: docs
+status:
+  loadBalancer: {}
