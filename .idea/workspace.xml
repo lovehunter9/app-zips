@@ -5,18 +5,7 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="e9836655-cb5c-456b-aef7-0ca255338318" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/opencoderootperfectbak/.helmignore" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/opencoderootperfectbak/Chart.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/opencoderootperfectbak/OlaresManifest.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/opencoderootperfectbak/i18n/en-US/OlaresManifest.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/opencoderootperfectbak/i18n/zh-CN/OlaresManifest.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/opencoderootperfectbak/owners" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/opencoderootperfectbak/templates/ingress.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/opencoderootperfectbak/templates/opencode.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/opencoderootperfectbak/values.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/opencode/Chart.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opencode/Chart.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/opencode/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opencode/OlaresManifest.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/opencode/templates/opencode.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opencode/templates/opencode.yaml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />

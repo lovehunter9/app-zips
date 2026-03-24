@@ -111,7 +111,8 @@ spec:
                 curl wget \
                 bash \
                 openssh-client \
-                su-exec
+                su-exec \
+                nodejs npm
 
               echo "=== Setting up user (uid 1000) ==="
               addgroup -g 1000 opencode 2>/dev/null || true
