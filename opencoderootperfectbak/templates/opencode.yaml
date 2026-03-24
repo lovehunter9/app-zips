@@ -27,14 +27,7 @@ spec:
             - sh
             - "-c"
             - |
-              mkdir -p /home/opencode/workspace \
-                       /home/opencode/.opencode \
-                       /home/opencode/.config/opencode \
-                       /home/opencode/.glibc-cache
-              chown -R 1000:1000 /home/opencode/.opencode \
-                                 /home/opencode/.config \
-                                 /home/opencode/.glibc-cache
-              chown 1000:1000 /home/opencode /home/opencode/workspace
+              mkdir -p /home/opencode/workspace /home/opencode/.opencode /home/opencode/.config/opencode
           resources: {}
           volumeMounts:
             - name: opencode-home
@@ -103,22 +96,6 @@ spec:
             - sh
             - "-c"
             - |
-              echo "=== Installing common tools ==="
-              apk add --no-cache \
-                python3 py3-pip \
-                git \
-                sudo \
-                curl wget \
-                bash \
-                openssh-client \
-                su-exec
-
-              echo "=== Setting up user (uid 1000) ==="
-              addgroup -g 1000 opencode 2>/dev/null || true
-              adduser -D -u 1000 -G opencode -h /home/opencode -s /bin/bash opencode 2>/dev/null || true
-              echo "opencode ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/opencode
-              chmod 440 /etc/sudoers.d/opencode
-
               CACHE="/home/opencode/.glibc-cache"
               ARCH=$(uname -m)
 
@@ -139,10 +116,8 @@ spec:
                 echo "=== Arch $ARCH: using original binary (terminal may not be available) ==="
               fi
 
-              chown 1000:1000 /home/opencode /home/opencode/workspace
-
-              echo "=== Starting opencode as uid 1000 ==="
-              exec su-exec opencode opencode web --hostname 0.0.0.0 --port 3000
+              echo "=== Starting opencode ==="
+              exec opencode web --hostname 0.0.0.0 --port 3000
           workingDir: /home/opencode/workspace
           securityContext:
             runAsUser: 0
