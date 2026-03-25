@@ -30,7 +30,8 @@ spec:
               mkdir -p /home/opencode/workspace \
                        /home/opencode/.opencode \
                        /home/opencode/.config/opencode \
-                       /home/opencode/.config/opencode/skills/web-preview
+                       /home/opencode/.config/opencode/skills/web-preview \
+                       /home/opencode/.config/opencode/skills/system-admin
               SKILL="/home/opencode/.config/opencode/skills/web-preview/SKILL.md"
               printf '%s\n' \
                 '---' \
@@ -106,6 +107,59 @@ spec:
                 '- If a port is busy, pick another port and adjust --base accordingly' \
                 '- Keep the dev server running in the foreground so it stays alive' \
                 > "$SKILL"
+              ADMIN="/home/opencode/.config/opencode/skills/system-admin/SKILL.md"
+              printf '%s\n' \
+                '---' \
+                'name: system-admin' \
+                'description: Install system packages and manage the container environment' \
+                '---' \
+                '' \
+                '## You have sudo' \
+                '' \
+                'You are running as a non-root user (uid 1000) but you have **passwordless sudo**.' \
+                'You can run ANY command as root by prefixing it with `sudo`.' \
+                '' \
+                '## Installing system packages' \
+                '' \
+                'This is an Alpine Linux container. Use `apk` to install packages:' \
+                '' \
+                '```' \
+                'sudo apk add --no-cache openjdk17-jdk' \
+                '```' \
+                '' \
+                'Packages installed this way are immediately available in PATH.' \
+                'Do NOT download tarballs or modify ~/.profile — just use `sudo apk add`.' \
+                '' \
+                '## Common package names (Alpine)' \
+                '' \
+                '| Need     | Package name              |' \
+                '|----------|---------------------------|' \
+                '| Java 17  | openjdk17-jdk             |' \
+                '| Java 21  | openjdk21-jdk             |' \
+                '| GCC/G++  | build-base                |' \
+                '| Make     | make                      |' \
+                '| CMake    | cmake                     |' \
+                '| SQLite   | sqlite                    |' \
+                '| PostgreSQL client | postgresql-client |' \
+                '| MySQL client | mariadb-client         |' \
+                '| FFmpeg   | ffmpeg                    |' \
+                '| ImageMagick | imagemagick            |' \
+                '' \
+                'To search for a package: `sudo apk search <keyword>`' \
+                '' \
+                '## Pre-installed tools' \
+                '' \
+                'The following are already available (no install needed):' \
+                'python3, pip, git, node, npm, go, rustc, cargo, curl, wget, bash, ssh, ss,' \
+                'zip, unzip, gzip, bzip2, xz, tar, zstd, sudo' \
+                '' \
+                '## Rules' \
+                '' \
+                '- ALWAYS use `sudo apk add` for system packages — NEVER download binaries manually' \
+                '- NEVER tell the user that you cannot install system packages — you CAN via sudo' \
+                '- NEVER modify ~/.profile or ~/.bashrc for PATH — apk installs to standard paths' \
+                '- If `apk add` fails, run `sudo apk update` first, then retry' \
+                > "$ADMIN"
               chown -R 1000:1000 /home/opencode/.opencode \
                                  /home/opencode/.config
               chown 1000:1000 /home/opencode /home/opencode/workspace
