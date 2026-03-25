@@ -37,7 +37,7 @@ spec:
               printf '%s\n' \
                 '---' \
                 'name: web-preview' \
-                'description: Preview web applications running in this environment' \
+                'description: MUST load for any web development. Start dev servers, preview web apps, generate preview URLs. Covers Vite, React, Next.js, Vue, Flask, static sites.' \
                 '---' \
                 '' \
                 '## How to preview' \
@@ -155,7 +155,7 @@ spec:
               printf '%s\n' \
                 '---' \
                 'name: system-admin' \
-                'description: Install system packages and manage the container environment' \
+                'description: MUST load before installing ANY system package. Provides pkg-install for Java, Python, Go, Rust, FFmpeg, databases, compilers, and all Alpine packages.' \
                 '---' \
                 '' \
                 '## pkg-install — system package manager' \
@@ -256,6 +256,16 @@ spec:
                 '- NEVER modify ~/.profile or ~/.bashrc for PATH — packages install to standard paths' \
                 '- When unsure about the package name, use `pkg-install --search <keyword>` first' \
                 > "$ADMIN"
+              if [ ! -f /home/opencode/workspace/opencode.json ]; then
+                printf '%s\n' \
+                  '{' \
+                  '  "instructions": [' \
+                  '    "You have special skills. Before ANY web development task (create site, start server, preview), load the web-preview skill. Before installing ANY system package, load the system-admin skill.",' \
+                  '    "NEVER use sudo, apt, or apk directly. Use pkg-install instead.",' \
+                  '    "NEVER show localhost URLs. Dev servers are accessed via /__preview/<port>/ path on the current domain."' \
+                  '  ]' \
+                  '}' > /home/opencode/workspace/opencode.json
+              fi
               chown -R 1000:1000 /home/opencode/.opencode \
                                  /home/opencode/.config \
                                  /home/opencode/.pkg-queue
