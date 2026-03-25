@@ -45,10 +45,10 @@ spec:
   license:
   - text: MIT
     url: https://github.com/anomalyco/opencode/blob/dev/LICENSE
-  requiredMemory: 640Mi
-  limitedMemory: 2560Mi
-  requiredDisk: 512Mi
-  limitedDisk: 2Gi
+  requiredMemory: 768Mi
+  limitedMemory: 2816Mi
+  requiredDisk: 1Gi
+  limitedDisk: 3Gi
   requiredCpu: 0.2
   limitedCpu: 3
   supportArch:

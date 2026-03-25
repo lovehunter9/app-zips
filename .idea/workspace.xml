@@ -6,6 +6,8 @@
   <component name="ChangeListManager">
     <list default="true" id="e9836655-cb5c-456b-aef7-0ca255338318" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/opencode/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opencode/OlaresManifest.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/opencode/templates/ingress.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opencode/templates/ingress.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/opencode/templates/opencode.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opencode/templates/opencode.yaml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -14,7 +16,7 @@
     <option name="LAST_RESOLUTION" value="IGNORE" />
   </component>
   <component name="EmbeddingIndexingInfo">
-    <option name="cachedIndexableFilesCount" value="1137" />
+    <option name="cachedIndexableFilesCount" value="1147" />
     <option name="fileBasedEmbeddingIndicesEnabled" value="true" />
   </component>
   <component name="FileTemplateManagerImpl">
@@ -454,6 +456,7 @@
       <workItem from="1773804723192" duration="528000" />
       <workItem from="1773891011949" duration="591000" />
       <workItem from="1773977834232" duration="587000" />
+      <workItem from="1774323476675" duration="588000" />
     </task>
     <servers />
   </component>
