@@ -636,21 +636,25 @@ spec:
                   REQ=$(cat "$QUEUE/request")
                   rm -f "$QUEUE/request"
 
+                  TMP="$QUEUE/.result.tmp"
                   case "$REQ" in
                     SEARCH\ *)
                       KEYWORD="${REQ#SEARCH }"
                       apk update >/dev/null 2>&1
-                      apk search "$KEYWORD" > "$QUEUE/search-result" 2>&1
+                      apk search "$KEYWORD" > "$TMP" 2>&1
+                      mv "$TMP" "$QUEUE/search-result"
                       ;;
                     LIST)
-                      apk info > "$QUEUE/search-result" 2>&1
+                      apk info > "$TMP" 2>&1
+                      mv "$TMP" "$QUEUE/search-result"
                       ;;
                     INFO\ *)
                       TARGET="${REQ#INFO }"
                       apk update >/dev/null 2>&1
                       { apk policy "$TARGET" 2>/dev/null
                         echo ""
-                        apk info -d -s "$TARGET" 2>/dev/null; } > "$QUEUE/search-result" 2>&1
+                        apk info -d -s "$TARGET" 2>/dev/null; } > "$TMP" 2>&1
+                      mv "$TMP" "$QUEUE/search-result"
                       ;;
                     REMOVE\ *)
                       PKGS="${REQ#REMOVE }"
