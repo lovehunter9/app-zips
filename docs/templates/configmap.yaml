@@ -27,18 +27,27 @@ data:
   OIDC_RP_CLIENT_SECRET: "{{ .Values.oidc.client.secret }}"
   OIDC_RP_SIGN_ALGO: "RS256"
   OIDC_RP_SCOPES: "openid email profile"
-  OIDC_OP_URL: "{{ .Values.oidc.issuer }}"
   OIDC_OP_JWKS_ENDPOINT: "{{ .Values.oidc.issuer }}/jwks"
   OIDC_OP_AUTHORIZATION_ENDPOINT: "{{ .Values.oidc.issuer }}/authorize"
   OIDC_OP_TOKEN_ENDPOINT: "{{ .Values.oidc.issuer }}/token"
   OIDC_OP_USER_ENDPOINT: "{{ .Values.oidc.issuer }}/userinfo"
+  OIDC_OP_LOGOUT_ENDPOINT: "{{ .Values.oidc.issuer }}/logout"
+  OIDC_CREATE_USER: "True"
   OIDC_STORE_ACCESS_TOKEN: "True"
   OIDC_STORE_REFRESH_TOKEN: "True"
+  OIDC_STORE_ID_TOKEN: "True"
+  OIDC_REDIRECT_REQUIRE_HTTPS: "True"
+  OIDC_FALLBACK_TO_EMAIL_FOR_IDENTIFICATION: "True"
 
   LOGIN_REDIRECT_URL: "https://{{ $docsDomain }}"
   LOGIN_REDIRECT_URL_FAILURE: "https://{{ $docsDomain }}"
   LOGOUT_REDIRECT_URL: "https://{{ $docsDomain }}"
   OIDC_REDIRECT_ALLOWED_HOSTS: "{{ $docsDomain }}"
+
+  DJANGO_CSRF_TRUSTED_ORIGINS: "https://{{ $docsDomain }}"
+  DJANGO_CORS_ALLOWED_ORIGINS: "https://{{ $docsDomain }}"
+
+  FRONTEND_HOMEPAGE_FEATURE_ENABLED: "true"
 
   IMPRESS_BASE_URL: "https://{{ $docsDomain }}"
   MEDIA_BASE_URL: "https://{{ $docsDomain }}"
