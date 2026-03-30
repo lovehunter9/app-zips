@@ -6,12 +6,16 @@
   <component name="ChangeListManager">
     <list default="true" id="e9836655-cb5c-456b-aef7-0ca255338318" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/context7/Chart.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/context7/Chart.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/context7/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/context7/OlaresManifest.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/context7/templates/context7.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/context7/templates/context7.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/context7/templates/terminal.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/context7/templates/terminal.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/docs/templates/configmap.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/docs/templates/configmap.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/docs/templates/ingress.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/docs/templates/ingress.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/.helmignore" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/Chart.yaml" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/OlaresManifest.yaml" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/i18n/en-US/OlaresManifest.yaml" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/i18n/zh-CN/OlaresManifest.yaml" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/owners" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/templates/configmap.yaml" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/templates/docs.yaml" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/templates/ingress.yaml" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/values.yaml" beforeDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -19,7 +23,7 @@
     <option name="LAST_RESOLUTION" value="IGNORE" />
   </component>
   <component name="EmbeddingIndexingInfo">
-    <option name="cachedIndexableFilesCount" value="1163" />
+    <option name="cachedIndexableFilesCount" value="1164" />
     <option name="fileBasedEmbeddingIndicesEnabled" value="true" />
   </component>
   <component name="FileTemplateManagerImpl">
@@ -460,6 +464,7 @@
       <workItem from="1773891011949" duration="591000" />
       <workItem from="1773977834232" duration="587000" />
       <workItem from="1774323476675" duration="588000" />
+      <workItem from="1774582759050" duration="580000" />
     </task>
     <servers />
   </component>
