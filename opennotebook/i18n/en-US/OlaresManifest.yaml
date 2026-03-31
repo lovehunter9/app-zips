@@ -9,13 +9,37 @@ spec:
 
     Open Notebook empowers you to:
     - Control your data: Keep your research private and secure
-    - Choose your AI models: Support for 16+ providers including OpenAI, Anthropic, Ollama, LM Studio, and more
+    - Choose your AI models: Support for 16+ providers including OpenAI, Anthropic, Ollama, LM Studio, and more — all configurable via UI
     - Organize multi-modal content: PDFs, videos, audio, web pages, and more
     - Generate professional podcasts: Advanced multi-speaker podcast generation
     - Search intelligently: Full-text and vector search across all your content
     - Chat with context: AI conversations powered by your research
 
   upgradeDescription: |
+    Open Notebook version 1.8.1 (upgraded from 1.4.0)
+    
+    Major New Features:
+    - UI-based API Key Management: Configure all 14+ AI providers via Settings → API Keys (no more env files!)
+    - Secure credential storage with Fernet AES-128-CBC encryption
+    - Internationalization (i18n): Support for Chinese, Japanese, Russian, Italian, French, Bengali and more
+    - Content-type aware text chunking with automatic HTML/Markdown detection
+    - Podcast Model Registry: Episode/speaker profiles now use model registry with credential passthrough
+    - Podcast failure recovery with retry capabilities
+    - Podcast language support via podcast-creator 0.12.0
+    
+    Important Improvements:
+    - Removed 50-source cap for notebook chat context
+    - Fixed SurrealDB getting stuck issues
+    - Fixed tiktoken network errors in offline/air-gapped Docker deployments
+    - Large document embedding (3MB+) now batched to prevent 413 errors
+    - CJK text orientation fixes
+    - Better error messages for LLM provider errors
+    - HTML clipboard detection for text sources
+    
+    Full release notes at: https://github.com/lfnovo/open-notebook/releases/tag/v1.8.1
+
+    ---
+
     Open Notebook version 1.4.0
     
     Major Updates:

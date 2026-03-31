@@ -9,13 +9,37 @@ spec:
 
     Open Notebook 让您能够：
     - 掌控您的数据：让您的研究数据私密且安全
-    - 自由选择 AI 模型：支持 16+ 个提供商，包括 OpenAI、Anthropic、Ollama、LM Studio 等
+    - 自由选择 AI 模型：支持 16+ 个提供商，包括 OpenAI、Anthropic、Ollama、LM Studio 等 — 均可通过界面配置
     - 高效管理多模态内容：支持 PDF、视频、音频、网页等多种内容
     - 生成专业播客：具备先进的多说话人播客生成能力
     - 智能检索：全文检索与向量检索结合，轻松搜索一切内容
     - 上下文对话：由您研究内容驱动的 AI 智能对话
 
   upgradeDescription: |
+    Open Notebook 1.8.1 版本（从 1.4.0 升级）
+    
+    重要新功能：
+    - 界面化 API 密钥管理：通过设置 → API 密钥配置所有 14+ 个 AI 提供商（无需再编辑环境变量！）
+    - 安全凭证存储，采用 Fernet AES-128-CBC 加密
+    - 国际化（i18n）：支持中文、日语、俄语、意大利语、法语、孟加拉语等多种语言
+    - 内容类型感知的文本分块，自动检测 HTML/Markdown
+    - 播客模型注册中心：节目/演讲者配置文件现使用模型注册中心，支持凭证自动传递
+    - 播客生成失败恢复与重试功能
+    - 通过 podcast-creator 0.12.0 支持播客语言选择
+    
+    重要改进：
+    - 移除笔记本聊天上下文的 50 个来源限制
+    - 修复 SurrealDB 卡住问题
+    - 修复离线/静网 Docker 部署中的 tiktoken 网络错误
+    - 大文档嵌入（3MB+）现采用批量处理，防止 413 错误
+    - 修复中日韩文字方向问题
+    - 改进 LLM 提供商错误消息显示
+    - 文本来源的 HTML 剪贴板检测
+    
+    完整发布说明请参阅：https://github.com/lfnovo/open-notebook/releases/tag/v1.8.1
+
+    ---
+
     Open Notebook 1.4.0 版本
     
     主要更新：
