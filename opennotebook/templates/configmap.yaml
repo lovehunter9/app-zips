@@ -64,7 +64,7 @@ data:
   # - Local Ollama on CPU: Consider 600 seconds (10 minutes) or more
   # - Remote LM Studio over slow network: Consider 900 seconds (15 minutes)
   # - Very large documents: May need 900+ seconds
-  # API_CLIENT_TIMEOUT: "300"
+  API_CLIENT_TIMEOUT: "600"
   
   # ESPERANTO LLM TIMEOUT (in seconds)
   # Controls the timeout for AI model API calls at the Esperanto library level
@@ -82,7 +82,7 @@ data:
   #
   # Note: If transformations complete but you see timeout errors, increase API_CLIENT_TIMEOUT first.
   # Only increase ESPERANTO_LLM_TIMEOUT if the model itself is timing out during inference.
-  # ESPERANTO_LLM_TIMEOUT: "60"
+  ESPERANTO_LLM_TIMEOUT: "300"
   
   # SSL VERIFICATION CONFIGURATION
   # Configure SSL certificate verification for local AI providers (Ollama, LM Studio, etc.)

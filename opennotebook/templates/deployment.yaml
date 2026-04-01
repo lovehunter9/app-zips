@@ -26,7 +26,7 @@ spec:
           - '-c'
           - |
             mkdir -p /app-data-root
-            chown -R 0:0 /app-data-root || true
+            chown -R 1000:1000 /app-data-root || true
             chmod -R 777 /app-data-root || true
         resources: {}
         volumeMounts:
