@@ -1,5 +1,8 @@
 {{- $env := .Values.olaresEnv | default dict -}}
 {{- $speachesGpu := eq (index $env "SPEACHES_GPU" | default "") "true" }}
+{{- $speachesDomainENV := split "," .Values.domain.speaches -}}
+{{- $speachesDomain := index $speachesDomainENV "_0" -}}
+{{- $topDomain := regexReplaceAll ".*?([^.]+\\.[^.]+)$" $speachesDomain "$1" -}}
 
 ---
 apiVersion: apps/v1
@@ -45,7 +48,7 @@ spec:
           securityContext:
             runAsUser: 0
         - name: download-models
-          image: "ghcr.io/speaches-ai/speaches:0.8.3-cpu"
+          image: "ghcr.io/speaches-ai/speaches:0.8.2-cpu"
           env:
             - name: HF_HUB_CACHE
               value: "/home/ubuntu/.cache/huggingface/hub"
@@ -78,10 +81,17 @@ spec:
       containers:
         - name: speaches
           {{- if $speachesGpu }}
-          image: "ghcr.io/speaches-ai/speaches:0.8.3-cuda-12.4.1"
+          image: "ghcr.io/speaches-ai/speaches:0.8.2-cuda-12.4.1"
           {{- else }}
-          image: "ghcr.io/speaches-ai/speaches:0.8.3-cpu"
+          image: "ghcr.io/speaches-ai/speaches:0.8.2-cpu"
           {{- end }}
+          env:
+            - name: HF_HUB_CACHE
+              value: "/home/ubuntu/.cache/huggingface/hub"
+            - name: LOOPBACK_HOST_URL
+              value: "http://localhost:8000"
+            - name: CHAT_COMPLETION_BASE_URL
+              value: "http://d54536a50.shared.{{ $topDomain }}/v1"
           ports:
             - containerPort: 8000
               protocol: TCP

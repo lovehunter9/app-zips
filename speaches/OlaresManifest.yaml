@@ -14,7 +14,7 @@ permission:
   appData: true
   appCache: true
 spec:
-  versionName: '0.8.3'
+  versionName: '0.8.2'
   fullDescription: |
     Speaches is an OpenAI API-compatible server for Text-to-Speech (TTS) and Speech-to-Text (STT).
     Think of it as "Ollama, but for TTS/STT models."
@@ -70,14 +70,14 @@ spec:
   supportArch:
     - amd64
     - arm64
-  envs:
-    - envName: SPEACHES_GPU
-      required: true
-      applyOnChange: true
-      type: string
-      editable: true
-      defaultValue: "false"
-      description: "Enable GPU acceleration for TTS/STT (set 'true' if you have an NVIDIA GPU, 'false' for CPU-only)"
+envs:
+  - envName: SPEACHES_GPU
+    required: true
+    applyOnChange: true
+    type: string
+    editable: true
+    defaultValue: "false"
+    description: "Enable GPU acceleration for TTS/STT (set 'true' if you have an NVIDIA GPU, 'false' for CPU-only)"
 options:
   apiTimeout: 0
   allowedOutboundPorts:
@@ -96,17 +96,17 @@ sharedEntrances:
     invisible: true
     authLevel: internal
 entrances:
-  - name: speachesterminal
+  - name: speaches
     port: 8080
     host: speachesingress
-    title: Speaches Terminal
+    title: Speaches
     icon: https://app.cdn.olares.com/appstore/default/defaulticon.webp
     openMethod: window
     authLevel: internal
-  - name: speaches
+  - name: speachesterminal
     port: 8081
     host: speachesingress
-    title: Speaches
+    title: Speaches Terminal
     icon: https://app.cdn.olares.com/appstore/default/defaulticon.webp
     openMethod: window
     authLevel: internal
