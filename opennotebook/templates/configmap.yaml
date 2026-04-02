@@ -170,11 +170,11 @@ data:
   # OPENAI_COMPATIBLE_BASE_URL_EMBEDDING: "http://localhost:8080/v1"
   # OPENAI_COMPATIBLE_API_KEY_EMBEDDING: ""
   
-  # Local Speaches service for TTS and STT (deployed as sidecar)
-  OPENAI_COMPATIBLE_BASE_URL_STT: "http://speaches:8000/v1"
-  OPENAI_COMPATIBLE_API_KEY_STT: "not-needed"
-  OPENAI_COMPATIBLE_BASE_URL_TTS: "http://speaches:8000/v1"
-  OPENAI_COMPATIBLE_API_KEY_TTS: "not-needed"
+  # Speaches TTS/STT (install the standalone "Speaches" app and use its shared entrance URL)
+  # OPENAI_COMPATIBLE_BASE_URL_STT: "http://<speaches-shared-entrance>/v1"
+  # OPENAI_COMPATIBLE_API_KEY_STT: "not-needed"
+  # OPENAI_COMPATIBLE_BASE_URL_TTS: "http://<speaches-shared-entrance>/v1"
+  # OPENAI_COMPATIBLE_API_KEY_TTS: "not-needed"
   
   # AZURE OPENAI
   # Generic configuration (applies to all modalities: language, embedding, STT, TTS)

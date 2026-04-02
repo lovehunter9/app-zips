@@ -91,12 +91,12 @@ spec:
   license:
   - text: MIT
     url: https://github.com/lfnovo/open-notebook?tab=MIT-1-ov-file
-  limitedCpu: 6.5
+  limitedCpu: 3.5
   limitedDisk: 50Gi
-  limitedMemory: 6.5Gi
-  requiredCpu: 100m
+  limitedMemory: 3Gi
+  requiredCpu: 0.2
   requiredDisk: 50Mi
-  requiredMemory: 1200Mi
+  requiredMemory: 256Mi
   supportArch:
   - amd64
   - arm64
@@ -116,10 +116,3 @@ envs:
     type: password
     editable: true
     description: "Set a password to protect your Open Notebook instance (for public hosting)"
-  - envName: SPEACHES_GPU
-    required: true
-    applyOnChange: true
-    type: string
-    editable: true
-    defaultValue: "false"
-    description: "Enable GPU acceleration for TTS/STT (set 'true' if you have an NVIDIA GPU, 'false' for CPU-only)"
