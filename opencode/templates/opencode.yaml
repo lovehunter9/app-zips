@@ -317,8 +317,8 @@ spec:
                   usr/bin/zip usr/bin/unzip usr/bin/bzip2 usr/bin/xz usr/bin/zstd \
                   sbin/ss \
                   usr/local/bin/opencode usr/local/bin/pkg-install; do
-                  if [ ! -e "$PKG/$b" ]; then
-                    echo "=== Cache invalid: $b missing or broken symlink ==="
+                  if [ ! -e "$PKG/$b" ] && [ ! -L "$PKG/$b" ]; then
+                    echo "=== Cache invalid: $b missing ==="
                     return 1
                   fi
                   if [ -f "$PKG/$b" ] && [ ! -s "$PKG/$b" ]; then
@@ -788,15 +788,12 @@ spec:
 
               apk update 2>&1 || true
 
-              # Fix bash if broken by glibc cascade removal (runs every start)
-              if ! [ -x /usr/bin/bash ]; then
-                echo "=== bash missing/broken, force-reinstalling ==="
-                apk del bash 2>/dev/null || true
-                if apk add --no-cache bash 2>&1; then
-                  echo "=== bash reinstalled OK ==="
-                else
-                  echo "=== WARNING: bash reinstall failed ==="
-                fi
+              echo "=== Force-reinstalling bash (every start) ==="
+              apk del bash 2>/dev/null || true
+              if apk add --no-cache bash 2>&1; then
+                echo "=== bash reinstalled OK ==="
+              else
+                echo "=== WARNING: bash reinstall failed ==="
               fi
 
               _add_pkgs() {
