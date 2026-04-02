@@ -6,10 +6,9 @@
   <component name="ChangeListManager">
     <list default="true" id="e9836655-cb5c-456b-aef7-0ca255338318" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/opennotebook/Chart.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opennotebook/Chart.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/opennotebook/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opennotebook/OlaresManifest.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/opennotebook/templates/configmap.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opennotebook/templates/configmap.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/opennotebook/templates/deployment.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opennotebook/templates/deployment.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/opencode/Chart.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opencode/Chart.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/opencode/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opencode/OlaresManifest.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/opencode/templates/opencode.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opencode/templates/opencode.yaml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -17,7 +16,7 @@
     <option name="LAST_RESOLUTION" value="IGNORE" />
   </component>
   <component name="EmbeddingIndexingInfo">
-    <option name="cachedIndexableFilesCount" value="1177" />
+    <option name="cachedIndexableFilesCount" value="1179" />
     <option name="fileBasedEmbeddingIndicesEnabled" value="true" />
   </component>
   <component name="FileTemplateManagerImpl">
@@ -461,6 +460,7 @@
       <workItem from="1774582759050" duration="580000" />
       <workItem from="1774841976832" duration="591000" />
       <workItem from="1774928631927" duration="590000" />
+      <workItem from="1775014925488" duration="579000" />
     </task>
     <servers />
   </component>
