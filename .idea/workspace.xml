@@ -5,11 +5,19 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="e9836655-cb5c-456b-aef7-0ca255338318" name="Changes" comment="">
+      <change afterPath="$PROJECT_DIR$/speaches/speaches/Chart.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/speaches/speaches/values.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/speaches/speachesserver/Chart.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/speaches/speachesserver/values.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/opennotebook/Chart.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opennotebook/Chart.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/opennotebook/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opennotebook/OlaresManifest.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/speaches/Chart.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/speaches/Chart.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/speaches/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/speaches/OlaresManifest.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/speaches/templates/ingress.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/speaches/templates/ingress.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/speaches/templates/speaches.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/speaches/templates/speaches.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/speaches/templates/ingress.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/speaches/speaches/templates/ingress.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/speaches/templates/speaches.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/speaches/speachesserver/templates/speaches.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/speaches/templates/terminal.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/speaches/speachesserver/templates/terminal.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/speaches/values.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/speaches/values.yaml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />

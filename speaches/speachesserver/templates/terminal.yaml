@@ -1,3 +1,5 @@
+{{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
+
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -42,7 +44,7 @@ metadata:
   labels:
     io.kompose.service: terminal
   name: terminal
-  namespace: '{{ .Release.Namespace }}'
+  namespace: {{ .Release.Namespace }}
 spec:
   replicas: 1
   selector:
@@ -59,7 +61,7 @@ spec:
       serviceAccountName: terminal-account
       containers:
         - name: nginx
-          image: "docker.io/beclab/terminal:v0.0.5"
+          image: beclab/terminal:v0.0.5
           env:
             - name: PGID
               value: "1000"
@@ -85,7 +87,7 @@ spec:
               containerPort: 80
               protocol: TCP
         - name: terminal
-          image: "docker.io/beclab/terminal:v0.0.5"
+          image: beclab/terminal:v0.0.5
           env:
             - name: PGID
               value: "1000"
@@ -102,7 +104,7 @@ spec:
           command:
             - apiserver
           args:
-            - --namespace={{ .Release.Namespace }}
+            - --namespace=speachesserver-shared
             - --pod=bytetrade.io/terminal=speaches
             - --container=speaches
             - --v=3
@@ -130,3 +132,4 @@ spec:
       protocol: TCP
       port: 80
       targetPort: 80
+{{- end }}

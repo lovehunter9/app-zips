@@ -35,7 +35,8 @@ data:
       }
 
       location / {
-          proxy_pass http://speaches:8000;
+          resolver coredns.kube-system.svc.cluster.local valid=10s;
+          proxy_pass http://speaches.speachesserver-shared:8000;
           proxy_next_upstream error timeout http_500 http_502 http_503 http_504;
           proxy_connect_timeout 60s;
           proxy_read_timeout 600s;
@@ -65,7 +66,8 @@ data:
       proxy_set_header Connection "upgrade";
 
       location / {
-          proxy_pass http://terminal:80;
+          resolver coredns.kube-system.svc.cluster.local valid=10s;
+          proxy_pass http://terminal.speachesserver-shared:80;
           proxy_connect_timeout 60s;
           proxy_read_timeout 300s;
           proxy_send_timeout 300s;
@@ -101,7 +103,8 @@ data:
       }
 
       location / {
-          proxy_pass http://speaches:8000;
+          resolver coredns.kube-system.svc.cluster.local valid=10s;
+          proxy_pass http://speaches.speachesserver-shared:8000;
           proxy_next_upstream error timeout http_500 http_502 http_503 http_504;
           proxy_connect_timeout 60s;
           proxy_read_timeout 600s;
@@ -117,15 +120,14 @@ metadata:
   creationTimestamp: null
   labels:
     io.kompose.service: speachesingress
-  name: speachesingress
-  namespace: '{{ .Release.Namespace }}'
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
 spec:
   replicas: 1
   selector:
     matchLabels:
       io.kompose.service: speachesingress
-  strategy:
-    type: Recreate
+  strategy: {}
   template:
     metadata:
       creationTimestamp: null
@@ -159,15 +161,6 @@ spec:
               port: 8080
             failureThreshold: 30
             periodSeconds: 10
-          readinessProbe:
-            httpGet:
-              path: /v1/models
-              port: 8080
-            initialDelaySeconds: 5
-            periodSeconds: 10
-            timeoutSeconds: 5
-            successThreshold: 1
-            failureThreshold: 3
           livenessProbe:
             tcpSocket:
               port: 8080
@@ -188,6 +181,7 @@ spec:
             - name: nginx-config
               mountPath: /opt/bitnami/openresty/nginx/conf/server_blocks/nginx.conf
               subPath: nginx.conf
+
 ---
 apiVersion: v1
 kind: Service

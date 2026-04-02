@@ -1,5 +1,6 @@
+{{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
 {{- $env := .Values.olaresEnv | default dict -}}
-{{- $speachesGpu := eq (index $env "SPEACHES_GPU" | default "") "true" }}
+{{- $speachesGpu := ne (index $env "SPEACHES_GPU" | default "true") "false" }}
 {{- $speachesDomainENV := split "," .Values.domain.speaches -}}
 {{- $speachesDomain := index $speachesDomainENV "_0" -}}
 {{- $topDomain := regexReplaceAll ".*?([^.]+\\.[^.]+)$" $speachesDomain "$1" -}}
@@ -9,7 +10,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: speaches
-  namespace: '{{ .Release.Namespace }}'
+  namespace: {{ .Release.Namespace }}
   labels:
     io.kompose.service: speaches
   {{- if $speachesGpu }}
@@ -144,10 +145,10 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: speaches
-  namespace: '{{ .Release.Namespace }}'
   labels:
     io.kompose.service: speaches
+  name: speaches
+  namespace: {{ .Release.Namespace }}
 spec:
   ports:
     - name: http
@@ -162,10 +163,10 @@ status:
 apiVersion: v1
 kind: Service
 metadata:
-  name: sharedentrances-speaches
-  namespace: '{{ .Release.Namespace }}'
   labels:
     io.kompose.service: speaches
+  name: sharedentrances-speaches
+  namespace: {{ .Release.Namespace }}
 spec:
   ports:
     - name: http
@@ -175,3 +176,4 @@ spec:
     io.kompose.service: speaches
 status:
   loadBalancer: {}
+{{- end }}

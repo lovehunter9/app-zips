@@ -6,10 +6,41 @@ metadata:
   description: OpenAI-compatible TTS/STT server
   appid: speaches
   title: Speaches
-  version: '1.0.0'
+  version: '1.0.1'
   categories:
     - Utilities
     - Productivity_v112
+sharedEntrances:
+  - name: speaches
+    host: sharedentrances-speaches
+    port: 0
+    title: Speaches
+    icon: https://app.cdn.olares.com/appstore/default/defaulticon.webp
+    invisible: true
+    authLevel: internal
+entrances:
+  - name: speaches
+    port: 8080
+    host: speachesingress
+    title: Speaches
+    icon: https://app.cdn.olares.com/appstore/default/defaulticon.webp
+    openMethod: window
+    authLevel: internal
+  - name: speachesterminal
+    port: 8081
+    host: speachesingress
+    title: Speaches Terminal
+    icon: https://app.cdn.olares.com/appstore/default/defaulticon.webp
+    openMethod: window
+    authLevel: internal
+  - name: speachesapi
+    port: 8082
+    host: speachesingress
+    title: Speaches API
+    icon: https://app.cdn.olares.com/appstore/default/defaulticon.webp
+    invisible: true
+    openMethod: window
+    authLevel: internal
 permission:
   appData: true
   appCache: true
@@ -50,7 +81,8 @@ spec:
     - text: MIT
       url: https://github.com/speaches-ai/speaches/blob/main/LICENSE
   {{- $env := .Values.olaresEnv | default dict -}}
-  {{- if eq (index $env "SPEACHES_GPU" | default "") "true" }}
+  {{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
+  {{- if ne (index $env "SPEACHES_GPU" | default "true") "false" }}
   requiredMemory: 2560Mi
   limitedMemory: 9Gi
   requiredDisk: 5Gi
@@ -67,17 +99,29 @@ spec:
   requiredCpu: 0.1
   limitedCpu: 2.5
   {{- end }}
+  {{- else }}
+  requiredMemory: 64Mi
+  limitedMemory: 256Mi
+  requiredDisk: 1Mi
+  limitedDisk: 100Mi
+  requiredCpu: 10m
+  limitedCpu: 100m
+  {{- end }}
   supportArch:
     - amd64
     - arm64
+  subCharts:
+    - name: speachesserver
+      shared: true
+    - name: speaches
 envs:
   - envName: SPEACHES_GPU
-    required: true
+    required: false
     applyOnChange: true
     type: string
     editable: true
-    defaultValue: "false"
-    description: "Enable GPU acceleration for TTS/STT (set 'true' if you have an NVIDIA GPU, 'false' for CPU-only)"
+    defaultValue: "true"
+    description: "GPU acceleration enabled by default. Set to 'false' for CPU-only mode if you don't have an NVIDIA GPU."
 options:
   apiTimeout: 0
   allowedOutboundPorts:
@@ -87,34 +131,18 @@ options:
     - name: olares
       type: system
       version: '>=1.12.4-0'
-sharedEntrances:
-  - name: speaches
-    host: sharedentrances-speaches
-    port: 0
-    title: Speaches
-    icon: https://app.cdn.olares.com/appstore/default/defaulticon.webp
-    invisible: true
-    authLevel: internal
-entrances:
-  - name: speaches
-    port: 8080
-    host: speachesingress
-    title: Speaches
-    icon: https://app.cdn.olares.com/appstore/default/defaulticon.webp
-    openMethod: window
-    authLevel: internal
-  - name: speachesterminal
-    port: 8081
-    host: speachesingress
-    title: Speaches Terminal
-    icon: https://app.cdn.olares.com/appstore/default/defaulticon.webp
-    openMethod: window
-    authLevel: internal
-  - name: speachesapi
-    port: 8082
-    host: speachesingress
-    title: Speaches API
-    icon: https://app.cdn.olares.com/appstore/default/defaulticon.webp
-    invisible: true
-    openMethod: window
-    authLevel: internal
+  {{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
+  {{- else }}
+    - name: speaches
+      type: application
+      version: '>=1.0.0'
+      mandatory: true
+  {{- end }}
+  appScope:
+  {{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
+    clusterScoped: true
+    appRef:
+      - speaches
+  {{- else }}
+    clusterScoped: false
+  {{- end }}
