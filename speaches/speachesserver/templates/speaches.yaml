@@ -31,6 +31,10 @@ spec:
         io.kompose.service: speaches
         bytetrade.io/terminal: speaches
     spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
       initContainers:
         - name: init-chmod-speaches
           image: "docker.io/beclab/aboveos-busybox:1.37.0"
@@ -49,7 +53,7 @@ spec:
           securityContext:
             runAsUser: 0
         - name: download-models
-          image: "ghcr.io/speaches-ai/speaches:0.8.2-cpu"
+          image: "docker.io/beclab/speaches-ai-speaches:0.8.2-cpu"
           env:
             - name: HF_HUB_CACHE
               value: "/home/ubuntu/.cache/huggingface/hub"
@@ -82,9 +86,9 @@ spec:
       containers:
         - name: speaches
           {{- if $speachesGpu }}
-          image: "ghcr.io/speaches-ai/speaches:0.8.2-cuda-12.4.1"
+          image: "docker.io/beclab/speaches-ai-speaches:0.8.2-cuda-12.4.1"
           {{- else }}
-          image: "ghcr.io/speaches-ai/speaches:0.8.2-cpu"
+          image: "docker.io/beclab/speaches-ai-speaches:0.8.2-cpu"
           {{- end }}
           env:
             - name: HF_HUB_CACHE

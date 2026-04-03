@@ -5,19 +5,11 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="e9836655-cb5c-456b-aef7-0ca255338318" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/speaches/speaches/Chart.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/speaches/speaches/values.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/speaches/speachesserver/Chart.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/speaches/speachesserver/values.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/opennotebook/Chart.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opennotebook/Chart.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/opennotebook/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opennotebook/OlaresManifest.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/speaches/Chart.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/speaches/Chart.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/speaches/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/speaches/OlaresManifest.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/speaches/templates/ingress.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/speaches/speaches/templates/ingress.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/speaches/templates/speaches.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/speaches/speachesserver/templates/speaches.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/speaches/templates/terminal.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/speaches/speachesserver/templates/terminal.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/speaches/values.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/speaches/values.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/speaches/speaches/Chart.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/speaches/speaches/Chart.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/speaches/speachesserver/Chart.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/speaches/speachesserver/Chart.yaml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -90,8 +82,8 @@
   <component name="SharedIndexes">
     <attachedChunks>
       <set>
-        <option value="bundled-gosdk-72a9cf600ed8-448e06e64ec5-org.jetbrains.plugins.go.sharedIndexes.bundled-GO-253.28294.337" />
-        <option value="bundled-js-predefined-d6986cc7102b-c7e53b3be11b-JavaScript-GO-253.28294.337" />
+        <option value="bundled-js-predefined-d6986cc7102b-c7e53b3be11b-JavaScript-PY-253.28294.336" />
+        <option value="bundled-python-sdk-0978a7220b69-9867c7d4c0a4-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-253.28294.336" />
       </set>
     </attachedChunks>
   </component>
@@ -470,6 +462,7 @@
       <workItem from="1774841976832" duration="591000" />
       <workItem from="1774928631927" duration="590000" />
       <workItem from="1775014925488" duration="579000" />
+      <workItem from="1775100725048" duration="576000" />
     </task>
     <servers />
   </component>
