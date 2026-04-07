@@ -1,4 +1,4 @@
-﻿{{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
+{{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -20,6 +20,7 @@ spec:
     metadata:
       labels:
         app: whisperwebui
+        bytetrade.io/terminal: whisperwebui
     spec:
       initContainers:
         - name: init-configs
@@ -187,4 +188,19 @@ spec:
       port: 8090
       targetPort: 8090
   type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: whisperwebui
+  name: sharedentrances-whisperwebui
+  namespace: {{ .Release.Namespace }}
+spec:
+  ports:
+    - name: http
+      port: 80
+      targetPort: 7860
+  selector:
+    app: whisperwebui
 {{- end }}
