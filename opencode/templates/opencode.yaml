@@ -27,7 +27,7 @@ spec:
     spec:
       initContainers:
         - name: init-setup
-          image: "docker.io/beclab/anomalyco-opencode:1.2.27"
+          image: "docker.io/beclab/anomalyco-opencode:1.4.0"
           command:
             - sh
             - "-c"
@@ -289,8 +289,8 @@ spec:
                 'GLOBAL_JSON = Path("/home/opencode/.config/opencode/opencode.json")' \
                 'WORKSPACE_JSON = Path("/home/opencode/workspace/opencode.json")' \
                 'OLARES_REF = "/home/opencode/.config/opencode/olares-baseline-instructions.md"' \
-                'PLUGIN_NPM = "oh-my-opencode"' \
-                'STALE_PLUGIN_NPM = "oh-my-openagent"' \
+                'PLUGIN_NPM = "oh-my-openagent"' \
+                'STALE_PLUGIN_NPM = "oh-my-opencode"' \
                 '' \
                 'LEGACY_S1 = (' \
                 '    "CRITICAL: You have special skills. ALWAYS run /skill load web-preview BEFORE any task involving "' \
@@ -349,6 +349,7 @@ spec:
                 'GLOBAL_JSON.parent.mkdir(parents=True, exist_ok=True)' \
                 'GLOBAL_JSON.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")' \
                 '' \
+                '' \
                 'if WORKSPACE_JSON.is_file():' \
                 '    try:' \
                 '        wcfg = json.loads(WORKSPACE_JSON.read_text(encoding="utf-8"))' \
@@ -393,13 +394,13 @@ spec:
             runAsUser: 0
 
         - name: init-packages
-          image: "docker.io/beclab/anomalyco-opencode:1.2.27"
+          image: "docker.io/beclab/anomalyco-opencode:1.4.0"
           command:
             - sh
             - "-c"
             - |
               PKG="/home/opencode/.pkg-root"
-              OC_VER="1.2.27"
+              OC_VER="1.4.0"
               GLIBC_VER="2.35-r1"
               BASE_PKGS="python3 py3-pip git curl wget bash openssh-client nodejs npm go rust cargo iproute2 zip unzip gzip bzip2 xz tar zstd"
               FINGERPRINT="oc=${OC_VER} glibc=${GLIBC_VER} arch=$(uname -m) pkgs=${BASE_PKGS} omo={{ if $enableOMO }}yes{{ else }}no{{ end }}"
@@ -484,7 +485,7 @@ spec:
                   apk add --no-cache nodejs npm 2>&1 || echo "=== WARNING: apk add nodejs npm failed ==="
                 fi
                 echo "=== Installing oh-my-opencode npm package ==="
-                npm install -g oh-my-opencode 2>&1 || npm install -g --ignore-scripts oh-my-opencode 2>&1 || echo "=== WARNING: npm install oh-my-opencode failed ==="
+                npm install -g --ignore-scripts oh-my-opencode 2>&1 || echo "=== WARNING: npm install oh-my-opencode failed ==="
                 chown -R 1000:1000 /home/opencode/.local 2>/dev/null || true
               {{- end }}
               }
@@ -755,7 +756,7 @@ spec:
 
       containers:
         - name: opencode
-          image: "docker.io/beclab/anomalyco-opencode:1.2.27"
+          image: "docker.io/beclab/anomalyco-opencode:1.4.0"
           command:
             - sh
             - "-c"
@@ -877,7 +878,7 @@ spec:
               mountPath: /opt/bitnami/openresty/nginx/conf/server_blocks/nginx.conf
               subPath: nginx.conf
         - name: pkg-manager
-          image: "docker.io/beclab/anomalyco-opencode:1.2.27"
+          image: "docker.io/beclab/anomalyco-opencode:1.4.0"
           securityContext:
             runAsUser: 0
           command:
