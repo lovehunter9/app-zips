@@ -477,29 +477,15 @@ spec:
               cp /home/opencode/.profile /home/opencode/.bashrc
               chown 1000:1000 /home/opencode/.profile /home/opencode/.bashrc
 
-              # Oh My OpenCode must run on EVERY start. Previously it lived only after the full apk/snapshot
-              # path, so when ~/.pkg-root cache hit we exited early and never ran npm / oh-my-opencode install.
               olares_run_omo() {
               {{- if $enableOMO }}
                 if ! command -v npm >/dev/null 2>&1; then
                   echo "=== OMO: npm not in PATH (cache-hit fast path), installing nodejs+npm ==="
                   apk add --no-cache nodejs npm 2>&1 || echo "=== WARNING: apk add nodejs npm failed ==="
                 fi
-                echo "=== Installing oh-my-opencode plugin ==="
-                npm install -g oh-my-opencode 2>&1 || npm install -g --ignore-scripts oh-my-opencode 2>&1 || echo "=== WARNING: oh-my-opencode install failed ==="
-                echo "=== Configuring oh-my-opencode agents ==="
-                OMO_GLOBAL_BAK="/home/opencode/.config/opencode/opencode.json.olares-user-backup"
-                if [ -f /home/opencode/.config/opencode/opencode.json ]; then
-                  echo "=== Backing up user ~/.config/opencode/opencode.json before oh-my-opencode install ==="
-                  cp /home/opencode/.config/opencode/opencode.json "$OMO_GLOBAL_BAK"
-                fi
-                cd /home/opencode/workspace && HOME=/home/opencode oh-my-opencode install --no-tui --claude=yes --openai=yes --gemini=yes --copilot=yes 2>&1 || echo "=== WARNING: oh-my-opencode agent config failed ==="
-                cd /
-                if [ -f "$OMO_GLOBAL_BAK" ]; then
-                  echo "=== Restoring user ~/.config/opencode/opencode.json (never overwrite user edits) ==="
-                  mv "$OMO_GLOBAL_BAK" /home/opencode/.config/opencode/opencode.json
-                fi
-                chown -R 1000:1000 /home/opencode/.config /home/opencode/.local 2>/dev/null || true
+                echo "=== Installing oh-my-opencode npm package ==="
+                npm install -g oh-my-opencode 2>&1 || npm install -g --ignore-scripts oh-my-opencode 2>&1 || echo "=== WARNING: npm install oh-my-opencode failed ==="
+                chown -R 1000:1000 /home/opencode/.local 2>/dev/null || true
               {{- end }}
               }
 
