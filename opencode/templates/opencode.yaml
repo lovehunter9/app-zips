@@ -1,5 +1,7 @@
 {{- $opencodeDomainENV := split  ","  .Values.domain.opencode -}}
 {{- $opencodeDomain := index $opencodeDomainENV "_0" -}}
+{{- $env := .Values.olaresEnv | default dict -}}
+{{- $enableOMO := ne (index $env "OPENCODE_OMO" | default "true") "false" }}
 
 ---
 apiVersion: apps/v1
@@ -25,12 +27,16 @@ spec:
     spec:
       initContainers:
         - name: init-setup
-          image: "docker.io/beclab/aboveos-busybox:1.37.0"
+          image: "docker.io/beclab/anomalyco-opencode:1.2.27"
           command:
             - sh
             - "-c"
             - |
+              set -e
+              apk add --no-cache python3
               OC_DOMAIN="{{ $opencodeDomain }}"
+              export OLARES_OC_DOMAIN="$OC_DOMAIN"
+              export OLARES_ENABLE_OMO="{{ if $enableOMO }}1{{ else }}0{{ end }}"
               mkdir -p /home/opencode/workspace \
                        /home/opencode/.opencode \
                        /home/opencode/.config/opencode \
@@ -270,14 +276,95 @@ spec:
                 '- NEVER modify ~/.profile or ~/.bashrc for PATH — packages install to standard paths' \
                 '- When unsure about the package name, use `pkg-install --search <keyword>` first' \
                 > "$ADMIN"
+              echo "=== Olares global baseline / plugin + workspace legacy instructions cleanup (python) ==="
+              OLARES_PY=/tmp/olares-init-opencode-cfg.py
               printf '%s\n' \
-                '{' \
-                '  "instructions": [' \
-                '    "CRITICAL: You have special skills. ALWAYS run /skill load web-preview BEFORE any task involving web, server, preview, run, start, serve, build, create, demo, test, launch, deploy, site, app, page, website, frontend, backend, API, port, vite, react, next, vue, flask, go server, python server. ALWAYS run /skill load system-admin BEFORE installing ANY system package.",' \
-                '    "NEVER use sudo, apt, or apk directly. Use pkg-install instead.",' \
-                '    "NEVER show localhost URLs. The domain is '"$OC_DOMAIN"'. Dev server preview URL format: https://'"$OC_DOMAIN"'/__preview/<port>/"' \
-                '  ]' \
-                '}' > /home/opencode/workspace/opencode.json
+                'import json' \
+                'import os' \
+                'from pathlib import Path' \
+                '' \
+                'DOMAIN = os.environ.get("OLARES_OC_DOMAIN", "")' \
+                'ENABLE_OMO = os.environ.get("OLARES_ENABLE_OMO", "1") == "1"' \
+                'BASELINE_MD = Path("/home/opencode/.config/opencode/olares-baseline-instructions.md")' \
+                'GLOBAL_JSON = Path("/home/opencode/.config/opencode/opencode.json")' \
+                'WORKSPACE_JSON = Path("/home/opencode/workspace/opencode.json")' \
+                'OLARES_REF = "/home/opencode/.config/opencode/olares-baseline-instructions.md"' \
+                'PLUGIN_ID = "oh-my-openagent"' \
+                '' \
+                'LEGACY_S1 = (' \
+                '    "CRITICAL: You have special skills. ALWAYS run /skill load web-preview BEFORE any task involving "' \
+                '    "web, server, preview, run, start, serve, build, create, demo, test, launch, deploy, site, app, page, "' \
+                '    "website, frontend, backend, API, port, vite, react, next, vue, flask, go server, python server. "' \
+                '    "ALWAYS run /skill load system-admin BEFORE installing ANY system package."' \
+                ')' \
+                'LEGACY_S2 = "NEVER use sudo, apt, or apk directly. Use pkg-install instead."' \
+                'LEGACY_S3 = (' \
+                '    f"NEVER show localhost URLs. The domain is {DOMAIN}. "' \
+                '    f"Dev server preview URL format: https://{DOMAIN}/__preview/<port>/"' \
+                ')' \
+                'LEGACY = {LEGACY_S1, LEGACY_S2, LEGACY_S3}' \
+                '' \
+                'BASELINE_MD.parent.mkdir(parents=True, exist_ok=True)' \
+                'md = (' \
+                '    "<!-- olares-managed: baseline-instructions v1 (rewritten each pod start) -->\\n\\n"' \
+                '    "# Olares environment baseline\\n\\n"' \
+                '    "## Web preview and dev servers\\n\\n"' \
+                '    + LEGACY_S1' \
+                '    + "\\n\\n## System packages\\n\\n"' \
+                '    + LEGACY_S2' \
+                '    + "\\n\\n## URLs and domain\\n\\n"' \
+                '    + LEGACY_S3' \
+                '    + "\\n"' \
+                ')' \
+                'BASELINE_MD.write_text(md, encoding="utf-8")' \
+                '' \
+                'cfg = {}' \
+                'if GLOBAL_JSON.is_file():' \
+                '    try:' \
+                '        cfg = json.loads(GLOBAL_JSON.read_text(encoding="utf-8"))' \
+                '    except json.JSONDecodeError:' \
+                '        cfg = {}' \
+                'instr = cfg.get("instructions")' \
+                'if not isinstance(instr, list):' \
+                '    instr = []' \
+                'if OLARES_REF not in instr:' \
+                '    instr = list(instr) + [OLARES_REF]' \
+                'cfg["instructions"] = instr' \
+                'cfg.setdefault("$schema", "https://opencode.ai/config.json")' \
+                'plugins = cfg.get("plugin")' \
+                'if not isinstance(plugins, list):' \
+                '    plugins = []' \
+                'plugins = [p for p in plugins if isinstance(p, str)]' \
+                'if ENABLE_OMO:' \
+                '    plugins = [p for p in plugins if p != PLUGIN_ID]' \
+                '    plugins.append(PLUGIN_ID)' \
+                'else:' \
+                '    plugins = [p for p in plugins if p != PLUGIN_ID]' \
+                'if plugins:' \
+                '    cfg["plugin"] = plugins' \
+                'else:' \
+                '    cfg.pop("plugin", None)' \
+                'GLOBAL_JSON.parent.mkdir(parents=True, exist_ok=True)' \
+                'GLOBAL_JSON.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")' \
+                '' \
+                'if WORKSPACE_JSON.is_file():' \
+                '    try:' \
+                '        wcfg = json.loads(WORKSPACE_JSON.read_text(encoding="utf-8"))' \
+                '    except json.JSONDecodeError:' \
+                '        wcfg = None' \
+                '    if wcfg is not None:' \
+                '        winst = wcfg.get("instructions")' \
+                '        if isinstance(winst, list):' \
+                '            new_inst = [x for x in winst if x not in LEGACY]' \
+                '            if new_inst != winst:' \
+                '                if new_inst:' \
+                '                    wcfg["instructions"] = new_inst' \
+                '                else:' \
+                '                    wcfg.pop("instructions", None)' \
+                '                WORKSPACE_JSON.write_text(json.dumps(wcfg, indent=2, ensure_ascii=False), encoding="utf-8")' \
+                > "$OLARES_PY"
+              python3 "$OLARES_PY"
+              rm -f "$OLARES_PY"
               chown 1000:1000 /home/opencode /home/opencode/workspace
               find /home/opencode -mindepth 1 -maxdepth 1 ! -name '.pkg-root' \
                 -exec chown -R 1000:1000 {} +
@@ -304,7 +391,7 @@ spec:
               OC_VER="1.2.27"
               GLIBC_VER="2.35-r1"
               BASE_PKGS="python3 py3-pip git curl wget bash openssh-client nodejs npm go rust cargo iproute2 zip unzip gzip bzip2 xz tar zstd"
-              FINGERPRINT="oc=${OC_VER} glibc=${GLIBC_VER} arch=$(uname -m) pkgs=${BASE_PKGS}"
+              FINGERPRINT="oc=${OC_VER} glibc=${GLIBC_VER} arch=$(uname -m) pkgs=${BASE_PKGS} omo={{ if $enableOMO }}yes{{ else }}no{{ end }}"
               PKG_HASH=$(printf '%s' "$FINGERPRINT" | sha256sum | cut -c1-16)
               MARKER="$PKG/.installed-${PKG_HASH}"
 
@@ -598,6 +685,24 @@ spec:
               EOFWRAPPER
               chmod +x /usr/local/bin/pkg-install
 
+              {{- if $enableOMO }}
+              echo "=== Installing oh-my-opencode plugin ==="
+              npm install -g oh-my-opencode 2>&1 || npm install -g --ignore-scripts oh-my-opencode 2>&1 || echo "=== WARNING: oh-my-opencode install failed ==="
+              echo "=== Configuring oh-my-opencode agents ==="
+              OMO_GLOBAL_BAK="/home/opencode/.config/opencode/opencode.json.olares-user-backup"
+              if [ -f /home/opencode/.config/opencode/opencode.json ]; then
+                echo "=== Backing up user ~/.config/opencode/opencode.json before oh-my-opencode install ==="
+                cp /home/opencode/.config/opencode/opencode.json "$OMO_GLOBAL_BAK"
+              fi
+              cd /home/opencode/workspace && HOME=/home/opencode oh-my-opencode install --no-tui --claude=yes --openai=yes --gemini=yes --copilot=yes 2>&1 || echo "=== WARNING: oh-my-opencode agent config failed ==="
+              cd /
+              if [ -f "$OMO_GLOBAL_BAK" ]; then
+                echo "=== Restoring user ~/.config/opencode/opencode.json (never overwrite user edits) ==="
+                mv "$OMO_GLOBAL_BAK" /home/opencode/.config/opencode/opencode.json
+              fi
+              chown -R 1000:1000 /home/opencode/.config /home/opencode/.local 2>/dev/null || true
+              {{- end }}
+
               echo "=== Snapshotting filesystem to $PKG ==="
               rm -rf "$PKG"
               mkdir -p "$PKG" "$PKG/etc" "$PKG/tmp"
@@ -628,6 +733,8 @@ spec:
           volumeMounts:
             - name: opencode-home
               mountPath: /home/opencode
+            - name: opencode-workspace
+              mountPath: /home/opencode/workspace
           resources:
             requests:
               cpu: 100m

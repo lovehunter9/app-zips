@@ -5,12 +5,10 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="e9836655-cb5c-456b-aef7-0ca255338318" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/whisperwebuiv2/whisperwebuiv2server/templates/terminal.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/whisperwebuiv2/Chart.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/whisperwebuiv2/Chart.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/whisperwebuiv2/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/whisperwebuiv2/OlaresManifest.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/whisperwebuiv2/whisperwebuiv2/templates/clientproxy.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/whisperwebuiv2/whisperwebuiv2/templates/clientproxy.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/whisperwebuiv2/whisperwebuiv2server/templates/deployment.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/whisperwebuiv2/whisperwebuiv2server/templates/deployment.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/opencode/Chart.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opencode/Chart.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/opencode/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opencode/OlaresManifest.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/opencode/templates/opencode.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opencode/templates/opencode.yaml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -18,7 +16,7 @@
     <option name="LAST_RESOLUTION" value="IGNORE" />
   </component>
   <component name="EmbeddingIndexingInfo">
-    <option name="cachedIndexableFilesCount" value="1219" />
+    <option name="cachedIndexableFilesCount" value="1220" />
     <option name="fileBasedEmbeddingIndicesEnabled" value="true" />
   </component>
   <component name="FileTemplateManagerImpl">
@@ -465,6 +463,7 @@
       <workItem from="1775014925488" duration="579000" />
       <workItem from="1775100725048" duration="576000" />
       <workItem from="1775187432057" duration="581000" />
+      <workItem from="1775533106302" duration="593000" />
     </task>
     <servers />
   </component>
