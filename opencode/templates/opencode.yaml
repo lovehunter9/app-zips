@@ -354,14 +354,19 @@ spec:
                 '        wcfg = None' \
                 '    if wcfg is not None:' \
                 '        winst = wcfg.get("instructions")' \
+                '        legacy_changed = False' \
                 '        if isinstance(winst, list):' \
                 '            new_inst = [x for x in winst if x not in LEGACY]' \
                 '            if new_inst != winst:' \
+                '                legacy_changed = True' \
                 '                if new_inst:' \
                 '                    wcfg["instructions"] = new_inst' \
                 '                else:' \
                 '                    wcfg.pop("instructions", None)' \
-                '                WORKSPACE_JSON.write_text(json.dumps(wcfg, indent=2, ensure_ascii=False), encoding="utf-8")' \
+                '        if isinstance(wcfg, dict) and set(wcfg.keys()) == {"$schema"}:' \
+                '            WORKSPACE_JSON.unlink(missing_ok=True)' \
+                '        elif legacy_changed:' \
+                '            WORKSPACE_JSON.write_text(json.dumps(wcfg, indent=2, ensure_ascii=False), encoding="utf-8")' \
                 > "$OLARES_PY"
               python3 "$OLARES_PY"
               rm -f "$OLARES_PY"
