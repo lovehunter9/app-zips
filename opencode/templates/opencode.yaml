@@ -602,6 +602,8 @@ spec:
                 echo "=== Installing oh-my-opencode npm package ==="
                 npm install -g --ignore-scripts oh-my-opencode 2>&1 || echo "=== WARNING: npm install oh-my-opencode failed ==="
                 chown -R 1000:1000 /home/opencode/.local 2>/dev/null || true
+              {{- else }}
+                :
               {{- end }}
               }
 
