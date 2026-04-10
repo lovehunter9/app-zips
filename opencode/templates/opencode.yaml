@@ -33,6 +33,9 @@ spec:
             - "-c"
             - |
               set -e
+              if ! curl -sI --connect-timeout 3 --max-time 5 https://github.com >/dev/null 2>&1; then
+                sed -i 's|dl-cdn.alpinelinux.org|mirrors.aliyun.com|g' /etc/apk/repositories
+              fi
               apk add --no-cache python3
               OC_DOMAIN="{{ $opencodeDomain }}"
               export OLARES_OC_DOMAIN="$OC_DOMAIN"
@@ -541,6 +544,31 @@ spec:
               PKG_HASH=$(printf '%s' "$FINGERPRINT" | sha256sum | cut -c1-16)
               MARKER="$PKG/.installed-${PKG_HASH}"
 
+              setup_mirrors() {
+                if curl -sI --connect-timeout 3 --max-time 5 https://github.com >/dev/null 2>&1; then
+                  echo "=== Network: direct access OK ==="
+                  USE_CN_MIRROR=false
+                else
+                  echo "=== Network: GitHub unreachable, switching to China mirrors ==="
+                  USE_CN_MIRROR=true
+                  sed -i 's|dl-cdn.alpinelinux.org|mirrors.aliyun.com|g' /etc/apk/repositories
+                  npm config set registry https://registry.npmmirror.com 2>/dev/null || true
+                fi
+              }
+
+              github_download() {
+                local url="$1" output="$2"
+                if [ "$USE_CN_MIRROR" = "true" ]; then
+                  echo "=== Trying China proxy for: $url ==="
+                  if curl -fsSL --retry 2 --retry-delay 2 --connect-timeout 10 --max-time 120 \
+                       "https://ghfast.top/$url" -o "$output"; then
+                    return 0
+                  fi
+                  echo "=== China proxy failed, falling back to direct ==="
+                fi
+                curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 180 "$url" -o "$output"
+              }
+
               verify_cache() {
                 [ ! -d "$PKG/bin" ] || [ ! -d "$PKG/usr" ] || [ ! -d "$PKG/lib" ] && return 1
                 for b in \
@@ -632,6 +660,8 @@ spec:
               {{- end }}
               }
 
+              setup_mirrors
+
               if [ -f "$MARKER" ] && verify_cache; then
                 echo "=== Package snapshot cached (${PKG_HASH}) ==="
                 restore_user_packages
@@ -663,10 +693,8 @@ spec:
               ARCH=$(uname -m)
               if [ "$ARCH" = "x86_64" ]; then
                 echo "=== Installing glibc (x86_64) ==="
-                curl -sL --retry 3 --retry-delay 2 https://alpine-pkgs.sgerrand.com/sgerrand.rsa.pub \
-                  -o /etc/apk/keys/sgerrand.rsa.pub
-                curl -sL --retry 3 --retry-delay 2 "https://github.com/sgerrand/alpine-pkg-glibc/releases/download/${GLIBC_VER}/glibc-${GLIBC_VER}.apk" \
-                  -o /tmp/glibc.apk
+                github_download https://alpine-pkgs.sgerrand.com/sgerrand.rsa.pub /etc/apk/keys/sgerrand.rsa.pub
+                github_download "https://github.com/sgerrand/alpine-pkg-glibc/releases/download/${GLIBC_VER}/glibc-${GLIBC_VER}.apk" /tmp/glibc.apk
                 echo "=== Removing libc6-compat/gcompat before glibc install ==="
                 apk del libc6-compat gcompat 2>&1 || true
                 if apk add --no-cache --force-overwrite /tmp/glibc.apk libstdc++ 2>&1; then
@@ -674,8 +702,7 @@ spec:
                   ln -sf /usr/glibc-compat/lib/ld-linux-x86-64.so.2 /lib64/ld-linux-x86-64.so.2
                   echo "=== Replacing opencode binary with glibc build ==="
                   cp /usr/local/bin/opencode /tmp/opencode.musl.bak 2>/dev/null || true
-                  if curl -fsSL --retry 3 --retry-delay 2 "https://github.com/anomalyco/opencode/releases/download/v${OC_VER}/opencode-linux-x64.tar.gz" \
-                    -o /tmp/opencode-glibc.tar.gz && \
+                  if github_download "https://github.com/anomalyco/opencode/releases/download/v${OC_VER}/opencode-linux-x64.tar.gz" /tmp/opencode-glibc.tar.gz && \
                     tar -xzf /tmp/opencode-glibc.tar.gz -C /usr/local/bin; then
                     chmod +x /usr/local/bin/opencode
                   else
@@ -1037,6 +1064,11 @@ spec:
               touch "$UPKGS"
 
               rm -f /lib/apk/db/lock 2>/dev/null || true
+
+              if ! curl -sI --connect-timeout 3 --max-time 5 https://github.com >/dev/null 2>&1; then
+                echo "=== pkg-manager: switching to China mirrors ==="
+                sed -i 's|dl-cdn.alpinelinux.org|mirrors.aliyun.com|g' /etc/apk/repositories
+              fi
 
               echo "=== APK DB check ==="
               echo "installed: $(wc -l < /lib/apk/db/installed 2>/dev/null || echo 'NOT FOUND')"
