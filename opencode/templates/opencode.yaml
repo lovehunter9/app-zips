@@ -559,6 +559,12 @@ spec:
                     return 1
                   fi
                 done
+                if [ "$(uname -m)" = "x86_64" ]; then
+                  if [ ! -e "$PKG/lib64/ld-linux-x86-64.so.2" ] && [ ! -L "$PKG/lib64/ld-linux-x86-64.so.2" ]; then
+                    echo "=== Cache invalid: glibc linker (ld-linux-x86-64.so.2) missing ==="
+                    return 1
+                  fi
+                fi
                 return 0
               }
 
@@ -657,9 +663,9 @@ spec:
               ARCH=$(uname -m)
               if [ "$ARCH" = "x86_64" ]; then
                 echo "=== Installing glibc (x86_64) ==="
-                curl -sL https://alpine-pkgs.sgerrand.com/sgerrand.rsa.pub \
+                curl -sL --retry 3 --retry-delay 2 https://alpine-pkgs.sgerrand.com/sgerrand.rsa.pub \
                   -o /etc/apk/keys/sgerrand.rsa.pub
-                curl -sL "https://github.com/sgerrand/alpine-pkg-glibc/releases/download/${GLIBC_VER}/glibc-${GLIBC_VER}.apk" \
+                curl -sL --retry 3 --retry-delay 2 "https://github.com/sgerrand/alpine-pkg-glibc/releases/download/${GLIBC_VER}/glibc-${GLIBC_VER}.apk" \
                   -o /tmp/glibc.apk
                 echo "=== Removing libc6-compat/gcompat before glibc install ==="
                 apk del libc6-compat gcompat 2>&1 || true
@@ -668,7 +674,7 @@ spec:
                   ln -sf /usr/glibc-compat/lib/ld-linux-x86-64.so.2 /lib64/ld-linux-x86-64.so.2
                   echo "=== Replacing opencode binary with glibc build ==="
                   cp /usr/local/bin/opencode /tmp/opencode.musl.bak 2>/dev/null || true
-                  if curl -fsSL "https://github.com/anomalyco/opencode/releases/download/v${OC_VER}/opencode-linux-x64.tar.gz" \
+                  if curl -fsSL --retry 3 --retry-delay 2 "https://github.com/anomalyco/opencode/releases/download/v${OC_VER}/opencode-linux-x64.tar.gz" \
                     -o /tmp/opencode-glibc.tar.gz && \
                     tar -xzf /tmp/opencode-glibc.tar.gz -C /usr/local/bin; then
                     chmod +x /usr/local/bin/opencode
@@ -863,7 +869,9 @@ spec:
               cp -a /etc/apk "$PKG/etc/apk"    || SNAP_OK=false
               cp -a /etc/ssl "$PKG/etc/ssl"     || SNAP_OK=false
               mkdir -p "$PKG/lib64"
-              [ -d /lib64 ] && cp -a /lib64/* "$PKG/lib64/" 2>/dev/null || true
+              if [ -d /lib64 ]; then
+                cp -a /lib64/* "$PKG/lib64/" || echo "=== WARNING: lib64 snapshot copy failed ==="
+              fi
 
               if [ "$SNAP_OK" != "true" ]; then
                 echo "=== FATAL: snapshot copy failed (disk full?), cleaning up ==="
