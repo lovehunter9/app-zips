@@ -129,6 +129,10 @@ spec:
                   'audio=Audio(id=audio_id),',
                   'content=text_chat_message.content,',
               )
+              s = s.replace(
+                  'openai_client = openai_client_from_gradio_req(request, config)',
+                  'if not message["text"] and not message["files"]:\n            yield gr.ChatMessage(role="assistant", content="Audio still uploading, please wait a moment then resend.")\n            return\n        openai_client = openai_client_from_gradio_req(request, config)',
+              )
               old_tail = 'tab.select(\n            update_chat_model_dropdown,\n            inputs=None,\n            outputs=[chat_model_dropdown],\n        )'
               new_tail = old_tail + '\n        return chat_model_dropdown, update_chat_model_dropdown'
               s = s.replace(old_tail, new_tail)
@@ -136,10 +140,28 @@ spec:
                   f.write_text(s)
                   patched.append('audio_chat.py')
 
-              # app.py: populate model dropdown on initial page load
+              # Write mic-fix JS (delays submit click while mic upload is pending)
+              mic_fix_head = (
+                  '<script>(function(){var _s=false;document.addEventListener("click",function(e){'
+                  'if(_s){_s=false;return}'
+                  'var b=e.target.closest&&e.target.closest(".submit-button");'
+                  'if(!b)return;'
+                  'if(!document.querySelector(".compact-audio"))return;'
+                  'e.stopImmediatePropagation();e.preventDefault();'
+                  'b.disabled=true;b.style.opacity="0.5";'
+                  'setTimeout(function(){b.disabled=false;b.style.opacity="";_s=true;b.click()},2000)'
+                  '},true)})()</script>'
+              )
+              pathlib.Path('/tmp/_mic_fix_head.html').write_text(mic_fix_head)
+
+              # app.py: populate model dropdown + inject mic delay JS
               f = pathlib.Path('/home/ubuntu/speaches/src/speaches/ui/app.py')
               s = f.read_text()
               o = s
+              s = s.replace(
+                  'gr.Blocks(title="Speaches Playground")',
+                  'gr.Blocks(title="Speaches Playground", head=open("/tmp/_mic_fix_head.html").read())',
+              )
               s = s.replace(
                   'create_audio_chat_tab(config)',
                   '_dropdown, _update_fn = create_audio_chat_tab(config)\n        demo.load(_update_fn, None, [_dropdown])',
