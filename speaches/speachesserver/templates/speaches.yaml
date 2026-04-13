@@ -102,13 +102,22 @@ spec:
             - '-c'
             - |
               uv tool install huggingface-hub 2>/dev/null || true
-              echo "=== Upgrading Gradio ==="
-              pip install --upgrade gradio 2>&1 | tail -1
               python3 << 'PATCH_EOF'
               import pathlib, json
-
               patched = []
 
+              # whisper-1 alias: point to the model we actually pre-installed
+              f = pathlib.Path('/home/ubuntu/speaches/model_aliases.json')
+              if f.exists():
+                  a = json.loads(f.read_text())
+                  if a.get('whisper-1') != 'Systran/faster-whisper-small':
+                      a['whisper-1'] = 'Systran/faster-whisper-small'
+                      f.write_text(json.dumps(a, indent=2) + '\n')
+                      patched.append('model_aliases.json')
+
+              # audio_chat.py: store transcript text directly instead of
+              # audio.id cache ref (prevents KeyError on multi-turn chat);
+              # also return dropdown+fn so app.py can bind demo.load
               f = pathlib.Path('/home/ubuntu/speaches/src/speaches/ui/tabs/audio_chat.py')
               s = f.read_text()
               o = s
@@ -120,10 +129,26 @@ spec:
                   'audio=Audio(id=audio_id),',
                   'content=text_chat_message.content,',
               )
+              old_tail = 'tab.select(\n            update_chat_model_dropdown,\n            inputs=None,\n            outputs=[chat_model_dropdown],\n        )'
+              new_tail = old_tail + '\n        return chat_model_dropdown, update_chat_model_dropdown'
+              s = s.replace(old_tail, new_tail)
               if s != o:
                   f.write_text(s)
-                  patched.append('audio_chat.py (store transcript text instead of audio.id ref)')
+                  patched.append('audio_chat.py')
 
+              # app.py: populate model dropdown on initial page load
+              f = pathlib.Path('/home/ubuntu/speaches/src/speaches/ui/app.py')
+              s = f.read_text()
+              o = s
+              s = s.replace(
+                  'create_audio_chat_tab(config)',
+                  '_dropdown, _update_fn = create_audio_chat_tab(config)\n        demo.load(_update_fn, None, [_dropdown])',
+              )
+              if s != o:
+                  f.write_text(s)
+                  patched.append('app.py')
+
+              # chat.py: graceful fallback when audio.id not in cache
               f = pathlib.Path('/home/ubuntu/speaches/src/speaches/routers/chat.py')
               s = f.read_text()
               o = s
@@ -133,32 +158,74 @@ spec:
               )
               if s != o:
                   f.write_text(s)
-                  patched.append('chat.py (graceful cache miss fallback)')
+                  patched.append('chat.py')
 
+              # dependencies.py: disable 500 retry cascade (backport from v0.8.3)
               f = pathlib.Path('/home/ubuntu/speaches/src/speaches/dependencies.py')
               s = f.read_text()
               o = s
               s = s.replace('max_retries=1', 'max_retries=0')
               if s != o:
                   f.write_text(s)
-                  patched.append('dependencies.py (disable 500 retries)')
-
-              f = pathlib.Path('/home/ubuntu/speaches/model_aliases.json')
-              if f.exists():
-                  aliases = json.loads(f.read_text())
-                  o = dict(aliases)
-                  aliases['whisper-1'] = 'Systran/faster-whisper-small'
-                  if aliases != o:
-                      f.write_text(json.dumps(aliases, indent=2) + '\n')
-                      patched.append('model_aliases.json (whisper-1 -> faster-whisper-small)')
+                  patched.append('dependencies.py')
 
               if patched:
                   print(f'=== Speaches hotfix: patched {len(patched)} files ===')
                   for p in patched:
                       print(f'  - {p}')
               else:
-                  print('=== Speaches hotfix: no patches needed (already fixed upstream?) ===')
+                  print('=== Speaches hotfix: no patches needed ===')
               PATCH_EOF
+              (
+              python3 << 'WARMUP_EOF'
+              import time, wave, sys, os, urllib.request
+
+              for i in range(60):
+                  try:
+                      urllib.request.urlopen('http://localhost:8000/v1/models', timeout=2)
+                      break
+                  except Exception:
+                      time.sleep(1)
+              else:
+                  print('=== Warm-up: server did not start in 60s, skipping ===')
+                  sys.exit(0)
+
+              with wave.open('/tmp/_warmup.wav', 'wb') as w:
+                  w.setnchannels(1)
+                  w.setsampwidth(2)
+                  w.setframerate(16000)
+                  w.writeframes(b'\x00\x00' * 16000)
+
+              from openai import OpenAI
+              client = OpenAI(base_url='http://localhost:8000/v1', api_key='warmup')
+
+              print('=== Warm-up: loading STT model (may take 20-30s on GPU first run) ===')
+              t = time.time()
+              try:
+                  client.audio.transcriptions.create(
+                      file=open('/tmp/_warmup.wav', 'rb'),
+                      model='whisper-1',
+                      response_format='text',
+                  )
+                  print(f'=== Warm-up: STT ready ({time.time()-t:.1f}s) ===')
+              except Exception as e:
+                  print(f'=== Warm-up: STT failed ({e}) - will load on first use ===')
+
+              print('=== Warm-up: loading TTS model ===')
+              t = time.time()
+              try:
+                  client.audio.speech.create(model='tts-1', input='hello', voice='af_heart')
+                  print(f'=== Warm-up: TTS ready ({time.time()-t:.1f}s) ===')
+              except Exception as e:
+                  print(f'=== Warm-up: TTS failed ({e}) - will load on first use ===')
+
+              try:
+                  os.remove('/tmp/_warmup.wav')
+              except OSError:
+                  pass
+              print('=== Model warm-up complete ===')
+              WARMUP_EOF
+              ) &
               exec uvicorn --factory speaches.main:create_app
           env:
             - name: HF_HUB_CACHE
