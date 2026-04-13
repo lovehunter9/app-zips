@@ -102,6 +102,63 @@ spec:
             - '-c'
             - |
               uv tool install huggingface-hub 2>/dev/null || true
+              echo "=== Upgrading Gradio ==="
+              pip install --upgrade gradio 2>&1 | tail -1
+              python3 << 'PATCH_EOF'
+              import pathlib, json
+
+              patched = []
+
+              f = pathlib.Path('/home/ubuntu/speaches/src/speaches/ui/tabs/audio_chat.py')
+              s = f.read_text()
+              o = s
+              s = s.replace(
+                  'audio=Audio(id=choice.message.audio.id),',
+                  'content=choice.message.audio.transcript,',
+              )
+              s = s.replace(
+                  'audio=Audio(id=audio_id),',
+                  'content=text_chat_message.content,',
+              )
+              if s != o:
+                  f.write_text(s)
+                  patched.append('audio_chat.py (store transcript text instead of audio.id ref)')
+
+              f = pathlib.Path('/home/ubuntu/speaches/src/speaches/routers/chat.py')
+              s = f.read_text()
+              o = s
+              s = s.replace(
+                  'transcript = cache[message.audio.id]',
+                  'transcript = cache.get(message.audio.id, "[audio transcript expired]")',
+              )
+              if s != o:
+                  f.write_text(s)
+                  patched.append('chat.py (graceful cache miss fallback)')
+
+              f = pathlib.Path('/home/ubuntu/speaches/src/speaches/dependencies.py')
+              s = f.read_text()
+              o = s
+              s = s.replace('max_retries=1', 'max_retries=0')
+              if s != o:
+                  f.write_text(s)
+                  patched.append('dependencies.py (disable 500 retries)')
+
+              f = pathlib.Path('/home/ubuntu/speaches/model_aliases.json')
+              if f.exists():
+                  aliases = json.loads(f.read_text())
+                  o = dict(aliases)
+                  aliases['whisper-1'] = 'Systran/faster-whisper-small'
+                  if aliases != o:
+                      f.write_text(json.dumps(aliases, indent=2) + '\n')
+                      patched.append('model_aliases.json (whisper-1 -> faster-whisper-small)')
+
+              if patched:
+                  print(f'=== Speaches hotfix: patched {len(patched)} files ===')
+                  for p in patched:
+                      print(f'  - {p}')
+              else:
+                  print('=== Speaches hotfix: no patches needed (already fixed upstream?) ===')
+              PATCH_EOF
               exec uvicorn --factory speaches.main:create_app
           env:
             - name: HF_HUB_CACHE
