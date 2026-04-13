@@ -131,7 +131,7 @@ spec:
               )
               s = s.replace(
                   'openai_client = openai_client_from_gradio_req(request, config)',
-                  'if not message["text"] and not message["files"]:\n            yield gr.ChatMessage(role="assistant", content="Audio still uploading, please wait a moment then resend.")\n            return\n        openai_client = openai_client_from_gradio_req(request, config)',
+                  'if not message["text"] and not message["files"]:\n            yield gr.ChatMessage(role="assistant", content="No content received. If you just recorded audio, it may still be uploading — please wait a moment and click the Send button again (no need to re-record).")\n            return\n        openai_client = openai_client_from_gradio_req(request, config)',
               )
               old_tail = 'tab.select(\n            update_chat_model_dropdown,\n            inputs=None,\n            outputs=[chat_model_dropdown],\n        )'
               new_tail = old_tail + '\n        return chat_model_dropdown, update_chat_model_dropdown'
@@ -149,7 +149,7 @@ spec:
                   'if(!document.querySelector(".compact-audio"))return;'
                   'e.stopImmediatePropagation();e.preventDefault();'
                   'b.disabled=true;b.style.opacity="0.5";'
-                  'setTimeout(function(){b.disabled=false;b.style.opacity="";_s=true;b.click()},2000)'
+                  'setTimeout(function(){b.disabled=false;b.style.opacity="";_s=true;b.click()},3000)'
                   '},true)})()</script>'
               )
               pathlib.Path('/tmp/_mic_fix_head.html').write_text(mic_fix_head)
