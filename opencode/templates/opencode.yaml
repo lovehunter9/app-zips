@@ -27,7 +27,7 @@ spec:
     spec:
       initContainers:
         - name: init-setup
-          image: "docker.io/beclab/anomalyco-opencode:1.4.0"
+          image: "docker.io/beclab/anomalyco-opencode:1.4.3"
           command:
             - sh
             - "-c"
@@ -35,7 +35,7 @@ spec:
               set -e
               wget -q -O /dev/null https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/APKINDEX.tar.gz 2>/dev/null &
               _wpid=$!
-              ( sleep 3 && kill "$_wpid" 2>/dev/null ) &
+              ( sleep 5 && kill "$_wpid" 2>/dev/null ) &
               _gpid=$!
               if ! wait "$_wpid" 2>/dev/null; then
                 echo "=== init-setup: Alpine CDN unreachable or too slow, switching to China mirrors ==="
@@ -536,7 +536,7 @@ spec:
             runAsUser: 0
 
         - name: init-packages
-          image: "docker.io/beclab/anomalyco-opencode:1.4.0"
+          image: "docker.io/beclab/anomalyco-opencode:1.4.3"
           command:
             - sh
             - "-c"
@@ -553,7 +553,7 @@ spec:
                 USE_CN_MIRROR=false
                 wget -q -O /dev/null https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/APKINDEX.tar.gz 2>/dev/null &
                 _wpid=$!
-                ( sleep 3 && kill "$_wpid" 2>/dev/null ) &
+                ( sleep 5 && kill "$_wpid" 2>/dev/null ) &
                 _gpid=$!
                 if wait "$_wpid" 2>/dev/null; then
                   echo "=== Network: Alpine CDN reachable ==="
@@ -662,14 +662,34 @@ spec:
 
               olares_run_omo() {
                 if ! command -v npm >/dev/null 2>&1; then
-                  echo "=== OMO: npm not in PATH (cache-hit fast path), installing nodejs+npm ==="
-                  apk add --no-cache nodejs npm 2>&1 || echo "=== WARNING: apk add nodejs npm failed ==="
+                  if [ -x "$PKG/usr/bin/npm" ] && [ -x "$PKG/usr/bin/node" ]; then
+                    echo "=== OMO: using npm/node from snapshot ==="
+                    export PATH="$PKG/usr/bin:$PKG/usr/local/bin:$PKG/bin:$PATH"
+                    export LD_LIBRARY_PATH="$PKG/usr/lib:$PKG/lib:${LD_LIBRARY_PATH:-}"
+                  else
+                    echo "=== OMO: npm not available, installing nodejs+npm ==="
+                    apk add --no-cache nodejs npm 2>&1 || echo "=== WARNING: apk add nodejs npm failed ==="
+                  fi
                 fi
                 if [ "$USE_CN_MIRROR" = "true" ]; then
                   npm config set registry https://registry.npmmirror.com 2>/dev/null || true
                 fi
-                echo "=== Installing oh-my-opencode npm package ==="
-                npm install -g --ignore-scripts oh-my-opencode 2>&1 || echo "=== WARNING: npm install oh-my-opencode failed ==="
+                OMO_FOUND=false
+                for d in /usr/lib/node_modules/oh-my-opencode \
+                         /usr/local/lib/node_modules/oh-my-opencode \
+                         "$PKG/usr/lib/node_modules/oh-my-opencode" \
+                         "$PKG/usr/local/lib/node_modules/oh-my-opencode"; do
+                  if [ -d "$d" ] && [ -f "$d/package.json" ]; then
+                    OMO_FOUND=true
+                    break
+                  fi
+                done
+                if [ "$OMO_FOUND" = "true" ]; then
+                  echo "=== OMO: oh-my-opencode already installed, skipping ==="
+                else
+                  echo "=== Installing oh-my-opencode npm package ==="
+                  npm install -g --ignore-scripts oh-my-opencode 2>&1 || echo "=== WARNING: npm install oh-my-opencode failed ==="
+                fi
                 chown -R 1000:1000 /home/opencode/.local 2>/dev/null || true
               }
 
@@ -941,7 +961,7 @@ spec:
 
       containers:
         - name: opencode
-          image: "docker.io/beclab/anomalyco-opencode:1.4.0"
+          image: "docker.io/beclab/anomalyco-opencode:1.4.3"
           command:
             - sh
             - "-c"
@@ -1063,7 +1083,7 @@ spec:
               mountPath: /opt/bitnami/openresty/nginx/conf/server_blocks/nginx.conf
               subPath: nginx.conf
         - name: pkg-manager
-          image: "docker.io/beclab/anomalyco-opencode:1.4.0"
+          image: "docker.io/beclab/anomalyco-opencode:1.4.3"
           securityContext:
             runAsUser: 0
           command:
@@ -1081,7 +1101,7 @@ spec:
 
               wget -q -O /dev/null https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/APKINDEX.tar.gz 2>/dev/null &
               _wpid=$!
-              ( sleep 3 && kill "$_wpid" 2>/dev/null ) &
+              ( sleep 5 && kill "$_wpid" 2>/dev/null ) &
               _gpid=$!
               if ! wait "$_wpid" 2>/dev/null; then
                 echo "=== pkg-manager: switching to China mirrors ==="
