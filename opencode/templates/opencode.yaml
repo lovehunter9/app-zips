@@ -542,7 +542,7 @@ spec:
             - "-c"
             - |
               PKG="/home/opencode/.pkg-root"
-              OC_VER="1.4.0"
+              OC_VER="1.4.3"
               GLIBC_VER="2.35-r1"
               BASE_PKGS="python3 py3-pip git curl wget bash openssh-client nodejs npm go rust cargo iproute2 zip unzip gzip bzip2 xz tar zstd"
               FINGERPRINT="oc=${OC_VER} glibc=${GLIBC_VER} arch=$(uname -m) pkgs=${BASE_PKGS}"
