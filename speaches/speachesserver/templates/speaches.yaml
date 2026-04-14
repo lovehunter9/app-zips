@@ -83,10 +83,10 @@ spec:
           resources:
             limits:
               cpu: "2"
-              memory: 2048Mi
+              memory: 2Gi
             requests:
-              cpu: 100m
-              memory: 256Mi
+              cpu: 200m
+              memory: 512Mi
           volumeMounts:
             - name: speaches-hf-cache
               mountPath: /home/ubuntu/.cache/huggingface/hub
@@ -103,17 +103,20 @@ spec:
             - |
               uv tool install huggingface-hub 2>/dev/null || true
               python3 << 'PATCH_EOF'
-              import pathlib, json
+              import pathlib, json, os
               patched = []
 
-              # whisper-1 alias: point to the model we actually pre-installed
+              # whisper-1 alias: configurable via SPEACHES_WHISPER_MODEL env var
+              # default: Systran/faster-whisper-small (pre-installed)
+              # user can set to e.g. Systran/faster-whisper-large-v3 after downloading it
+              whisper_model = os.environ.get('SPEACHES_WHISPER_MODEL', 'Systran/faster-whisper-small')
               f = pathlib.Path('/home/ubuntu/speaches/model_aliases.json')
               if f.exists():
                   a = json.loads(f.read_text())
-                  if a.get('whisper-1') != 'Systran/faster-whisper-small':
-                      a['whisper-1'] = 'Systran/faster-whisper-small'
+                  if a.get('whisper-1') != whisper_model:
+                      a['whisper-1'] = whisper_model
                       f.write_text(json.dumps(a, indent=2) + '\n')
-                      patched.append('model_aliases.json')
+                      patched.append(f'model_aliases.json (whisper-1 -> {whisper_model.split("/")[-1]})')
 
               # audio_chat.py: store transcript text directly instead of
               # audio.id cache ref (prevents KeyError on multi-turn chat);
@@ -202,14 +205,17 @@ spec:
               python3 << 'WARMUP_EOF'
               import time, wave, sys, os, urllib.request
 
-              for i in range(60):
+              _wm = os.environ.get('SPEACHES_WHISPER_MODEL', 'small')
+              _is_small = any(k in _wm for k in ('small', 'tiny', 'base'))
+              wait_secs = 60 if _is_small else 90
+              for i in range(wait_secs):
                   try:
                       urllib.request.urlopen('http://localhost:8000/v1/models', timeout=2)
                       break
                   except Exception:
                       time.sleep(1)
               else:
-                  print('=== Warm-up: server did not start in 60s, skipping ===')
+                  print(f'=== Warm-up: server did not start in {wait_secs}s, skipping ===')
                   sys.exit(0)
 
               with wave.open('/tmp/_warmup.wav', 'wb') as w:
@@ -219,9 +225,13 @@ spec:
                   w.writeframes(b'\x00\x00' * 16000)
 
               from openai import OpenAI
-              client = OpenAI(base_url='http://localhost:8000/v1', api_key='warmup')
+              whisper_model = os.environ.get('SPEACHES_WHISPER_MODEL', 'Systran/faster-whisper-small')
+              model_name = whisper_model.split('/')[-1]
+              client = OpenAI(base_url='http://localhost:8000/v1', api_key='warmup',
+                              timeout=60.0 if _is_small else 180.0)
 
-              print('=== Warm-up: loading STT model (may take 20-30s on GPU first run) ===')
+              eta = '20-30s on GPU' if _is_small else '30-60s on GPU'
+              print(f'=== Warm-up: loading STT model {model_name} (may take {eta} first run) ===')
               t = time.time()
               try:
                   client.audio.transcriptions.create(
@@ -254,6 +264,8 @@ spec:
               value: "/home/ubuntu/.cache/huggingface/hub"
             - name: HF_HUB_DISABLE_XET
               value: "1"
+            - name: SPEACHES_WHISPER_MODEL
+              value: {{ index $env "SPEACHES_WHISPER_MODEL" | default "Systran/faster-whisper-small" | quote }}
             - name: LOOPBACK_HOST_URL
               value: "http://localhost:8000"
             - name: CHAT_COMPLETION_BASE_URL
@@ -273,11 +285,11 @@ spec:
               nvidia.com/gpu: 1
             {{- else }}
             limits:
-              cpu: "2"
-              memory: 2048Mi
+              cpu: "8"
+              memory: 8Gi
             requests:
-              cpu: 50m
-              memory: 128Mi
+              cpu: 500m
+              memory: 2Gi
             {{- end }}
           volumeMounts:
             - name: speaches-hf-cache
