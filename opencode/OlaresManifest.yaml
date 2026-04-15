@@ -6,7 +6,7 @@ metadata:
   description: The open source AI coding agent
   appid: opencode
   title: OpenCode
-  version: '1.0.8'
+  version: '1.0.38'
   categories:
   - Developer Tools
   - Productivity_v112
@@ -41,7 +41,7 @@ spec:
     - Add Terminal entrance with auto-start TUI
     Upgrade OpenCode version to 1.4.4
 
-    What's New (v1.4.4):
+    What's Changed (v1.4.4):
     - Added Alibaba provider with caching; MCP OAuth connections now persist.
     - Snapshots fully respect .gitignore; sessions can update permissions mid-run.
     - Added `opencode export --sanitize` for PII-safe transcript export.
@@ -90,7 +90,6 @@ envs:
 options:
   apiTimeout: 0
   allowedOutboundPorts:
-  - 22
   - 80
   - 443
   dependencies:
