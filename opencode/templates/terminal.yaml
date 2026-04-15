@@ -105,6 +105,7 @@ spec:
             - --namespace={{ .Release.Namespace }}
             - --pod=bytetrade.io/terminal=opencode
             - --container=opencode
+            - --shell=opencode
             - --v=3
           securityContext:
             privileged: false

@@ -658,14 +658,7 @@ spec:
               export CARGO_HOME="/home/opencode/.cargo"
               export PATH="/home/opencode/.venv/bin:/home/opencode/.npm-global/bin:/home/opencode/go/bin:/home/opencode/.cargo/bin:/home/opencode/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
               EOFPROFILE
-              cat > /home/opencode/.bashrc << 'EOFBASHRC'
-              . /home/opencode/.profile
-              # Auto-start OpenCode TUI for interactive terminal sessions
-              if [ -t 0 ] && [ -t 1 ] && command -v opencode >/dev/null 2>&1; then
-                cd /home/opencode/workspace
-                opencode
-              fi
-              EOFBASHRC
+              cp /home/opencode/.profile /home/opencode/.bashrc
               chown 1000:1000 /home/opencode/.profile /home/opencode/.bashrc
 
               olares_run_omo() {
