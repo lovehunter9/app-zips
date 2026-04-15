@@ -6,20 +6,20 @@ metadata:
   description: The open source AI coding agent
   appid: opencode
   title: OpenCode
-  version: '1.0.7'
+  version: '1.0.33'
   categories:
-  - Developer Tools
-  - Productivity_v112
+    - Developer Tools
+    - Productivity_v112
 permission:
   appData: true
   appCache: true
   userData:
-  - Home
+    - Home
 spec:
   versionName: '1.4.3'
   promoteImage:
-  - https://app.cdn.olares.com/appstore/opencode/1.webp
-  - https://app.cdn.olares.com/appstore/opencode/2.webp
+    - https://app.cdn.olares.com/appstore/opencode/1.webp
+    - https://app.cdn.olares.com/appstore/opencode/2.webp
   fullDescription: |
     OpenCode is an open-source agent that helps you write code in the terminal, IDE, or desktop.
 
@@ -35,34 +35,17 @@ spec:
     - Open the app and use the Web UI directly in your browser.
     - Configure your LLM provider and API keys in the Web UI.
     - Your code workspace is mounted at /home/opencode/workspace (linked to your Home/Code directory).
-  upgradeDescription: |
-    Config changes:
-    - Add built-in oh-my-openagent (OMO) plugin
-    Upgrade OpenCode version to 1.4.3
-
-    What's Changed:
-    Core:
-    - Fixed agent create for OpenAI accounts authenticated with OAuth.
-    - Interrupted Bash commands now keep their final output and truncation details instead of ending as aborted.
-    - Added fast mode variants for supported Claude and GPT models.
-    TUI:
-    - Restored the hidden session scrollbar as the default.
-    Extensions:
-    - Added configurable OAuth redirect URIs for remote MCP servers. (@egze)
-
-    Full release notes: https://github.com/anomalyco/opencode/releases/tag/v1.4.3
-
   developer: Anomaly
   website: https://opencode.ai/
   sourceCode: https://github.com/anomalyco/opencode
   submitter: Olares
   locale:
-  - en-US
-  - zh-CN
+    - en-US
+    - zh-CN
   doc: https://opencode.ai/docs
   license:
-  - text: MIT
-    url: https://github.com/anomalyco/opencode/blob/dev/LICENSE
+    - text: MIT
+      url: https://github.com/anomalyco/opencode/blob/dev/LICENSE
   requiredMemory: 1536Mi
   limitedMemory: 5Gi
   requiredDisk: 5Gi
@@ -70,8 +53,8 @@ spec:
   requiredCpu: 0.3
   limitedCpu: 5
   supportArch:
-  - amd64
-  - arm64
+    - amd64
+    - arm64
 envs:
   - envName: OPENCODE_OMO
     required: false
@@ -83,17 +66,17 @@ envs:
 options:
   apiTimeout: 0
   allowedOutboundPorts:
-  - 80
-  - 443
+    - 80
+    - 443
   dependencies:
-  - name: olares
-    type: system
-    version: '>=1.12.3-0'
+    - name: olares
+      type: system
+      version: '>=1.12.3-0'
 entrances:
-- name: opencode
-  port: 8080
-  host: opencodeingress
-  title: OpenCode
-  icon: https://app.cdn.olares.com/appstore/opencode/icon.png
-  openMethod: window
-  authLevel: internal
+  - name: opencode
+    port: 8080
+    host: opencodeingress
+    title: OpenCode
+    icon: https://app.cdn.olares.com/appstore/opencode/icon.png
+    openMethod: window
+    authLevel: internal

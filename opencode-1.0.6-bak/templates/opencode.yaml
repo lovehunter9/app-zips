@@ -1243,8 +1243,8 @@ spec:
             name: nginx-config
             defaultMode: 438
             items:
-              - key: nginx.conf
-                path: nginx.conf
+            - key: nginx.conf
+              path: nginx.conf
         - name: pkg-bin
           hostPath:
             path: "{{ .Values.userspace.appData }}/.pkg-root/bin"
@@ -1299,3 +1299,4 @@ spec:
     io.kompose.service: opencode
 status:
   loadBalancer: {}
+
