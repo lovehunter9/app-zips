@@ -57,6 +57,7 @@ spec:
               {{- end }}
               echo "All model files are ready."
               {{- end }}
+              pip install audiofile dora-search einops hydra-colorlog hydra-core julius lameenc librosa ml-collections museval onnx onnx2pytorch openunmix soundfile submitit treetable --quiet 2>&1 | tail -3
               echo "Starting application..."
               python /Whisper-WebUI/whisper_openai_api.py --server_port 7860 --server_name 0.0.0.0 --whisper_type "$whisper_type"
           ports:
