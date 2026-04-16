@@ -214,7 +214,7 @@ spec:
   ports:
     - name: http
       port: 80
-      targetPort: 7860
+      targetPort: 8000
   selector:
     app: whisperwebui
 {{- end }}
