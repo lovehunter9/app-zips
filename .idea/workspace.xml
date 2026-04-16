@@ -5,10 +5,13 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="e9836655-cb5c-456b-aef7-0ca255338318" name="Changes" comment="">
+      <change afterPath="$PROJECT_DIR$/whisperwebuiv2/whisperwebuiv2server/templates/api-proxy-configmap.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/opencode/Chart.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opencode/Chart.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/opencode/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opencode/OlaresManifest.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/opencode/templates/opencode.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opencode/templates/opencode.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/whisperwebuiv2/Chart.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/whisperwebuiv2/Chart.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/whisperwebuiv2/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/whisperwebuiv2/OlaresManifest.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/whisperwebuiv2/whisperwebuiv2/templates/clientproxy.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/whisperwebuiv2/whisperwebuiv2/templates/clientproxy.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/whisperwebuiv2/whisperwebuiv2server/templates/deployment.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/whisperwebuiv2/whisperwebuiv2server/templates/deployment.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/whisperwebuiv2/whisperwebuiv2server/templates/terminal.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/whisperwebuiv2/whisperwebuiv2server/templates/terminal.yaml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -16,7 +19,7 @@
     <option name="LAST_RESOLUTION" value="IGNORE" />
   </component>
   <component name="EmbeddingIndexingInfo">
-    <option name="cachedIndexableFilesCount" value="1237" />
+    <option name="cachedIndexableFilesCount" value="1256" />
     <option name="fileBasedEmbeddingIndicesEnabled" value="true" />
   </component>
   <component name="FileTemplateManagerImpl">
@@ -468,6 +471,7 @@
       <workItem from="1775792182696" duration="587000" />
       <workItem from="1776051462523" duration="572000" />
       <workItem from="1776137468525" duration="596000" />
+      <workItem from="1776224049300" duration="594000" />
     </task>
     <servers />
   </component>

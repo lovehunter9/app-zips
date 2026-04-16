@@ -40,7 +40,6 @@ roleRef:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  creationTimestamp: null
   labels:
     io.kompose.service: terminal
   name: terminal
@@ -53,7 +52,6 @@ spec:
   strategy: {}
   template:
     metadata:
-      creationTimestamp: null
       labels:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: terminal
@@ -61,7 +59,7 @@ spec:
       serviceAccountName: terminal-account
       containers:
         - name: nginx
-          image: beclab/terminal:v0.0.5
+          image: beclab/terminal:v0.0.8
           env:
             - name: PGID
               value: "1000"
@@ -87,7 +85,7 @@ spec:
               containerPort: 80
               protocol: TCP
         - name: terminal
-          image: beclab/terminal:v0.0.5
+          image: beclab/terminal:v0.0.8
           env:
             - name: PGID
               value: "1000"
@@ -107,13 +105,14 @@ spec:
             - --namespace=whisperwebuiv2server-shared
             - --pod=bytetrade.io/terminal=whisperwebui
             - --container=whisperwebui
+            - --shell=Whisper-WebUI
             - --v=3
           securityContext:
             privileged: false
           resources:
             limits:
               cpu: 50m
-              memory: 100Mi
+              memory: 512Mi
             requests:
               cpu: 5m
               memory: 100Mi
