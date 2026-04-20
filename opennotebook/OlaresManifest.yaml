@@ -6,7 +6,7 @@ metadata:
   description: A powerful open-source, AI-powered note-taking/research platform that respects your privacy
   appid: opennotebook
   title: Open Notebook
-  version: '1.0.7'
+  version: '1.0.9'
   categories:
   - Productivity_v112
   - Productivity
@@ -19,7 +19,7 @@ entrances:
   port: 8080
   title: Open Notebook
 spec:
-  versionName: '1.8.1'
+  versionName: '1.8.5'
   promoteImage:
   - https://app.cdn.olares.com/appstore/opennotebook/1.webp
   - https://app.cdn.olares.com/appstore/opennotebook/2.webp
@@ -93,10 +93,10 @@ spec:
     url: https://github.com/lfnovo/open-notebook?tab=MIT-1-ov-file
   limitedCpu: 3.5
   limitedDisk: 50Gi
-  limitedMemory: 3Gi
-  requiredCpu: 0.2
+  limitedMemory: 4Gi
+  requiredCpu: 0.3
   requiredDisk: 50Mi
-  requiredMemory: 256Mi
+  requiredMemory: 512Mi
   supportArch:
   - amd64
   - arm64

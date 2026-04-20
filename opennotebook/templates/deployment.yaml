@@ -18,6 +18,11 @@ spec:
       labels:
         io.kompose.service: surrealdb
     spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
       initContainers:
       - name: init-chmod-surrealdb
         image: "docker.io/beclab/aboveos-busybox:1.37.0"
@@ -25,9 +30,11 @@ spec:
           - sh
           - '-c'
           - |
+            set -e
             mkdir -p /app-data-root
-            chown -R 1000:1000 /app-data-root || true
-            chmod -R 777 /app-data-root || true
+            chown -R 1000:1000 /app-data-root
+            find /app-data-root -type d -exec chmod 775 {} +
+            find /app-data-root -type f -exec chmod 664 {} +
         resources: {}
         volumeMounts:
           - name: surrealdbdata
@@ -40,6 +47,10 @@ spec:
       containers:
       - name: surrealdb
         image: "docker.io/beclab/surrealdb-surrealdb:v2.4.1"
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
         command:
           - /surreal
           - start
@@ -58,10 +69,10 @@ spec:
         resources:
           limits:
             cpu: "1"
-            memory: 512Mi
+            memory: 2Gi
           requests:
-            cpu: 100m
-            memory: 128Mi
+            cpu: 200m
+            memory: 256Mi
         volumeMounts:
         - mountPath: /mydata
           name: surrealdbdata
@@ -115,14 +126,14 @@ spec:
     spec:
       initContainers:
       - name: getconfigfile
-        image: "docker.io/beclab/lfnovo-open_notebook:1.8.1"
+        image: "docker.io/beclab/lfnovo-open_notebook:1.8.5"
         imagePullPolicy: IfNotPresent
         command: ["sh", "-c", "if [ ! -f '/app/config/config.toml' ]; then mkdir -p /app/config && touch /app/config/config.toml; fi"]
         volumeMounts:
         - mountPath: /app/config
           name: appconfig
       - name: seed-data
-        image: "docker.io/beclab/lfnovo-open_notebook:1.8.1"
+        image: "docker.io/beclab/lfnovo-open_notebook:1.8.5"
         command:
           - sh
           - -c
@@ -152,7 +163,7 @@ spec:
           runAsUser: 0
       containers:
       - name: opennotebook
-        image: "docker.io/beclab/lfnovo-open_notebook:1.8.1"
+        image: "docker.io/beclab/lfnovo-open_notebook:1.8.5"
         env:
         - name: HOSTNAME
           value: '0.0.0.0'
@@ -170,10 +181,10 @@ spec:
         resources:
           limits:
             cpu: "2"
-            memory: 2048Mi
+            memory: 2Gi
           requests:
-            cpu: 50m
-            memory: 8Mi
+            cpu: 100m
+            memory: 256Mi
         volumeMounts:
         - mountPath: /app/data
           name: appcache

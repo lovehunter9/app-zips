@@ -6,7 +6,9 @@
   <component name="ChangeListManager">
     <list default="true" id="e9836655-cb5c-456b-aef7-0ca255338318" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/whisperwebuiv2/whisperwebuiv2server/templates/deployment.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/whisperwebuiv2/whisperwebuiv2server/templates/deployment.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/opennotebook/Chart.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opennotebook/Chart.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/opennotebook/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opennotebook/OlaresManifest.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/opennotebook/templates/deployment.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opennotebook/templates/deployment.yaml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -14,7 +16,7 @@
     <option name="LAST_RESOLUTION" value="IGNORE" />
   </component>
   <component name="EmbeddingIndexingInfo">
-    <option name="cachedIndexableFilesCount" value="1256" />
+    <option name="cachedIndexableFilesCount" value="1260" />
     <option name="fileBasedEmbeddingIndicesEnabled" value="true" />
   </component>
   <component name="FileTemplateManagerImpl">
@@ -467,6 +469,8 @@
       <workItem from="1776051462523" duration="572000" />
       <workItem from="1776137468525" duration="596000" />
       <workItem from="1776224049300" duration="594000" />
+      <workItem from="1776310874219" duration="582000" />
+      <workItem from="1776396774500" duration="596000" />
     </task>
     <servers />
   </component>
