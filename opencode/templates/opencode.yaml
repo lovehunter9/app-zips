@@ -2,6 +2,7 @@
 {{- $opencodeDomain := index $opencodeDomainENV "_0" -}}
 {{- $env := .Values.olaresEnv | default dict -}}
 {{- $enableOMO := ne (index $env "OPENCODE_OMO" | default "false") "false" }}
+{{- $omoVersion := index $env "OPENCODE_OMO_VERSION" | default "3.17.4" }}
 
 ---
 apiVersion: apps/v1
@@ -48,6 +49,7 @@ spec:
               OC_DOMAIN="{{ $opencodeDomain }}"
               export OLARES_OC_DOMAIN="$OC_DOMAIN"
               export OLARES_ENABLE_OMO="{{ if $enableOMO }}1{{ else }}0{{ end }}"
+              export OLARES_OMO_VERSION="{{ $omoVersion }}"
               mkdir -p /home/opencode/workspace \
                        /home/opencode/.opencode \
                        /home/opencode/.config/opencode \
@@ -662,25 +664,39 @@ spec:
               chown 1000:1000 /home/opencode/.profile /home/opencode/.bashrc
 
               olares_run_omo() {
+                OMO_WANT_VERSION="${OLARES_OMO_VERSION:-{{ $omoVersion }}}"
                 OMO_FOUND=false
+                OMO_VERSION_MATCH=false
+                OMO_FOUND_DIR=""
+                OMO_FOUND_VERSION=""
                 for d in /usr/lib/node_modules/oh-my-opencode \
                          /usr/local/lib/node_modules/oh-my-opencode \
                          "$PKG/usr/lib/node_modules/oh-my-opencode" \
                          "$PKG/usr/local/lib/node_modules/oh-my-opencode"; do
                   if [ -d "$d" ] && [ -f "$d/package.json" ]; then
                     OMO_FOUND=true
+                    OMO_FOUND_DIR="$d"
+                    OMO_FOUND_VERSION=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$d/package.json" | head -n1)
+                    if [ "$OMO_FOUND_VERSION" = "$OMO_WANT_VERSION" ]; then
+                      OMO_VERSION_MATCH=true
+                    fi
                     break
                   fi
                 done
-                if [ "$OMO_FOUND" = "true" ]; then
-                  echo "=== OMO: oh-my-opencode already installed, skipping ==="
+                if [ "$OMO_FOUND" = "true" ] && [ "$OMO_VERSION_MATCH" = "true" ]; then
+                  echo "=== OMO: oh-my-opencode@${OMO_FOUND_VERSION} already installed at ${OMO_FOUND_DIR}, skipping ==="
                 else
-                  echo "=== OMO: installing nodejs+npm and oh-my-opencode ==="
+                  if [ "$OMO_FOUND" = "true" ]; then
+                    echo "=== OMO: installed version (${OMO_FOUND_VERSION:-unknown}) does not match pinned (${OMO_WANT_VERSION}); reinstalling ==="
+                    rm -rf "$OMO_FOUND_DIR" 2>/dev/null || true
+                    [ -n "$PKG" ] && rm -rf "$PKG/usr/lib/node_modules/oh-my-opencode" "$PKG/usr/local/lib/node_modules/oh-my-opencode" 2>/dev/null || true
+                  fi
+                  echo "=== OMO: installing nodejs+npm and oh-my-opencode@${OMO_WANT_VERSION} ==="
                   apk add --no-cache nodejs npm 2>&1 || { echo "=== WARNING: apk add nodejs npm failed ==="; return; }
                   if [ "$USE_CN_MIRROR" = "true" ]; then
                     npm config set registry https://registry.npmmirror.com 2>/dev/null || true
                   fi
-                  if npm install -g --ignore-scripts oh-my-opencode 2>&1; then
+                  if npm install -g --ignore-scripts "oh-my-opencode@${OMO_WANT_VERSION}" 2>&1; then
                     OMO_DIR=$(npm root -g 2>/dev/null)/oh-my-opencode
                     if [ -d "$OMO_DIR" ] && [ -d "$PKG/usr" ]; then
                       SNAP_TARGET="$PKG$(npm root -g 2>/dev/null)/oh-my-opencode"
@@ -689,7 +705,7 @@ spec:
                         echo "=== OMO: patched into snapshot for next restart ==="
                     fi
                   else
-                    echo "=== WARNING: npm install oh-my-opencode failed ==="
+                    echo "=== WARNING: npm install oh-my-opencode@${OMO_WANT_VERSION} failed ==="
                   fi
                 fi
                 chown -R 1000:1000 /home/opencode/.local 2>/dev/null || true

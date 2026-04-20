@@ -87,6 +87,13 @@ envs:
     editable: true
     default: "false"
     description: "Activate oh-my-opencode (OMO) multi-agent UI. The OMO package is always pre-installed; this toggle only controls whether the plugin is loaded at startup. Set to 'true' to enable the 4-agent OMO interface."
+  - envName: OPENCODE_OMO_VERSION
+    required: false
+    applyOnChange: true
+    type: string
+    editable: true
+    default: "3.17.4"
+    description: "Pin the oh-my-opencode (OMO) npm package version installed at container startup. Default is the chart-tested version. Override to upgrade/downgrade without rebuilding the chart (e.g. '3.18.0', or 'latest' for the newest published release). On change, the init-setup container detects the version mismatch and reinstalls automatically."
 options:
   apiTimeout: 0
   allowedOutboundPorts:
