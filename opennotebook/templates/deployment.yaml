@@ -24,6 +24,31 @@ spec:
         fsGroup: 1000
         fsGroupChangePolicy: OnRootMismatch
       initContainers:
+      - name: migrate-surrealdb-data
+        image: "docker.io/beclab/aboveos-busybox:1.37.0"
+        command:
+          - sh
+          - '-c'
+          - |
+            set -e
+            if [ -z "$(ls -A /mnt/new 2>/dev/null)" ] && [ -n "$(ls -A /mnt/legacy 2>/dev/null)" ]; then
+              echo "[migrate-surrealdb-data] legacy appCache has data and appData is empty; copying..."
+              cp -a /mnt/legacy/. /mnt/new/
+              echo "[migrate-surrealdb-data] done; legacy source left intact for rollback."
+            else
+              echo "[migrate-surrealdb-data] nothing to do (destination non-empty or source empty)."
+            fi
+        resources: {}
+        volumeMounts:
+          - name: surrealdbdata
+            mountPath: /mnt/new
+          - name: surrealdbdata-legacy
+            mountPath: /mnt/legacy
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
       - name: init-chmod-surrealdb
         image: "docker.io/beclab/aboveos-busybox:1.37.0"
         command:
@@ -80,6 +105,18 @@ spec:
       - hostPath:
           {{- if .Values.sysVersion }}
             {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+          path: '{{ .Values.userspace.appData }}/surrealdb'
+            {{- else }}
+          path: '{{ .Values.userspace.appData }}/opennotebook/surrealdb'
+            {{- end }}
+          {{- else }}
+          path: '{{ .Values.userspace.appData }}/opennotebook/surrealdb'
+          {{- end }}
+          type: DirectoryOrCreate
+        name: surrealdbdata
+      - hostPath:
+          {{- if .Values.sysVersion }}
+            {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
           path: '{{ .Values.userspace.appCache }}/surrealdb'
             {{- else }}
           path: '{{ .Values.userspace.appCache }}/opennotebook/surrealdb'
@@ -88,7 +125,7 @@ spec:
           path: '{{ .Values.userspace.appCache }}/opennotebook/surrealdb'
           {{- end }}
           type: DirectoryOrCreate
-        name: surrealdbdata
+        name: surrealdbdata-legacy
 ---
 apiVersion: v1
 kind: Service
@@ -125,6 +162,34 @@ spec:
         io.kompose.service: opennotebook
     spec:
       initContainers:
+      - name: migrate-opennotebook-data
+        image: "docker.io/beclab/aboveos-busybox:1.37.0"
+        command:
+          - sh
+          - '-c'
+          - |
+            set -e
+            for sub in data uploads config; do
+              if [ -z "$(ls -A /mnt/new/$sub 2>/dev/null)" ] && [ -n "$(ls -A /mnt/legacy/$sub 2>/dev/null)" ]; then
+                echo "[migrate-opennotebook-data] copying legacy $sub from appCache to appData..."
+                mkdir -p /mnt/new/$sub
+                cp -a /mnt/legacy/$sub/. /mnt/new/$sub/
+                echo "[migrate-opennotebook-data] $sub done."
+              else
+                echo "[migrate-opennotebook-data] skip $sub (destination non-empty or source empty)."
+              fi
+            done
+        resources: {}
+        volumeMounts:
+          - name: app-cache-root
+            mountPath: /mnt/new
+          - name: app-cache-legacy-root
+            mountPath: /mnt/legacy
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
       - name: getconfigfile
         image: "docker.io/beclab/lfnovo-open_notebook:1.8.5"
         imagePullPolicy: IfNotPresent
@@ -164,6 +229,49 @@ spec:
       containers:
       - name: opennotebook
         image: "docker.io/beclab/lfnovo-open_notebook:1.8.5"
+        command:
+          - sh
+          - '-c'
+          - |
+            python3 << 'PATCH_EOF'
+            import pathlib
+            patched = []
+
+            # source.py: provision STT credential env vars before audio extraction.
+            # Upstream bug: open_notebook/graphs/source.py sets only audio_provider
+            # and audio_model on content_state, but never calls provision_provider_keys
+            # for the STT model, so content-core/esperanto cannot reach openai_compatible
+            # STT endpoints configured via UI. Track upstream: lfnovo/open-notebook
+            # (no dedicated issue yet; related: #654, #676, esperanto#103).
+            # TODO: remove this hotfix when upstream fixes credential passthrough for STT.
+            f = pathlib.Path('/app/open_notebook/graphs/source.py')
+            marker = '# OLARES HOTFIX: provision STT credential'
+            if f.exists():
+                s = f.read_text()
+                old = (
+                    '                content_state["audio_provider"] = stt_model.provider\n'
+                    '                content_state["audio_model"] = stt_model.name\n'
+                    '                logger.debug(\n'
+                    '                    f"Using speech-to-text model: {stt_model.provider}/{stt_model.name}"\n'
+                    '                )'
+                )
+                new = old + (
+                    '\n                ' + marker + '\n'
+                    '                from open_notebook.ai.key_provider import provision_provider_keys\n'
+                    '                await provision_provider_keys(stt_model.provider)'
+                )
+                if marker not in s and old in s:
+                    f.write_text(s.replace(old, new))
+                    patched.append('source.py (STT credential provisioning)')
+
+            if patched:
+                print(f'=== Open Notebook hotfix: patched {len(patched)} files ===')
+                for p in patched:
+                    print(f'  - {p}')
+            else:
+                print('=== Open Notebook hotfix: no patches applied (already patched or upstream changed) ===')
+            PATCH_EOF
+            exec /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf
         env:
         - name: HOSTNAME
           value: '0.0.0.0'
@@ -196,39 +304,51 @@ spec:
       - hostPath:
           {{- if .Values.sysVersion }}
             {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
-          path: '{{ .Values.userspace.appCache }}/data'
+          path: '{{ .Values.userspace.appData }}/data'
             {{- else }}
-          path: '{{ .Values.userspace.appCache }}/opennotebook/data'
+          path: '{{ .Values.userspace.appData }}/opennotebook/data'
             {{- end }}
           {{- else }}
-          path: '{{ .Values.userspace.appCache }}/opennotebook/data'
+          path: '{{ .Values.userspace.appData }}/opennotebook/data'
           {{- end }}
           type: DirectoryOrCreate
         name: appcache
       - hostPath:
           {{- if .Values.sysVersion }}
             {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
-          path: '{{ .Values.userspace.appCache }}/uploads'
+          path: '{{ .Values.userspace.appData }}/uploads'
             {{- else }}
-          path: '{{ .Values.userspace.appCache }}/opennotebook/uploads'
+          path: '{{ .Values.userspace.appData }}/opennotebook/uploads'
             {{- end }}
           {{- else }}
-          path: '{{ .Values.userspace.appCache }}/opennotebook/uploads'
+          path: '{{ .Values.userspace.appData }}/opennotebook/uploads'
           {{- end }}
           type: DirectoryOrCreate
         name: appuploads
       - hostPath:
           {{- if .Values.sysVersion }}
             {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
-          path: '{{ .Values.userspace.appCache }}/config'
+          path: '{{ .Values.userspace.appData }}/config'
             {{- else }}
-          path: '{{ .Values.userspace.appCache }}/opennotebook/config'
+          path: '{{ .Values.userspace.appData }}/opennotebook/config'
             {{- end }}
           {{- else }}
-          path: '{{ .Values.userspace.appCache }}/opennotebook/config'
+          path: '{{ .Values.userspace.appData }}/opennotebook/config'
           {{- end }}
           type: DirectoryOrCreate
         name: appconfig
+      - hostPath:
+          {{- if .Values.sysVersion }}
+            {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+          path: '{{ .Values.userspace.appData }}'
+            {{- else }}
+          path: '{{ .Values.userspace.appData }}/opennotebook'
+            {{- end }}
+          {{- else }}
+          path: '{{ .Values.userspace.appData }}/opennotebook'
+          {{- end }}
+          type: DirectoryOrCreate
+        name: app-cache-root
       - hostPath:
           {{- if .Values.sysVersion }}
             {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
@@ -240,7 +360,7 @@ spec:
           path: '{{ .Values.userspace.appCache }}/opennotebook'
           {{- end }}
           type: DirectoryOrCreate
-        name: app-cache-root
+        name: app-cache-legacy-root
 ---
 apiVersion: v1
 kind: Service
