@@ -68,6 +68,51 @@ spec:
                 'This environment has a built-in reverse-proxy.' \
                 'Dev servers inside the container are reachable at `/__preview/<port>/` on the same domain the user is already on.' \
                 '' \
+                '## Step 0 — pick the RIGHT dev server (do this FIRST)' \
+                '' \
+                'Vite is NOT a universal web server. Before touching any command, detect what the' \
+                'project actually is by listing the project root and looking at the marker files:' \
+                '' \
+                '```' \
+                'ls -la && cat package.json 2>/dev/null | head -40' \
+                '```' \
+                '' \
+                'Then pick ONE from the table below. If multiple markers exist (e.g. package.json +' \
+                'requirements.txt), let the USER-FACING framework decide (e.g. Next.js beats Flask).' \
+                '' \
+                '| Marker files in project root | Use this | See section |' \
+                '|---|---|---|' \
+                '| `package.json` with `scripts.dev` or `scripts.start` | `nohup npm run dev -- <flags> > /tmp/dev.log 2>&1 &` (preferred — script may set extra flags) | npm-run-dev below |' \
+                '| `vite.config.*` or plain `index.html` only | Vite | Vite section |' \
+                '| `next.config.*` | Next.js | Next.js section |' \
+                '| `nuxt.config.*` | Nuxt | Nuxt section |' \
+                '| `angular.json` | Angular CLI | Angular section |' \
+                '| `gatsby-config.*` | Gatsby | Gatsby section |' \
+                '| `astro.config.*` | Astro | uses Vite — follow Vite section |' \
+                '| `svelte.config.*` + `vite.config.*` | SvelteKit | follow Vite section |' \
+                '| `app.py` with `flask` / `fastapi` import | Flask / FastAPI | Python section |' \
+                '| `streamlit` / `gradio` / `dash` in requirements | Python dashboards | Python dashboards section |' \
+                '| `Cargo.toml` | Rust binary | Go/Rust section |' \
+                '| `go.mod` | Go binary | Go/Rust section |' \
+                '| `pom.xml` / `build.gradle` | Java (Spring Boot etc.) | Java section |' \
+                '| ONLY `.html` / `.css` / `.js` files, no config | Vite (acts as static server) | Vite + Static HTML sections |' \
+                '| Nothing recognizable | STOP and ASK the user what stack it is | — |' \
+                '' \
+                '### Golden rules for Step 0' \
+                '' \
+                '1. NEVER run `npx vite` on a Next.js / Angular / CRA / Gatsby / Nuxt / Django / Flask' \
+                '   project. Each has its own dev server with its own routing/SSR/file-system logic.' \
+                '   Vite will either fail to start or serve a broken app.' \
+                '2. NEVER run `python3 -m http.server` as a preview server. It cannot handle the' \
+                '   `/__preview/<PORT>/` URL prefix and returns 404 for every request.' \
+                '3. When a `package.json` `scripts.dev` exists, PREFER `npm run dev` over ad-hoc' \
+                '   `npx vite` / `npx next dev`. The script may inject required flags or env vars.' \
+                '4. If you see "Blocked request" / "Invalid Host header" / "Disallowed Host" after' \
+                '   starting, it is a host allowlist check, NOT a broken proxy. Fix by framework:' \
+                '   Vite 6 → `server.allowedHosts: true`; webpack-dev-server → `devServer.allowedHosts: "all"`;' \
+                '   CRA → `DANGEROUSLY_DISABLE_HOST_CHECK=true`; Angular → `--disable-host-check`;' \
+                '   Django → add to `ALLOWED_HOSTS`.' \
+                '' \
                 '## Starting dev servers — MANDATORY pattern' \
                 '' \
                 'EVERY dev server or web service MUST be started with `nohup ... &` so it keeps running after the command returns.' \
@@ -97,21 +142,54 @@ spec:
                 '' \
                 '## Vite (React / Vue / Svelte / vanilla)' \
                 '' \
-                '```' \
-                'nohup npx vite --host 0.0.0.0 --port <PORT> --base /__preview/<PORT>/ > /tmp/vite.log 2>&1 &' \
-                '```' \
+                '### MANDATORY: write `vite.config.js` BEFORE starting Vite' \
                 '' \
-                'If the project uses npm scripts:' \
-                '' \
-                '```' \
-                'nohup npm run dev -- --host 0.0.0.0 --port <PORT> --base /__preview/<PORT>/ > /tmp/vite.log 2>&1 &' \
-                '```' \
-                '' \
-                'When scaffolding a NEW Vite project, also set base in vite.config:' \
+                'Vite 6 blocks remote hosts by default (anti-DNS-rebinding). You MUST set' \
+                '`server.allowedHosts: true` or the browser will see "Blocked request".' \
+                'ALWAYS create/update `vite.config.js` in the project root before `nohup npx vite`:' \
                 '' \
                 '```js' \
-                'export default defineConfig({ base: "/__preview/<PORT>/" })' \
+                'import { defineConfig } from "vite";' \
+                'export default defineConfig({' \
+                '  base: "/__preview/<PORT>/",' \
+                '  server: {' \
+                '    host: "0.0.0.0",' \
+                '    port: <PORT>,' \
+                '    allowedHosts: true,   // REQUIRED: accept the Olares reverse-proxy hostname' \
+                '    strictPort: true,' \
+                '    hmr: {' \
+                '      protocol: "wss",    // REQUIRED: browser reaches Olares over HTTPS on 443' \
+                '      clientPort: 443,    // KEEP AS 443 — this is the Olares edge port, NOT your dev port' \
+                '    },' \
+                '  },' \
+                '});' \
                 '```' \
+                '' \
+                'Placeholder substitution — before writing this file:' \
+                '' \
+                '- Replace every `<PORT>` with the port you picked (e.g. `4000`).' \
+                '- Keep `clientPort: 443` as literal `443`. It is the HTTPS edge port the browser uses' \
+                '  to reach Olares, NOT your dev server port. DO NOT replace it with `<PORT>`.' \
+                '- `allowedHosts: true` is literal `true`, not a domain name.' \
+                '' \
+                'If a `vite.config.js` / `.ts` / `.mjs` already exists, READ it and patch only' \
+                '`server.allowedHosts`, `server.hmr`, and `base` — do not clobber the rest.' \
+                '' \
+                'Then start:' \
+                '' \
+                '```' \
+                'nohup npx vite > /tmp/vite.log 2>&1 &' \
+                '```' \
+                '' \
+                'If the project uses npm scripts, still patch the config first, then:' \
+                '' \
+                '```' \
+                'nohup npm run dev > /tmp/vite.log 2>&1 &' \
+                '```' \
+                '' \
+                'Never rely on CLI flags alone for `allowedHosts` — it is a config-only field in' \
+                'Vite 6 and omitting it causes the "Blocked request" page even when `--host 0.0.0.0`' \
+                'is passed.' \
                 '' \
                 '## Next.js' \
                 '' \
@@ -127,24 +205,142 @@ spec:
                 'nohup npx next dev -H 0.0.0.0 -p <PORT> > /tmp/next.log 2>&1 &' \
                 '```' \
                 '' \
-                '## Python (Flask / FastAPI / http.server)' \
+                '## Nuxt (Nuxt 3)' \
+                '' \
+                'Nuxt uses Vite under the hood; configure the base URL via `nuxt.config.*` OR env:' \
+                '' \
+                '```js' \
+                '// nuxt.config.ts' \
+                'export default defineNuxtConfig({' \
+                '  app: { baseURL: "/__preview/<PORT>/" },' \
+                '  devServer: { host: "0.0.0.0", port: <PORT> },' \
+                '  vite: { server: { allowedHosts: true, hmr: { protocol: "wss", clientPort: 443 } } },' \
+                '});' \
+                '```' \
                 '' \
                 '```' \
-                'nohup python3 -m http.server <PORT> --bind 0.0.0.0 > /tmp/pyserver.log 2>&1 &' \
+                'nohup npm run dev > /tmp/nuxt.log 2>&1 &' \
                 '```' \
                 '' \
-                'For Flask:' \
+                '## Angular (ng serve)' \
+                '' \
+                'Angular has its own dev server (NOT Vite). Required flags:' \
                 '' \
                 '```' \
-                'nohup flask run --host 0.0.0.0 --port <PORT> > /tmp/flask.log 2>&1 &' \
+                'nohup npx ng serve \\' \
+                '  --host 0.0.0.0 --port <PORT> \\' \
+                '  --base-href /__preview/<PORT>/ \\' \
+                '  --deploy-url /__preview/<PORT>/ \\' \
+                '  --disable-host-check \\' \
+                '  > /tmp/ng.log 2>&1 &' \
+                '```' \
+                '' \
+                'If you see "Invalid Host header", `--disable-host-check` is mandatory.' \
+                '' \
+                '## Create React App (CRA) / react-scripts' \
+                '' \
+                'CRA uses webpack-dev-server. You MUST use env vars (no CLI flags for these):' \
+                '' \
+                '```' \
+                'DANGEROUSLY_DISABLE_HOST_CHECK=true \\' \
+                '  HOST=0.0.0.0 PORT=<PORT> \\' \
+                '  PUBLIC_URL=/__preview/<PORT> \\' \
+                '  WDS_SOCKET_PORT=443 WDS_SOCKET_PROTOCOL=wss \\' \
+                '  nohup npm start > /tmp/cra.log 2>&1 &' \
+                '```' \
+                '' \
+                'Also set `"homepage": "/__preview/<PORT>"` in `package.json` so built assets reference' \
+                'the correct prefix.' \
+                '' \
+                '## Gatsby' \
+                '' \
+                'Set `pathPrefix` in `gatsby-config.*`, then use `--prefix-paths`:' \
+                '' \
+                '```js' \
+                '// gatsby-config.js' \
+                'module.exports = { pathPrefix: "/__preview/<PORT>" };' \
+                '```' \
+                '' \
+                '```' \
+                'nohup npx gatsby develop -H 0.0.0.0 -p <PORT> --prefix-paths > /tmp/gatsby.log 2>&1 &' \
+                '```' \
+                '' \
+                '## Python (Flask / FastAPI)' \
+                '' \
+                '⚠ NEVER use `python3 -m http.server` for preview. It cannot handle the' \
+                '`/__preview/<PORT>/` URL prefix added by the reverse proxy, and every request' \
+                'will 404. For static files use Vite (see "Static HTML" below).' \
+                '' \
+                'Flask — mount under the preview prefix via `APPLICATION_ROOT` + proxy fix:' \
+                '' \
+                '```' \
+                'APPLICATION_ROOT=/__preview/<PORT> \\' \
+                '  nohup flask run --host 0.0.0.0 --port <PORT> > /tmp/flask.log 2>&1 &' \
+                '```' \
+                '' \
+                'FastAPI — pass `root_path` so generated links include the preview prefix:' \
+                '' \
+                '```' \
+                'nohup uvicorn app:app --host 0.0.0.0 --port <PORT> --root-path /__preview/<PORT> > /tmp/uvicorn.log 2>&1 &' \
+                '```' \
+                '' \
+                '## Python dashboards (Streamlit / Gradio / Dash)' \
+                '' \
+                'These are self-contained dashboard apps. Each has its own way to set a URL prefix:' \
+                '' \
+                'Streamlit — set `baseUrlPath` via CLI or config:' \
+                '' \
+                '```' \
+                'nohup streamlit run app.py \\' \
+                '  --server.address 0.0.0.0 --server.port <PORT> \\' \
+                '  --server.baseUrlPath /__preview/<PORT> \\' \
+                '  --server.enableXsrfProtection false \\' \
+                '  --server.enableCORS false \\' \
+                '  > /tmp/streamlit.log 2>&1 &' \
+                '```' \
+                '' \
+                'Gradio — pass `root_path` when launching:' \
+                '' \
+                '```python' \
+                'demo.launch(server_name="0.0.0.0", server_port=<PORT>, root_path="/__preview/<PORT>")' \
+                '```' \
+                '' \
+                'Dash — mount under `requests_pathname_prefix`:' \
+                '' \
+                '```python' \
+                'app = Dash(__name__, requests_pathname_prefix="/__preview/<PORT>/")' \
+                'app.run(host="0.0.0.0", port=<PORT>)' \
+                '```' \
+                '' \
+                '## Java (Spring Boot)' \
+                '' \
+                'Set `server.servlet.context-path` in `application.properties` / `application.yml`:' \
+                '' \
+                '```' \
+                'server.address=0.0.0.0' \
+                'server.port=<PORT>' \
+                'server.servlet.context-path=/__preview/<PORT>' \
+                '```' \
+                '' \
+                '```' \
+                'nohup ./mvnw spring-boot:run > /tmp/spring.log 2>&1 &' \
                 '```' \
                 '' \
                 '## Static HTML (no bundler)' \
                 '' \
-                'Use Vite to serve:' \
+                'ALWAYS use Vite to serve static HTML. `python3 -m http.server` will NOT work here.' \
+                '' \
+                'Step 1: write `vite.config.js` in the directory that contains the HTML (see the' \
+                'Vite section above — `allowedHosts: true` and `base` are BOTH mandatory).' \
+                '' \
+                'Step 2: ensure an `index.html` exists at the directory root. If your file is named' \
+                'something else (e.g. `clock.html`), either rename it to `index.html` or point users' \
+                'to `/__preview/<PORT>/clock.html`.' \
+                '' \
+                'Step 3:' \
                 '' \
                 '```' \
-                'nohup npx vite --host 0.0.0.0 --port <PORT> --base /__preview/<PORT>/ > /tmp/vite.log 2>&1 &' \
+                'nohup npx vite > /tmp/vite.log 2>&1 &' \
                 '```' \
                 '' \
                 '## Go / Rust / Other custom servers' \
@@ -174,15 +370,36 @@ spec:
                 '' \
                 '## CRITICAL rules (MUST follow every time)' \
                 '' \
-                '1. ALWAYS use `nohup ... > /tmp/<name>.log 2>&1 &` to start servers — NEVER run in foreground' \
-                '2. ALWAYS bind to `0.0.0.0` — NEVER localhost or 127.0.0.1' \
-                '3. ALWAYS set `--base /__preview/<port>/` (Vite) or `basePath` (Next.js) — without this, assets 404' \
-                '4. ALWAYS verify the server is running after starting: `sleep 2 && ss -tlnp | grep <PORT>`' \
-                '5. NEVER output `http://localhost` in any URL — the user accesses remotely' \
-                '6. The trailing slash after the port number is REQUIRED: `/__preview/<PORT>/` not `/__preview/<PORT>`' \
-                '7. If a port is busy, pick another port and adjust `--base` accordingly' \
-                '8. When the user asks to "create a web page", "build a website", or "start a project":' \
-                '   automatically create the project, install deps, start the dev server with nohup, and show the preview URL' \
+                '1. ALWAYS do Step 0 FIRST — detect the stack from marker files and pick the correct' \
+                '   dev server. NEVER run `npx vite` on a Next.js / Angular / Gatsby / CRA / Nuxt /' \
+                '   Django / Flask project. Each has its own runner.' \
+                '2. When `package.json` has `scripts.dev` or `scripts.start`, PREFER `npm run dev` /' \
+                '   `npm start` over ad-hoc framework CLIs — the script may add required flags.' \
+                '3. ALWAYS use `nohup ... > /tmp/<name>.log 2>&1 &` to start servers — NEVER run in foreground' \
+                '4. ALWAYS bind to `0.0.0.0` — NEVER localhost or 127.0.0.1' \
+                '5. ALWAYS set the preview prefix on the server:' \
+                '   Vite → `base: "/__preview/<PORT>/"` in vite.config;' \
+                '   Next.js → `basePath`; Nuxt → `app.baseURL`; Angular → `--base-href`;' \
+                '   Gatsby → `pathPrefix` + `--prefix-paths`; CRA → `PUBLIC_URL`;' \
+                '   FastAPI → `--root-path`; Flask → `APPLICATION_ROOT`;' \
+                '   Streamlit → `--server.baseUrlPath`; Gradio → `root_path`;' \
+                '   Spring Boot → `server.servlet.context-path`.' \
+                '   Without the prefix, assets 404.' \
+                '6. For Vite, ALWAYS write `vite.config.js` with `server.allowedHosts: true` AND' \
+                '   `server.hmr: { protocol: "wss", clientPort: 443 }` BEFORE starting. Without' \
+                '   `allowedHosts`, Vite 6 returns "Blocked request" to proxied hostnames. Without' \
+                '   the HMR overrides, hot-reload silently breaks.' \
+                '7. NEVER use `python3 -m http.server` for preview — it ignores URL prefixes and every' \
+                '   request returns 404 behind the /__preview/<PORT>/ proxy. Use Vite for static files.' \
+                '8. "Blocked request" / "Invalid Host header" / "Disallowed Host" means a host' \
+                '   allowlist kicked in — fix the framework config (see Step 0 Golden rule 4), do NOT' \
+                '   assume the proxy is broken.' \
+                '9. ALWAYS verify the server is running after starting: `sleep 2 && ss -tlnp | grep <PORT>`' \
+                '10. NEVER output `http://localhost` or `127.0.0.1` in any URL — the user accesses remotely' \
+                '11. The trailing slash after the port number is REQUIRED: `/__preview/<PORT>/` not `/__preview/<PORT>`' \
+                '12. If a port is busy, pick another port and adjust the server prefix accordingly' \
+                '13. When the user asks to "create a web page", "build a website", or "start a project":' \
+                '    automatically create the project, install deps, start the dev server with nohup, and show the preview URL' \
                 > "$SKILL"
               ADMIN="/home/opencode/.config/opencode/skills/system-admin/SKILL.md"
               printf '%s\n' \
@@ -665,12 +882,23 @@ spec:
 
               olares_run_omo() {
                 OMO_WANT_VERSION="${OLARES_OMO_VERSION:-{{ $omoVersion }}}"
+                case "$OMO_WANT_VERSION" in
+                  [0-9]*.[0-9]*.[0-9]*)
+                    ;;
+                  *)
+                    echo "=== WARNING: OPENCODE_OMO_VERSION='${OMO_WANT_VERSION}' is not a concrete semver (e.g. '3.17.4')."
+                    echo "===          Non-semver tags like 'latest' compare unequal to the installed"
+                    echo "===          version string, so OMO will be REINSTALLED on every pod restart."
+                    echo "===          Pin to a concrete version in Olares UI to fix."
+                    ;;
+                esac
                 OMO_FOUND=false
                 OMO_VERSION_MATCH=false
                 OMO_FOUND_DIR=""
                 OMO_FOUND_VERSION=""
                 for d in /usr/lib/node_modules/oh-my-opencode \
                          /usr/local/lib/node_modules/oh-my-opencode \
+                         /home/opencode/.npm-global/lib/node_modules/oh-my-opencode \
                          "$PKG/usr/lib/node_modules/oh-my-opencode" \
                          "$PKG/usr/local/lib/node_modules/oh-my-opencode"; do
                   if [ -d "$d" ] && [ -f "$d/package.json" ]; then

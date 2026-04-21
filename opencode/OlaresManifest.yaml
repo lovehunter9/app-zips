@@ -6,7 +6,7 @@ metadata:
   description: The open source AI coding agent
   appid: opencode
   title: OpenCode
-  version: '1.0.39'
+  version: '1.0.40'
   categories:
   - Developer Tools
   - Productivity_v112
@@ -93,7 +93,7 @@ envs:
     type: string
     editable: true
     default: "3.17.4"
-    description: "Pin the oh-my-opencode (OMO) npm package version installed at container startup. Default is the chart-tested version. Override to upgrade/downgrade without rebuilding the chart (e.g. '3.18.0', or 'latest' for the newest published release). On change, the init-setup container detects the version mismatch and reinstalls automatically."
+    description: "Pin the oh-my-opencode (OMO) npm package version installed at container startup. ALWAYS use a concrete semver (e.g. '3.17.4', '3.18.0'). DO NOT use 'latest' or other npm dist-tags — they cannot be compared as strings, so the init container will reinstall OMO on EVERY pod restart, adding 30-60s of startup time and consuming bandwidth. Find published versions at https://www.npmjs.com/package/oh-my-opencode. On change, the init container detects the mismatch and reinstalls automatically."
 options:
   apiTimeout: 0
   allowedOutboundPorts:
