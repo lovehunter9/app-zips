@@ -28,7 +28,7 @@ spec:
     spec:
       initContainers:
         - name: init-setup
-          image: "docker.io/beclab/anomalyco-opencode:1.4.4"
+          image: "docker.io/beclab/anomalyco-opencode:1.14.19"
           command:
             - sh
             - "-c"
@@ -537,18 +537,26 @@ spec:
             runAsUser: 0
 
         - name: init-packages
-          image: "docker.io/beclab/anomalyco-opencode:1.4.4"
+          image: "docker.io/beclab/anomalyco-opencode:1.14.19"
           command:
             - sh
             - "-c"
             - |
               PKG="/home/opencode/.pkg-root"
-              OC_VER="1.4.4"
+              OC_VER="1.14.19"
               GLIBC_VER="2.35-r1"
               BASE_PKGS="python3 py3-pip git curl wget bash openssh-client nodejs npm go rust cargo iproute2 zip unzip gzip bzip2 xz tar zstd"
               FINGERPRINT="oc=${OC_VER} glibc=${GLIBC_VER} arch=$(uname -m) pkgs=${BASE_PKGS}"
               PKG_HASH=$(printf '%s' "$FINGERPRINT" | sha256sum | cut -c1-16)
               MARKER="$PKG/.installed-${PKG_HASH}"
+
+              OMO_VER="{{ index $env "OPENCODE_OMO_VERSION" | default "3.17.4" }}"
+              case "$OMO_VER" in
+                ""|latest|next|beta|*[!0-9.]*)
+                  echo "=== WARNING: invalid OPENCODE_OMO_VERSION '$OMO_VER', falling back to 3.17.4 ==="
+                  OMO_VER="3.17.4"
+                  ;;
+              esac
 
               setup_mirrors() {
                 USE_CN_MIRROR=false
@@ -667,29 +675,34 @@ spec:
                          /usr/local/lib/node_modules/oh-my-opencode \
                          "$PKG/usr/lib/node_modules/oh-my-opencode" \
                          "$PKG/usr/local/lib/node_modules/oh-my-opencode"; do
-                  if [ -d "$d" ] && [ -f "$d/package.json" ]; then
+                  [ -d "$d" ] && [ -f "$d/package.json" ] || continue
+                  INST_VER=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$d/package.json" | head -n1)
+                  if [ "$INST_VER" = "$OMO_VER" ]; then
                     OMO_FOUND=true
                     break
+                  else
+                    echo "=== OMO: $d at '${INST_VER:-unknown}', want '$OMO_VER', will reinstall ==="
                   fi
                 done
                 if [ "$OMO_FOUND" = "true" ]; then
-                  echo "=== OMO: oh-my-opencode already installed, skipping ==="
+                  echo "=== OMO: oh-my-opencode@${OMO_VER} already installed, skipping ==="
                 else
-                  echo "=== OMO: installing nodejs+npm and oh-my-opencode ==="
+                  echo "=== OMO: installing nodejs+npm and oh-my-opencode@${OMO_VER} ==="
                   apk add --no-cache nodejs npm 2>&1 || { echo "=== WARNING: apk add nodejs npm failed ==="; return; }
                   if [ "$USE_CN_MIRROR" = "true" ]; then
                     npm config set registry https://registry.npmmirror.com 2>/dev/null || true
                   fi
-                  if npm install -g --ignore-scripts oh-my-opencode 2>&1; then
+                  if npm install -g --ignore-scripts "oh-my-opencode@${OMO_VER}" 2>&1; then
                     OMO_DIR=$(npm root -g 2>/dev/null)/oh-my-opencode
                     if [ -d "$OMO_DIR" ] && [ -d "$PKG/usr" ]; then
                       SNAP_TARGET="$PKG$(npm root -g 2>/dev/null)/oh-my-opencode"
                       mkdir -p "$(dirname "$SNAP_TARGET")"
+                      rm -rf "$SNAP_TARGET"
                       cp -a "$OMO_DIR" "$SNAP_TARGET" 2>/dev/null && \
                         echo "=== OMO: patched into snapshot for next restart ==="
                     fi
                   else
-                    echo "=== WARNING: npm install oh-my-opencode failed ==="
+                    echo "=== WARNING: npm install oh-my-opencode@${OMO_VER} failed ==="
                   fi
                 fi
                 chown -R 1000:1000 /home/opencode/.local 2>/dev/null || true
@@ -963,7 +976,7 @@ spec:
 
       containers:
         - name: opencode
-          image: "docker.io/beclab/anomalyco-opencode:1.4.4"
+          image: "docker.io/beclab/anomalyco-opencode:1.14.19"
           command:
             - sh
             - "-c"
@@ -1087,7 +1100,7 @@ spec:
               mountPath: /opt/bitnami/openresty/nginx/conf/server_blocks/nginx.conf
               subPath: nginx.conf
         - name: pkg-manager
-          image: "docker.io/beclab/anomalyco-opencode:1.4.4"
+          image: "docker.io/beclab/anomalyco-opencode:1.14.19"
           securityContext:
             runAsUser: 0
           command:
