@@ -2,6 +2,7 @@
 {{- $opencodeDomain := index $opencodeDomainENV "_0" -}}
 {{- $env := .Values.olaresEnv | default dict -}}
 {{- $enableOMO := ne (index $env "OPENCODE_OMO" | default "false") "false" }}
+{{- $omoVersion := index $env "OPENCODE_OMO_VERSION" | default "3.17.4" }}
 
 ---
 apiVersion: apps/v1
@@ -48,6 +49,7 @@ spec:
               OC_DOMAIN="{{ $opencodeDomain }}"
               export OLARES_OC_DOMAIN="$OC_DOMAIN"
               export OLARES_ENABLE_OMO="{{ if $enableOMO }}1{{ else }}0{{ end }}"
+              export OLARES_OMO_VERSION="{{ $omoVersion }}"
               mkdir -p /home/opencode/workspace \
                        /home/opencode/.opencode \
                        /home/opencode/.config/opencode \
@@ -58,31 +60,200 @@ spec:
               printf '%s\n' \
                 '---' \
                 'name: web-preview' \
-                'description: "MUST load before running ANY server, creating ANY web page, building ANY project, or showing ANY preview URL. Covers Vite, React, Next.js, Vue, Flask, FastAPI, Go, Rust, static sites. Also load when user says run, start, serve, preview, demo, test, open, launch, deploy, build, create site, create app, create page, show me, make a website."' \
+                'description: "MANDATORY for ANY web server. Use ONLY: webstart <name> <command>. NEVER use nohup, &, disown, or run dev servers in foreground — they all DIE before the user sees them. Covers Vite, Next.js, Vue, Flask, FastAPI, etc. Load on: run, start, serve, preview, demo, test, launch, build, create site, create app, create page, show, make website."' \
                 '---' \
+                '' \
+                '## TL;DR (read this first, every time)' \
+                '' \
+                '```' \
+                'webstart <name> <command-as-you-would-type-foreground>' \
+                '```' \
+                '' \
+                'That is the ONLY correct way to start any dev server in this environment.' \
+                '' \
+                '- DO use:    `webstart vite npx vite --port 4000 --host 0.0.0.0`' \
+                '- DO use:    `webstart vite npm run dev`' \
+                '- DO use:    `webstart api uvicorn app:app --host 0.0.0.0 --port 8000`' \
+                '- DO NOT:    `nohup <cmd> > log 2>&1 &`     ← will die' \
+                '- DO NOT:    `<cmd> &` / `<cmd> & disown`   ← will die' \
+                '- DO NOT:    run dev server in foreground   ← will die at turn end' \
+                '' \
+                'Why: the agent shell tool reaps every background process when the turn ends.' \
+                '`webstart` uses `setsid + nohup + stdio detach` so the server actually survives.' \
+                '' \
+                'After `webstart` succeeds, READ its output line:' \
+                '`webstart: '"'"'vite-4000'"'"' running (pid 1234, port 4000), log: /tmp/web-vite-4000.log`' \
+                '→ the preview URL is `https://'"$OC_DOMAIN"'/__preview/4000/`' \
+                '' \
+                '## For Vite (most common case)' \
+                '' \
+                'Vite 6 blocks unknown hosts → MUST write `vite.config.js` BEFORE webstart:' \
+                '' \
+                '```js' \
+                'import { defineConfig } from "vite";' \
+                'export default defineConfig({' \
+                '  base: "/__preview/<PORT>/",' \
+                '  server: { host: "0.0.0.0", port: <PORT>, allowedHosts: true,' \
+                '    hmr: { protocol: "wss", clientPort: 443 } },' \
+                '});' \
+                '```' \
+                '' \
+                'Replace `<PORT>` with your real port. `clientPort: 443` stays literal 443.' \
+                'Then: `webstart vite npx vite`' \
                 '' \
                 '## How to preview' \
                 '' \
                 'This environment has a built-in reverse-proxy.' \
                 'Dev servers inside the container are reachable at `/__preview/<port>/` on the same domain the user is already on.' \
                 '' \
-                '## Starting dev servers — MANDATORY pattern' \
+                '## Step 0 — pick the RIGHT dev server (do this FIRST)' \
                 '' \
-                'EVERY dev server or web service MUST be started with `nohup ... &` so it keeps running after the command returns.' \
-                'EVERY dev server MUST bind to `0.0.0.0` (not localhost, not 127.0.0.1).' \
-                'EVERY dev server MUST set its base/public path to `/__preview/<port>/`.' \
-                '' \
-                'General pattern:' \
+                'Vite is NOT a universal web server. Before touching any command, detect what the' \
+                'project actually is by listing the project root and looking at the marker files:' \
                 '' \
                 '```' \
-                'nohup <command> --host 0.0.0.0 --port <PORT> --base /__preview/<PORT>/ > /tmp/dev-server.log 2>&1 &' \
+                'ls -la && cat package.json 2>/dev/null | head -40' \
                 '```' \
                 '' \
-                'After starting, ALWAYS verify the server is running:' \
+                'Then pick ONE from the table below. If multiple markers exist (e.g. package.json +' \
+                'requirements.txt), let the USER-FACING framework decide (e.g. Next.js beats Flask).' \
+                '' \
+                '| Marker files in project root | Use this | See section |' \
+                '|---|---|---|' \
+                '| `package.json` with `scripts.dev` or `scripts.start` | `webstart <name> npm run dev` (preferred — script may set extra flags) | per-framework sections below |' \
+                '| `vite.config.*` or plain `index.html` only | Vite | Vite section |' \
+                '| `next.config.*` | Next.js | Next.js section |' \
+                '| `nuxt.config.*` | Nuxt | Nuxt section |' \
+                '| `angular.json` | Angular CLI | Angular section |' \
+                '| `gatsby-config.*` | Gatsby | Gatsby section |' \
+                '| `astro.config.*` | Astro | uses Vite — follow Vite section |' \
+                '| `svelte.config.*` + `vite.config.*` | SvelteKit | follow Vite section |' \
+                '| `app.py` with `flask` / `fastapi` import | Flask / FastAPI | Python section |' \
+                '| `streamlit` / `gradio` / `dash` in requirements | Python dashboards | Python dashboards section |' \
+                '| `Cargo.toml` | Rust binary | Go/Rust section |' \
+                '| `go.mod` | Go binary | Go/Rust section |' \
+                '| `pom.xml` / `build.gradle` | Java (Spring Boot etc.) | Java section |' \
+                '| ONLY `.html` / `.css` / `.js` files, no config | Vite (acts as static server) | Vite + Static HTML sections |' \
+                '| Nothing recognizable | STOP and ASK the user what stack it is | — |' \
+                '' \
+                '### Golden rules for Step 0' \
+                '' \
+                '1. NEVER run `npx vite` on a Next.js / Angular / CRA / Gatsby / Nuxt / Django / Flask' \
+                '   project. Each has its own dev server with its own routing/SSR/file-system logic.' \
+                '   Vite will either fail to start or serve a broken app.' \
+                '2. NEVER run `python3 -m http.server` as a preview server. It cannot handle the' \
+                '   `/__preview/<PORT>/` URL prefix and returns 404 for every request.' \
+                '3. When a `package.json` `scripts.dev` exists, PREFER `npm run dev` over ad-hoc' \
+                '   `npx vite` / `npx next dev`. The script may inject required flags or env vars.' \
+                '4. If you see "Blocked request" / "Invalid Host header" / "Disallowed Host" after' \
+                '   starting, it is a host allowlist check, NOT a broken proxy. Fix by framework:' \
+                '   Vite 6 → `server.allowedHosts: true`; webpack-dev-server → `devServer.allowedHosts: "all"`;' \
+                '   CRA → `DANGEROUSLY_DISABLE_HOST_CHECK=true`; Angular → `--disable-host-check`;' \
+                '   Django → add to `ALLOWED_HOSTS`.' \
+                '' \
+                '## Starting dev servers — MANDATORY: use `webstart`' \
+                '' \
+                '⚠ DO NOT use `nohup cmd &` directly. The opencode shell tool kills background' \
+                'processes when the agent turn ends, so the server you just started will die before' \
+                'the user can reach the URL. ALWAYS use the `webstart` wrapper, which uses' \
+                '`setsid + nohup + full stdio detachment` so the server survives shell exit.' \
+                '' \
+                '### `webstart` — the only correct way to start a dev server here' \
                 '' \
                 '```' \
-                'sleep 2 && ss -tlnp | grep <PORT>' \
+                'webstart <BASE_NAME> <COMMAND> [ARGS...]' \
                 '```' \
+                '' \
+                '- `<BASE_NAME>` is a short identifier you pick (e.g. `vite`, `next`, `flask`, `app`).' \
+                '  webstart will AUTO-SUFFIX it with the listening port, so the actual NAME you get' \
+                '  back is e.g. `vite-5173`, `next-3000`, `flask-5000`.' \
+                '- `<COMMAND>` is the dev server CLI as you would type it in the foreground.' \
+                '  No `nohup`, no `&`, no `> log 2>&1` — `webstart` does all of that for you.' \
+                '' \
+                '### NAME auto-suffix & uniqueness' \
+                '' \
+                'webstart resolves the final NAME like this:' \
+                '' \
+                '1. It scans your COMMAND for a port (`--port N`, `-p N`, `--server.port N`,' \
+                '   `--server-port N`, `--listen-port N`, `--port=N`, `PORT=N`).' \
+                '2. If still no port, it snapshots listening sockets BEFORE/AFTER launch and picks' \
+                '   the new port that appeared.' \
+                '3. Final NAME = `<BASE>-<PORT>` if a port was found, otherwise just `<BASE>`.' \
+                '' \
+                'CONSEQUENCE: two concurrent servers on different ports automatically get different' \
+                'NAMES, so you can safely reuse the same BASE_NAME — they will not clash.' \
+                '' \
+                '```' \
+                'webstart vite npx vite                       # → "vite-5173" (Vite default)' \
+                'webstart vite npx storybook dev -p 6006      # → "vite-6006" (different — both run)' \
+                '```' \
+                '' \
+                'If two `webstart` invocations resolve to the SAME final NAME (same BASE + same port),' \
+                'webstart treats the second call as a RESTART: it kills the previous process and' \
+                'replaces it. This is intentional — convenient for "fix config and relaunch".' \
+                '' \
+                'After every `webstart` call, READ the success line:' \
+                '' \
+                '```' \
+                "webstart: 'vite-5173' running (pid 1234, port 5173), log: /tmp/web-vite-5173.log" \
+                '```' \
+                '' \
+                'The quoted name is what you pass to `webstop`. Use `weblist` any time to see all' \
+                'running servers with their resolved NAME, PID and PORT.' \
+                '' \
+                'Examples (replace `<PORT>` with your real port number):' \
+                '' \
+                '```' \
+                'webstart vite    npx vite' \
+                'webstart next    npx next dev -H 0.0.0.0 -p <PORT>' \
+                'webstart flask   flask run --host 0.0.0.0 --port <PORT>' \
+                'webstart api     uvicorn app:app --host 0.0.0.0 --port <PORT> --root-path /__preview/<PORT>' \
+                '```' \
+                '' \
+                'EVERY dev server MUST also: bind to `0.0.0.0` (not localhost / 127.0.0.1) AND set' \
+                'its base/public path to `/__preview/<PORT>/` (see per-framework sections below).' \
+                '' \
+                '### Verify, manage, stop' \
+                '' \
+                '```' \
+                'weblist                          # list all running webstart-managed servers' \
+                'tail -f /tmp/web-<NAME>.log      # follow logs (use the resolved NAME)' \
+                'webstop <NAME>                   # exact NAME from weblist (safe)' \
+                'webstop --prefix <BASE>          # explicit batch — stops every "<BASE>-*"' \
+                'webstop --all                    # stop everything' \
+                '```' \
+                '' \
+                '`weblist` is the user-facing tool — keep its output clean for them.' \
+                '`webstart` and `webstop` are agent tools; the user normally will not run them.' \
+                '' \
+                'Safety: plain `webstop <BASE>` (without `--prefix`) is REFUSED when more than one' \
+                '`<BASE>-*` server is running. webstop will list the candidates and require either' \
+                'an exact NAME or `--prefix`. This prevents accidentally killing `vite-6006` when you' \
+                'meant to restart `vite-5173`.' \
+                '' \
+                'Note: to RESTART a single server you usually do NOT need webstop at all — just call' \
+                '`webstart <BASE> <COMMAND>` again with the same command. webstart resolves the' \
+                'final NAME (e.g. `vite-5173`) and kills only that exact instance, leaving other' \
+                'ports (`vite-6006`, ...) untouched.' \
+                '' \
+                '`webstart` already verifies the server stayed up for 2 seconds; if startup fails' \
+                'it prints the last 30 log lines and exits non-zero. You do not need a separate' \
+                '`sleep && ss -tlnp` check after `webstart` returns 0 — but you MAY run' \
+                '`weblist` to confirm.' \
+                '' \
+                '### When `webstart` is NOT available (fallback only)' \
+                '' \
+                'If for some reason `webstart` is missing (e.g. running outside this container),' \
+                'the closest hand-rolled equivalent is:' \
+                '' \
+                '```' \
+                'setsid nohup <command> > /tmp/dev.log 2>&1 < /dev/null &' \
+                'disown' \
+                '```' \
+                '' \
+                'Plain `nohup cmd > /tmp/dev.log 2>&1 &` is INSUFFICIENT — you also need' \
+                '`setsid` and `< /dev/null` to fully detach. Inside this container, ALWAYS prefer' \
+                '`webstart` and skip the manual incantation.' \
                 '' \
                 '## Choosing a port' \
                 '' \
@@ -95,21 +266,54 @@ spec:
                 '' \
                 '## Vite (React / Vue / Svelte / vanilla)' \
                 '' \
-                '```' \
-                'nohup npx vite --host 0.0.0.0 --port <PORT> --base /__preview/<PORT>/ > /tmp/vite.log 2>&1 &' \
-                '```' \
+                '### MANDATORY: write `vite.config.js` BEFORE starting Vite' \
                 '' \
-                'If the project uses npm scripts:' \
-                '' \
-                '```' \
-                'nohup npm run dev -- --host 0.0.0.0 --port <PORT> --base /__preview/<PORT>/ > /tmp/vite.log 2>&1 &' \
-                '```' \
-                '' \
-                'When scaffolding a NEW Vite project, also set base in vite.config:' \
+                'Vite 6 blocks remote hosts by default (anti-DNS-rebinding). You MUST set' \
+                '`server.allowedHosts: true` or the browser will see "Blocked request".' \
+                'ALWAYS create/update `vite.config.js` in the project root before `nohup npx vite`:' \
                 '' \
                 '```js' \
-                'export default defineConfig({ base: "/__preview/<PORT>/" })' \
+                'import { defineConfig } from "vite";' \
+                'export default defineConfig({' \
+                '  base: "/__preview/<PORT>/",' \
+                '  server: {' \
+                '    host: "0.0.0.0",' \
+                '    port: <PORT>,' \
+                '    allowedHosts: true,   // REQUIRED: accept the Olares reverse-proxy hostname' \
+                '    strictPort: true,' \
+                '    hmr: {' \
+                '      protocol: "wss",    // REQUIRED: browser reaches Olares over HTTPS on 443' \
+                '      clientPort: 443,    // KEEP AS 443 — this is the Olares edge port, NOT your dev port' \
+                '    },' \
+                '  },' \
+                '});' \
                 '```' \
+                '' \
+                'Placeholder substitution — before writing this file:' \
+                '' \
+                '- Replace every `<PORT>` with the port you picked (e.g. `4000`).' \
+                '- Keep `clientPort: 443` as literal `443`. It is the HTTPS edge port the browser uses' \
+                '  to reach Olares, NOT your dev server port. DO NOT replace it with `<PORT>`.' \
+                '- `allowedHosts: true` is literal `true`, not a domain name.' \
+                '' \
+                'If a `vite.config.js` / `.ts` / `.mjs` already exists, READ it and patch only' \
+                '`server.allowedHosts`, `server.hmr`, and `base` — do not clobber the rest.' \
+                '' \
+                'Then start (use webstart, not raw nohup):' \
+                '' \
+                '```' \
+                'webstart vite npx vite' \
+                '```' \
+                '' \
+                'If the project uses npm scripts, still patch the config first, then:' \
+                '' \
+                '```' \
+                'webstart vite npm run dev' \
+                '```' \
+                '' \
+                'Never rely on CLI flags alone for `allowedHosts` — it is a config-only field in' \
+                'Vite 6 and omitting it causes the "Blocked request" page even when `--host 0.0.0.0`' \
+                'is passed.' \
                 '' \
                 '## Next.js' \
                 '' \
@@ -122,27 +326,143 @@ spec:
                 'Then:' \
                 '' \
                 '```' \
-                'nohup npx next dev -H 0.0.0.0 -p <PORT> > /tmp/next.log 2>&1 &' \
+                'webstart next npx next dev -H 0.0.0.0 -p <PORT>' \
                 '```' \
                 '' \
-                '## Python (Flask / FastAPI / http.server)' \
+                '## Nuxt (Nuxt 3)' \
+                '' \
+                'Nuxt uses Vite under the hood; configure the base URL via `nuxt.config.*` OR env:' \
+                '' \
+                '```js' \
+                '// nuxt.config.ts' \
+                'export default defineNuxtConfig({' \
+                '  app: { baseURL: "/__preview/<PORT>/" },' \
+                '  devServer: { host: "0.0.0.0", port: <PORT> },' \
+                '  vite: { server: { allowedHosts: true, hmr: { protocol: "wss", clientPort: 443 } } },' \
+                '});' \
+                '```' \
                 '' \
                 '```' \
-                'nohup python3 -m http.server <PORT> --bind 0.0.0.0 > /tmp/pyserver.log 2>&1 &' \
+                'webstart nuxt npm run dev' \
                 '```' \
                 '' \
-                'For Flask:' \
+                '## Angular (ng serve)' \
+                '' \
+                'Angular has its own dev server (NOT Vite). Required flags:' \
                 '' \
                 '```' \
-                'nohup flask run --host 0.0.0.0 --port <PORT> > /tmp/flask.log 2>&1 &' \
+                'webstart ng npx ng serve \\' \
+                '  --host 0.0.0.0 --port <PORT> \\' \
+                '  --base-href /__preview/<PORT>/ \\' \
+                '  --deploy-url /__preview/<PORT>/ \\' \
+                '  --disable-host-check' \
+                '```' \
+                '' \
+                'If you see "Invalid Host header", `--disable-host-check` is mandatory.' \
+                '' \
+                '## Create React App (CRA) / react-scripts' \
+                '' \
+                'CRA uses webpack-dev-server. You MUST use env vars (no CLI flags for these):' \
+                '' \
+                '```' \
+                'DANGEROUSLY_DISABLE_HOST_CHECK=true \\' \
+                '  HOST=0.0.0.0 PORT=<PORT> \\' \
+                '  PUBLIC_URL=/__preview/<PORT> \\' \
+                '  WDS_SOCKET_PORT=443 WDS_SOCKET_PROTOCOL=wss \\' \
+                '  webstart cra npm start' \
+                '```' \
+                '' \
+                'Also set `"homepage": "/__preview/<PORT>"` in `package.json` so built assets reference' \
+                'the correct prefix.' \
+                '' \
+                '## Gatsby' \
+                '' \
+                'Set `pathPrefix` in `gatsby-config.*`, then use `--prefix-paths`:' \
+                '' \
+                '```js' \
+                '// gatsby-config.js' \
+                'module.exports = { pathPrefix: "/__preview/<PORT>" };' \
+                '```' \
+                '' \
+                '```' \
+                'webstart gatsby npx gatsby develop -H 0.0.0.0 -p <PORT> --prefix-paths' \
+                '```' \
+                '' \
+                '## Python (Flask / FastAPI)' \
+                '' \
+                '⚠ NEVER use `python3 -m http.server` for preview. It cannot handle the' \
+                '`/__preview/<PORT>/` URL prefix added by the reverse proxy, and every request' \
+                'will 404. For static files use Vite (see "Static HTML" below).' \
+                '' \
+                'Flask — mount under the preview prefix via `APPLICATION_ROOT`:' \
+                '' \
+                '```' \
+                'APPLICATION_ROOT=/__preview/<PORT> \\' \
+                '  webstart flask flask run --host 0.0.0.0 --port <PORT>' \
+                '```' \
+                '' \
+                'FastAPI — pass `root_path` so generated links include the preview prefix:' \
+                '' \
+                '```' \
+                'webstart api uvicorn app:app --host 0.0.0.0 --port <PORT> --root-path /__preview/<PORT>' \
+                '```' \
+                '' \
+                '## Python dashboards (Streamlit / Gradio / Dash)' \
+                '' \
+                'These are self-contained dashboard apps. Each has its own way to set a URL prefix:' \
+                '' \
+                'Streamlit — set `baseUrlPath` via CLI or config:' \
+                '' \
+                '```' \
+                'webstart streamlit streamlit run app.py \\' \
+                '  --server.address 0.0.0.0 --server.port <PORT> \\' \
+                '  --server.baseUrlPath /__preview/<PORT> \\' \
+                '  --server.enableXsrfProtection false \\' \
+                '  --server.enableCORS false' \
+                '```' \
+                '' \
+                'Gradio — pass `root_path` when launching:' \
+                '' \
+                '```python' \
+                'demo.launch(server_name="0.0.0.0", server_port=<PORT>, root_path="/__preview/<PORT>")' \
+                '```' \
+                '' \
+                'Dash — mount under `requests_pathname_prefix`:' \
+                '' \
+                '```python' \
+                'app = Dash(__name__, requests_pathname_prefix="/__preview/<PORT>/")' \
+                'app.run(host="0.0.0.0", port=<PORT>)' \
+                '```' \
+                '' \
+                '## Java (Spring Boot)' \
+                '' \
+                'Set `server.servlet.context-path` in `application.properties` / `application.yml`:' \
+                '' \
+                '```' \
+                'server.address=0.0.0.0' \
+                'server.port=<PORT>' \
+                'server.servlet.context-path=/__preview/<PORT>' \
+                '```' \
+                '' \
+                '```' \
+                'webstart spring ./mvnw spring-boot:run' \
                 '```' \
                 '' \
                 '## Static HTML (no bundler)' \
                 '' \
-                'Use Vite to serve:' \
+                'ALWAYS use Vite to serve static HTML. `python3 -m http.server` will NOT work here.' \
+                '' \
+                'Step 1: write `vite.config.js` in the directory that contains the HTML (see the' \
+                'Vite section above — `allowedHosts: true` and `base` are BOTH mandatory).' \
+                '' \
+                'Step 2: ensure an `index.html` exists at the directory root. If your file is named' \
+                'something else (e.g. `clock.html`), either rename it to `index.html` or point users' \
+                'to `/__preview/<PORT>/clock.html`.' \
+                '' \
+                'Step 3:' \
                 '' \
                 '```' \
-                'nohup npx vite --host 0.0.0.0 --port <PORT> --base /__preview/<PORT>/ > /tmp/vite.log 2>&1 &' \
+                'webstart vite npx vite' \
                 '```' \
                 '' \
                 '## Go / Rust / Other custom servers' \
@@ -150,10 +470,25 @@ spec:
                 'Make sure the server listens on 0.0.0.0:<PORT>, then:' \
                 '' \
                 '```' \
-                'nohup ./myserver --addr 0.0.0.0:<PORT> > /tmp/server.log 2>&1 &' \
+                'webstart app ./myserver --addr 0.0.0.0:<PORT>' \
                 '```' \
                 '' \
                 '## Stopping a dev server' \
+                '' \
+                '```' \
+                'webstop <NAME>             # exact resolved NAME from weblist (e.g. "vite-5173")' \
+                'webstop --prefix <BASE>    # explicit batch — stops every "<BASE>-*"' \
+                'webstop --all              # stop everything' \
+                '```' \
+                '' \
+                'If unsure of the exact NAME, run `weblist` first.' \
+                '' \
+                'Plain `webstop <BASE>` (no `--prefix`) only succeeds when exactly ONE server' \
+                'matches that base. If multiple `<BASE>-*` are running, webstop REFUSES and lists' \
+                'them — pass the exact NAME or `--prefix` instead. This protects the' \
+                '"restart vite-5173" workflow from accidentally taking down `vite-6006`.' \
+                '' \
+                'If a process was NOT started via webstart (legacy):' \
                 '' \
                 '```' \
                 'kill $(lsof -t -i:<PORT>)   # or: pkill -f "vite"' \
@@ -172,15 +507,47 @@ spec:
                 '' \
                 '## CRITICAL rules (MUST follow every time)' \
                 '' \
-                '1. ALWAYS use `nohup ... > /tmp/<name>.log 2>&1 &` to start servers — NEVER run in foreground' \
-                '2. ALWAYS bind to `0.0.0.0` — NEVER localhost or 127.0.0.1' \
-                '3. ALWAYS set `--base /__preview/<port>/` (Vite) or `basePath` (Next.js) — without this, assets 404' \
-                '4. ALWAYS verify the server is running after starting: `sleep 2 && ss -tlnp | grep <PORT>`' \
-                '5. NEVER output `http://localhost` in any URL — the user accesses remotely' \
-                '6. The trailing slash after the port number is REQUIRED: `/__preview/<PORT>/` not `/__preview/<PORT>`' \
-                '7. If a port is busy, pick another port and adjust `--base` accordingly' \
-                '8. When the user asks to "create a web page", "build a website", or "start a project":' \
-                '   automatically create the project, install deps, start the dev server with nohup, and show the preview URL' \
+                '1. ALWAYS use `webstart <BASE> <COMMAND>` to start dev servers. NEVER use plain' \
+                '   `nohup ... &` or `cmd &` — the opencode shell tool reaps background processes' \
+                '   when the agent turn ends, so non-`webstart` servers DIE before the user can' \
+                '   reach the URL. There is no exception to this rule inside this container.' \
+                '   webstart auto-suffixes BASE with the listening port (e.g. `vite` → `vite-5173`),' \
+                '   so two servers on different ports never clash even with the same BASE. Same' \
+                '   final NAME (same base + same port) = restart of the previous one. After every' \
+                '   `webstart` call READ its success line — the quoted name is what you pass to' \
+                '   `webstop`. Use `weblist` to inspect running servers.' \
+                '2. ALWAYS do Step 0 FIRST — detect the stack from marker files and pick the correct' \
+                '   dev server. NEVER run `npx vite` on a Next.js / Angular / Gatsby / CRA / Nuxt /' \
+                '   Django / Flask project. Each has its own runner.' \
+                '3. When `package.json` has `scripts.dev` or `scripts.start`, PREFER `npm run dev` /' \
+                '   `npm start` over ad-hoc framework CLIs — the script may add required flags.' \
+                '   Wrap it in webstart: `webstart vite npm run dev`.' \
+                '4. ALWAYS bind to `0.0.0.0` — NEVER localhost or 127.0.0.1' \
+                '5. ALWAYS set the preview prefix on the server:' \
+                '   Vite → `base: "/__preview/<PORT>/"` in vite.config;' \
+                '   Next.js → `basePath`; Nuxt → `app.baseURL`; Angular → `--base-href`;' \
+                '   Gatsby → `pathPrefix` + `--prefix-paths`; CRA → `PUBLIC_URL`;' \
+                '   FastAPI → `--root-path`; Flask → `APPLICATION_ROOT`;' \
+                '   Streamlit → `--server.baseUrlPath`; Gradio → `root_path`;' \
+                '   Spring Boot → `server.servlet.context-path`.' \
+                '   Without the prefix, assets 404.' \
+                '6. For Vite, ALWAYS write `vite.config.js` with `server.allowedHosts: true` AND' \
+                '   `server.hmr: { protocol: "wss", clientPort: 443 }` BEFORE starting. Without' \
+                '   `allowedHosts`, Vite 6 returns "Blocked request" to proxied hostnames. Without' \
+                '   the HMR overrides, hot-reload silently breaks.' \
+                '7. NEVER use `python3 -m http.server` for preview — it ignores URL prefixes and every' \
+                '   request returns 404 behind the /__preview/<PORT>/ proxy. Use Vite for static files.' \
+                '8. "Blocked request" / "Invalid Host header" / "Disallowed Host" means a host' \
+                '   allowlist kicked in — fix the framework config (see Step 0 Golden rule 4), do NOT' \
+                '   assume the proxy is broken.' \
+                '9. After `webstart` returns 0 the server is verified up. To re-check later use' \
+                '   `weblist`. To stop: `webstop <NAME>` or `webstop --all`.' \
+                '10. NEVER output `http://localhost` or `127.0.0.1` in any URL — the user accesses remotely' \
+                '11. The trailing slash after the port number is REQUIRED: `/__preview/<PORT>/` not `/__preview/<PORT>`' \
+                '12. If a port is busy, pick another port and adjust the server prefix accordingly' \
+                '13. When the user asks to "create a web page", "build a website", or "start a project":' \
+                '    automatically create the project, install deps, start the dev server with' \
+                '    `webstart`, and show the preview URL.' \
                 > "$SKILL"
               ADMIN="/home/opencode/.config/opencode/skills/system-admin/SKILL.md"
               printf '%s\n' \
@@ -267,6 +634,8 @@ spec:
                 '- **Network**: curl, wget, ssh, ss' \
                 '- **Shell**: bash' \
                 '- **Compression**: zip, unzip, gzip, bzip2, xz, tar, zstd' \
+                '- **Web server daemon helpers**: `webstart` / `webstop` / `weblist`' \
+                '  (use these instead of `nohup ... &` — see web-preview SKILL)' \
                 '' \
                 '## Language-specific package managers' \
                 '' \
@@ -304,17 +673,61 @@ spec:
                 'STALE_PLUGIN_NPM = "oh-my-opencode"' \
                 '' \
                 'LEGACY_S1 = (' \
-                '    "CRITICAL: You have special skills. ALWAYS run /skill load web-preview BEFORE any task involving "' \
-                '    "web, server, preview, run, start, serve, build, create, demo, test, launch, deploy, site, app, page, "' \
-                '    "website, frontend, backend, API, port, vite, react, next, vue, flask, go server, python server. "' \
-                '    "ALWAYS run /skill load system-admin BEFORE installing ANY system package."' \
+                '    "MANDATORY rules for ANY web/dev server task. Do NOT skip, do NOT substitute.\\n\\n"' \
+                '    "1. Start every dev server with the `webstart` wrapper:\\n"' \
+                '    "       webstart <name> <command-exactly-as-you-would-type-it-foreground>\\n"' \
+                '    "   Examples:\\n"' \
+                '    "       webstart vite npx vite --port 4000 --host 0.0.0.0\\n"' \
+                '    "       webstart api  uvicorn app:app --host 0.0.0.0 --port 8000\\n"' \
+                '    "       webstart next npm run dev\\n"' \
+                '    "   webstart auto-suffixes the NAME with the listening port (e.g. vite-4000)\\n"' \
+                '    "   and uses setsid+nohup+stdio-detach so the process survives turn end.\\n\\n"' \
+                '    "2. NEVER use any of these forms. The agent shell reaps background processes\\n"' \
+                '    "   at turn end, so the server dies before the user can reach the URL:\\n"' \
+                '    "       nohup vite ... &           dies\\n"' \
+                '    "       npx vite ... &             dies\\n"' \
+                '    "       npx vite ... & disown      dies\\n"' \
+                '    "       npx vite                   dies (foreground in agent shell)\\n\\n"' \
+                '    "3. Manage running servers (always available):\\n"' \
+                '    "       weblist                    list all servers (also shown to the user)\\n"' \
+                '    "       webstop <name>             stop one by exact NAME (e.g. vite-4000)\\n"' \
+                '    "       webstop --prefix vite      stop every vite-* server\\n"' \
+                '    "       webstop --all              stop everything\\n\\n"' \
+                '    "4. Vite 6+ blocks unknown hosts. BEFORE webstart, write vite.config.js with:\\n"' \
+                '    "       server.host: 0.0.0.0, server.port: <PORT>, server.allowedHosts: true,\\n"' \
+                '    "       server.hmr: { protocol: wss, clientPort: 443 },\\n"' \
+                '    "       base: /__preview/<PORT>/\\n"' \
+                '    "   The literal 443 stays 443. Replace <PORT> with your actual port number.\\n\\n"' \
+                '    "5. Preview URL is always https://<DOMAIN>/__preview/<PORT>/ . NEVER show localhost.\\n\\n"' \
+                '    "For per-framework details (Next.js, Flask, Django, Go, Rust, static, etc.) and\\n"' \
+                '    "the full vite.config.js template, run `/skill load web-preview`."' \
                 ')' \
-                'LEGACY_S2 = "NEVER use sudo, apt, or apk directly. Use pkg-install instead."' \
+                'LEGACY_S2 = (' \
+                '    "NEVER use `sudo`, `apt`, or `apk` directly. Use `pkg-install <pkg> [pkg ...]`\\n"' \
+                '    "which queues the install for the next pod restart and persists it via the\\n"' \
+                '    "package snapshot mechanism. Run `/skill load system-admin` for details."' \
+                ')' \
                 'LEGACY_S3 = (' \
                 '    f"NEVER show localhost URLs. The domain is {DOMAIN}. "' \
                 '    f"Dev server preview URL format: https://{DOMAIN}/__preview/<port>/"' \
                 ')' \
-                'LEGACY = {LEGACY_S1, LEGACY_S2, LEGACY_S3}' \
+                '# Pre-baseline-md historical chart versions used to write LEGACY_S1/S2/S3' \
+                '# as literal strings into workspace-level opencode.json `instructions`.' \
+                '# We keep every past literal here so the cleanup loop below catches and' \
+                '# removes them no matter which old chart version a user originally bootstrapped on.' \
+                '# IMPORTANT: every time you change LEGACY_S1/LEGACY_S2/LEGACY_S3 above,' \
+                '# move the OLD literal into OBSOLETE_LEGACY before changing the active one.' \
+                'OBSOLETE_LEGACY = {' \
+                '    # web-preview / skill-loading hint, original v1 (pre-CRITICAL)' \
+                '    "You have special skills. Before ANY web development task (create site, start server, preview), load the web-preview skill. Before installing ANY system package, load the system-admin skill.",' \
+                '    # web-preview / skill-loading hint, v2 (CRITICAL + verbose trigger list)' \
+                '    "CRITICAL: You have special skills. ALWAYS run /skill load web-preview BEFORE any task involving web, server, preview, run, start, serve, build, create, demo, test, launch, deploy, site, app, page, website, frontend, backend, API, port, vite, react, next, vue, flask, go server, python server. ALWAYS run /skill load system-admin BEFORE installing ANY system package.",' \
+                '    # pkg-install hint v1 (also identical to v2 short form)' \
+                '    "NEVER use sudo, apt, or apk directly. Use pkg-install instead.",' \
+                '    # localhost-url hint v1 (no domain interpolation)' \
+                '    "NEVER show localhost URLs. Dev servers are accessed via /__preview/<port>/ path on the current domain.",' \
+                '}' \
+                'LEGACY = {LEGACY_S1, LEGACY_S2, LEGACY_S3} | OBSOLETE_LEGACY' \
                 '' \
                 'BASELINE_MD.parent.mkdir(parents=True, exist_ok=True)' \
                 'md = (' \
@@ -592,7 +1005,8 @@ spec:
                   usr/bin/ssh usr/bin/node usr/bin/npm usr/bin/go usr/bin/rustc usr/bin/cargo \
                   usr/bin/zip usr/bin/unzip usr/bin/bzip2 usr/bin/xz usr/bin/zstd \
                   sbin/ss \
-                  usr/local/bin/opencode usr/local/bin/pkg-install; do
+                  usr/local/bin/opencode usr/local/bin/pkg-install \
+                  usr/local/bin/webstart usr/local/bin/webstop usr/local/bin/weblist; do
                   if [ ! -e "$PKG/$b" ] && [ ! -L "$PKG/$b" ]; then
                     echo "=== Cache invalid: $b missing ==="
                     return 1
@@ -662,35 +1076,97 @@ spec:
               chown 1000:1000 /home/opencode/.profile /home/opencode/.bashrc
 
               olares_run_omo() {
+                OMO_WANT_VERSION="${OLARES_OMO_VERSION:-{{ $omoVersion }}}"
+                case "$OMO_WANT_VERSION" in
+                  [0-9]*.[0-9]*.[0-9]*)
+                    ;;
+                  *)
+                    echo "=== WARNING: OPENCODE_OMO_VERSION='${OMO_WANT_VERSION}' is not a concrete semver (e.g. '3.17.4')."
+                    echo "===          Non-semver tags like 'latest' compare unequal to the installed"
+                    echo "===          version string, so OMO will be REINSTALLED on every pod restart."
+                    echo "===          Pin to a concrete version in Olares UI to fix."
+                    ;;
+                esac
+
+                # Install OMO into /home/opencode/.npm-global — this lives on the
+                # persistent appData hostPath, so it survives pod restarts WITHOUT
+                # the fragile "snapshot-patch dance" that the previous version did
+                # (copying /usr/lib/node_modules into $PKG/usr after the fact, with
+                # silent failures).
+                OMO_HOME_PREFIX="/home/opencode/.npm-global"
+                OMO_HOME_DIR="${OMO_HOME_PREFIX}/lib/node_modules/oh-my-opencode"
+
+                # Legacy locations we may have written to in older chart versions.
+                # Scanned for backward-compat; on hit we ALSO mirror into the new
+                # primary location so future restarts are clean.
                 OMO_FOUND=false
-                for d in /usr/lib/node_modules/oh-my-opencode \
+                OMO_VERSION_MATCH=false
+                OMO_FOUND_DIR=""
+                OMO_FOUND_VERSION=""
+                for d in "$OMO_HOME_DIR" \
+                         /usr/lib/node_modules/oh-my-opencode \
                          /usr/local/lib/node_modules/oh-my-opencode \
                          "$PKG/usr/lib/node_modules/oh-my-opencode" \
                          "$PKG/usr/local/lib/node_modules/oh-my-opencode"; do
                   if [ -d "$d" ] && [ -f "$d/package.json" ]; then
                     OMO_FOUND=true
+                    OMO_FOUND_DIR="$d"
+                    OMO_FOUND_VERSION=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$d/package.json" | head -n1)
+                    if [ "$OMO_FOUND_VERSION" = "$OMO_WANT_VERSION" ]; then
+                      OMO_VERSION_MATCH=true
+                    fi
                     break
                   fi
                 done
-                if [ "$OMO_FOUND" = "true" ]; then
-                  echo "=== OMO: oh-my-opencode already installed, skipping ==="
-                else
-                  echo "=== OMO: installing nodejs+npm and oh-my-opencode ==="
-                  apk add --no-cache nodejs npm 2>&1 || { echo "=== WARNING: apk add nodejs npm failed ==="; return; }
-                  if [ "$USE_CN_MIRROR" = "true" ]; then
-                    npm config set registry https://registry.npmmirror.com 2>/dev/null || true
-                  fi
-                  if npm install -g --ignore-scripts oh-my-opencode 2>&1; then
-                    OMO_DIR=$(npm root -g 2>/dev/null)/oh-my-opencode
-                    if [ -d "$OMO_DIR" ] && [ -d "$PKG/usr" ]; then
-                      SNAP_TARGET="$PKG$(npm root -g 2>/dev/null)/oh-my-opencode"
-                      mkdir -p "$(dirname "$SNAP_TARGET")"
-                      cp -a "$OMO_DIR" "$SNAP_TARGET" 2>/dev/null && \
-                        echo "=== OMO: patched into snapshot for next restart ==="
+
+                if [ "$OMO_FOUND" = "true" ] && [ "$OMO_VERSION_MATCH" = "true" ]; then
+                  echo "=== OMO: oh-my-opencode@${OMO_FOUND_VERSION} already installed at ${OMO_FOUND_DIR}, skipping ==="
+                  # If it's at a legacy /usr location, mirror into the persistent
+                  # location so the NEXT restart finds it via the primary path
+                  # (/home/opencode/...) without re-running this fallback.
+                  if [ "$OMO_FOUND_DIR" != "$OMO_HOME_DIR" ] && [ ! -d "$OMO_HOME_DIR" ]; then
+                    echo "=== OMO: mirroring legacy install (${OMO_FOUND_DIR}) → ${OMO_HOME_DIR} ==="
+                    mkdir -p "$(dirname "$OMO_HOME_DIR")" || true
+                    if cp -a "$OMO_FOUND_DIR" "$OMO_HOME_DIR" 2>&1; then
+                      chown -R 1000:1000 "$OMO_HOME_PREFIX" 2>/dev/null || true
+                      echo "=== OMO: mirror complete ==="
+                    else
+                      echo "=== WARNING: OMO mirror failed (see error above); will retry next restart ==="
                     fi
-                  else
-                    echo "=== WARNING: npm install oh-my-opencode failed ==="
                   fi
+                  chown -R 1000:1000 /home/opencode/.local 2>/dev/null || true
+                  return 0
+                fi
+
+                if [ "$OMO_FOUND" = "true" ]; then
+                  echo "=== OMO: installed version (${OMO_FOUND_VERSION:-unknown}) at ${OMO_FOUND_DIR} does not match pinned (${OMO_WANT_VERSION}); reinstalling ==="
+                  rm -rf "$OMO_FOUND_DIR" 2>/dev/null || true
+                  rm -rf "$OMO_HOME_DIR" 2>/dev/null || true
+                  [ -n "$PKG" ] && rm -rf "$PKG/usr/lib/node_modules/oh-my-opencode" "$PKG/usr/local/lib/node_modules/oh-my-opencode" 2>/dev/null || true
+                fi
+
+                echo "=== OMO: installing nodejs+npm and oh-my-opencode@${OMO_WANT_VERSION} → ${OMO_HOME_PREFIX} ==="
+                apk add --no-cache nodejs npm 2>&1 || { echo "=== WARNING: apk add nodejs npm failed ==="; return 1; }
+                if [ "$USE_CN_MIRROR" = "true" ]; then
+                  npm config set registry https://registry.npmmirror.com 2>/dev/null || true
+                fi
+
+                # Make sure the target prefix exists; npm needs it for --prefix.
+                mkdir -p "${OMO_HOME_PREFIX}/bin" "${OMO_HOME_PREFIX}/lib"
+
+                # Install DIRECTLY to the persistent prefix. No snapshot dance.
+                if npm install -g --ignore-scripts --prefix "${OMO_HOME_PREFIX}" "oh-my-opencode@${OMO_WANT_VERSION}" 2>&1; then
+                  if [ -d "$OMO_HOME_DIR" ] && [ -f "$OMO_HOME_DIR/package.json" ]; then
+                    INSTALLED_VER=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$OMO_HOME_DIR/package.json" | head -n1)
+                    chown -R 1000:1000 "$OMO_HOME_PREFIX" 2>/dev/null || true
+                    echo "=== OMO: installed oh-my-opencode@${INSTALLED_VER} at ${OMO_HOME_DIR} (persistent) ==="
+                  else
+                    echo "=== WARNING: npm install reported success but ${OMO_HOME_DIR} is missing/incomplete ==="
+                    echo "===          (expected ${OMO_HOME_DIR}/package.json after install) ==="
+                    ls -la "${OMO_HOME_PREFIX}/lib/node_modules" 2>&1 || true
+                  fi
+                else
+                  echo "=== WARNING: npm install oh-my-opencode@${OMO_WANT_VERSION} failed ==="
                 fi
                 chown -R 1000:1000 /home/opencode/.local 2>/dev/null || true
               }
@@ -914,6 +1390,354 @@ spec:
               esac
               EOFWRAPPER
               chmod +x /usr/local/bin/pkg-install
+
+              echo "=== Creating webstart / webstop / weblist wrappers ==="
+              cat > /usr/local/bin/webstart << 'EOFWEBSTART'
+              #!/bin/sh
+              # webstart - start a web server as a fully detached daemon AND
+              # auto-suffix the NAME with the listening port so multiple
+              # concurrent servers of the same kind never clash.
+              #
+              # AGENT-FACING TOOL — not intended for direct user invocation.
+              # The user's expected entry point is `weblist` (read-only).
+              #
+              # Usage: webstart BASE_NAME COMMAND [ARGS...]
+              # NAME resolution:
+              #   1. Parse a port from the CLI args (--port N, -p N, --port=N,
+              #      --server.port N, --server-port N, --listen-port N,
+              #      PORT=N env-prefix).
+              #   2. If no port from args, snapshot listening sockets BEFORE/AFTER
+              #      starting the server and pick the new port.
+              #   3. Final NAME = "<BASE>-<PORT>" if a port was found, else "<BASE>".
+              #   4. If the resolved NAME is already alive → restart mode (kill old).
+              if [ "$1" = "-h" ] || [ "$1" = "--help" ] || [ -z "$1" ]; then
+                cat << 'EOFHELP'
+              webstart - start a web server as a detached daemon (agent-facing)
+
+              USAGE
+                webstart BASE_NAME COMMAND [ARGS...]
+
+              EXAMPLES
+                webstart vite    npx vite                                  # NAME -> vite-5173
+                webstart vite    npx vite --port 4000                      # NAME -> vite-4000
+                webstart next    npx next dev -H 0.0.0.0 -p 3000           # NAME -> next-3000
+                webstart flask   flask run --host 0.0.0.0 --port 5000      # NAME -> flask-5000
+                webstart cra     PORT=3001 npm start                       # NAME -> cra-3001
+
+              The actual NAME is printed in the success line — read it to know
+              what to pass to webstop, e.g. `webstop vite-5173`.
+
+              MANAGEMENT
+                weblist               list running servers (also user-friendly)
+                webstop NAME          stop one server (exact match OR base prefix)
+                webstop --all         stop everything
+                tail -f /tmp/web-NAME.log    follow logs
+
+              WHY
+                Plain `cmd &` and even `nohup cmd &` get reaped when the agent's
+                shell exits. webstart uses setsid + nohup + full stdio detach so
+                the server survives no matter what.
+              EOFHELP
+                exit 0
+              fi
+              BASE="$1"; shift
+              [ $# -gt 0 ] || { echo "webstart: missing COMMAND. Run 'webstart --help'." >&2; exit 2; }
+              case "$BASE" in
+                *[!a-zA-Z0-9_-]*) echo "webstart: BASE_NAME must match [a-zA-Z0-9_-]+" >&2; exit 2 ;;
+              esac
+
+              # ---- parse port hint from CLI args ----
+              HINT_PORT=""
+              prev=""
+              for a in "$@"; do
+                [ -n "$HINT_PORT" ] && break
+                case "$a" in
+                  --port=*|--server.port=*|--server-port=*|--listen-port=*|-p=*|-P=*)
+                    HINT_PORT="${a#*=}" ;;
+                  PORT=[0-9]*)
+                    HINT_PORT="${a#PORT=}" ;;
+                  *)
+                    if [ -n "$prev" ]; then
+                      case "$a" in
+                        [0-9]*) HINT_PORT="$a" ;;
+                      esac
+                      prev=""
+                    fi
+                    case "$a" in
+                      --port|--server.port|--server-port|--listen-port|-p|-P) prev="$a" ;;
+                    esac ;;
+                esac
+              done
+              case "$HINT_PORT" in *[!0-9]*|"") HINT_PORT="" ;; esac
+
+              # ---- decide initial NAME ----
+              if [ -n "$HINT_PORT" ]; then
+                NAME="${BASE}-${HINT_PORT}"
+              else
+                NAME="$BASE"   # may be renamed once we discover the listening port
+              fi
+              PID="/tmp/web-${NAME}.pid"
+              LOG="/tmp/web-${NAME}.log"
+
+              # ---- restart mode: same final NAME alive → kill old ----
+              if [ -f "$PID" ] && OLD=$(cat "$PID" 2>/dev/null) && [ -n "$OLD" ] && kill -0 "$OLD" 2>/dev/null; then
+                OLDCMD=$(ps -p "$OLD" -o args= 2>/dev/null | head -c 80)
+                echo "webstart: NOTE — '$NAME' is already running (pid $OLD)."
+                echo "webstart:   old command: ${OLDCMD:-<unknown>}"
+                echo "webstart:   stopping the old one (same final NAME = restart)."
+                echo "webstart:   to run BOTH, pick a DIFFERENT port — webstart will then"
+                echo "webstart:   suffix the new server with that port and avoid the clash."
+                kill "$OLD" 2>/dev/null
+                _w=0; while kill -0 "$OLD" 2>/dev/null && [ $_w -lt 10 ]; do sleep 0.3; _w=$((_w+1)); done
+                kill -9 "$OLD" 2>/dev/null || true
+              fi
+              rm -f "$PID" "$LOG"
+              : > "$LOG"
+
+              # ---- snapshot listening ports BEFORE start (write to a temp file
+              # because /bin/sh on Alpine = busybox ash, no process substitution).
+              SNAP=$(mktemp /tmp/web-snap.XXXXXX 2>/dev/null) || SNAP="/tmp/web-snap.$$"
+              ss -tlnH 2>/dev/null | awk '{print $4}' | grep -oE '[0-9]+$' | sort -un > "${SNAP}.before"
+
+              # ---- launch ----
+              # Use `env` so leading K=V env-prefix args (e.g. `PORT=3001 npm start`)
+              # work even though we're not going through a shell.
+              if command -v setsid >/dev/null 2>&1; then
+                setsid nohup env "$@" >"$LOG" 2>&1 </dev/null &
+              else
+                nohup env "$@" >"$LOG" 2>&1 </dev/null &
+              fi
+              CHILD=$!
+              echo "$CHILD" > "$PID"
+              disown "$CHILD" 2>/dev/null || true
+
+              # ---- verify alive ----
+              sleep 2
+              if ! kill -0 "$CHILD" 2>/dev/null; then
+                echo "webstart: '$NAME' died on startup. Last 30 log lines:" >&2
+                tail -n 30 "$LOG" >&2 2>/dev/null || true
+                rm -f "$PID"
+                exit 1
+              fi
+
+              # ---- detect actual listening port (snapshot diff, retry up to 5x) ----
+              ACTUAL_PORT=""
+              _try=0
+              while [ $_try -lt 5 ] && [ -z "$ACTUAL_PORT" ]; do
+                ss -tlnH 2>/dev/null | awk '{print $4}' | grep -oE '[0-9]+$' | sort -un > "${SNAP}.after"
+                NEWPORTS=$(comm -13 "${SNAP}.before" "${SNAP}.after" 2>/dev/null)
+                _new_count=$(printf '%s\n' "$NEWPORTS" | grep -c '^[0-9]')
+                if [ "$_new_count" = "1" ]; then
+                  ACTUAL_PORT=$(printf '%s\n' "$NEWPORTS" | head -1)
+                  break
+                fi
+                _try=$((_try+1))
+                sleep 1
+              done
+              rm -f "${SNAP}.before" "${SNAP}.after"
+
+              # ---- rename pid/log files if we discovered a port and NAME has no suffix ----
+              if [ -n "$ACTUAL_PORT" ] && [ -z "$HINT_PORT" ]; then
+                FINAL="${BASE}-${ACTUAL_PORT}"
+                FPID="/tmp/web-${FINAL}.pid"
+                FLOG="/tmp/web-${FINAL}.log"
+                if [ -f "$FPID" ]; then
+                  OTHER=$(cat "$FPID" 2>/dev/null)
+                  if [ -z "$OTHER" ] || ! kill -0 "$OTHER" 2>/dev/null; then
+                    rm -f "$FPID" "$FLOG"
+                  else
+                    echo "webstart: WARNING — port $ACTUAL_PORT is already tracked as '$FINAL' (pid $OTHER)." >&2
+                    echo "webstart:   keeping NAME='$NAME' to avoid overwriting." >&2
+                    FPID=""
+                  fi
+                fi
+                if [ -n "$FPID" ]; then
+                  if mv "$PID" "$FPID" 2>/dev/null && mv "$LOG" "$FLOG" 2>/dev/null; then
+                    NAME="$FINAL"; PID="$FPID"; LOG="$FLOG"
+                  fi
+                fi
+              fi
+
+              if [ -n "$ACTUAL_PORT" ]; then
+                echo "webstart: '$NAME' running (pid $CHILD, port $ACTUAL_PORT), log: $LOG"
+              else
+                echo "webstart: '$NAME' running (pid $CHILD, port=unknown), log: $LOG"
+                echo "webstart: NOTE — could not auto-detect listening port within 5s."
+                echo "webstart:        NAME left as '$NAME' (no port suffix)."
+              fi
+              exit 0
+              EOFWEBSTART
+              chmod +x /usr/local/bin/webstart
+
+              cat > /usr/local/bin/webstop << 'EOFWEBSTOP'
+              #!/bin/sh
+              # webstop - stop one or more webstart-managed servers.
+              #
+              # NAME matching (in order):
+              #   1. Exact: /tmp/web-<NAME>.pid exists → stop just that one.
+              #   2. Single prefix: only one server matches "<NAME>-*" → stop it
+              #      (convenience for the common "I have one vite running" case).
+              #   3. Multiple prefix matches → REFUSE and list candidates. Either
+              #      pass the exact NAME, or use `--prefix <BASE>` for explicit
+              #      batch-stop. This guard prevents the "restart-one-instance,
+              #      kill-all-instances" footgun.
+              #
+              # FLAGS
+              #   --prefix <BASE> [...]    explicit batch: stop every "<BASE>-*"
+              #                            (and bare "<BASE>" if present)
+              #   --all                    stop every webstart-managed server
+              #
+              # AGENT-FACING TOOL — see weblist for user-friendly output.
+              if [ "$1" = "-h" ] || [ "$1" = "--help" ] || [ -z "$1" ]; then
+                cat << 'EOFHELP'
+              webstop - stop a webstart-managed server
+
+              USAGE
+                webstop NAME [NAME...]            stop by exact name (or unique prefix)
+                webstop --prefix BASE [BASE...]   batch: stop every "BASE-*" + bare "BASE"
+                webstop --all                     stop every webstart-managed server
+
+              EXAMPLES
+                webstop vite-5173             stop the exact server
+                webstop vite                  if only one "vite-*" runs, stop it;
+                                              if multiple, REFUSE and list them
+                webstop --prefix vite         stop ALL "vite-*" explicitly
+                webstop --all                 nuke everything
+
+              SAFETY
+                Plain `webstop vite` will NOT silently kill multiple servers — it
+                only proceeds when the prefix uniquely identifies one. To batch
+                stop, you MUST use --prefix. This avoids accidentally killing
+                vite-6006 when you meant to restart vite-5173.
+              EOFHELP
+                exit 0
+              fi
+
+              MODE="auto"
+              case "$1" in
+                --all)
+                  shift
+                  MODE="all"
+                  set -- $(ls /tmp/web-*.pid 2>/dev/null | sed -e 's|.*/web-||' -e 's|\.pid$||')
+                  [ $# -gt 0 ] || { echo "webstop: nothing running"; exit 0; }
+                  ;;
+                --prefix)
+                  shift
+                  MODE="prefix"
+                  [ $# -gt 0 ] || { echo "webstop: --prefix needs at least one BASE" >&2; exit 2; }
+                  ;;
+              esac
+
+              _stop_one() {
+                _n="$1"
+                _pf="/tmp/web-${_n}.pid"
+                _p=$(cat "$_pf" 2>/dev/null)
+                if [ -z "$_p" ] || ! kill -0 "$_p" 2>/dev/null; then
+                  rm -f "$_pf"
+                  echo "webstop: '$_n' was not running (cleaned stale pid file)"
+                  return 0
+                fi
+                kill "$_p" 2>/dev/null
+                _w=0
+                while kill -0 "$_p" 2>/dev/null && [ $_w -lt 10 ]; do
+                  sleep 0.3; _w=$((_w + 1))
+                done
+                kill -9 "$_p" 2>/dev/null || true
+                rm -f "$_pf"
+                echo "webstop: '$_n' stopped (was pid $_p)"
+              }
+
+              # Collect "<BASE>-*" + bare "<BASE>" matches, print one per line
+              _list_prefix_matches() {
+                _base="$1"
+                [ -f "/tmp/web-${_base}.pid" ] && echo "$_base"
+                for pf in /tmp/web-${_base}-*.pid; do
+                  [ -f "$pf" ] || continue
+                  m=$(basename "$pf" .pid); m=${m#web-}
+                  echo "$m"
+                done
+              }
+
+              RC=0
+              for NAME in "$@"; do
+                case "$MODE" in
+                  prefix)
+                    MATCHES=$(_list_prefix_matches "$NAME")
+                    if [ -z "$MATCHES" ]; then
+                      echo "webstop: --prefix '$NAME' matched nothing" >&2
+                      RC=1; continue
+                    fi
+                    _n_match=$(echo "$MATCHES" | wc -l | tr -d ' ')
+                    echo "webstop: --prefix '$NAME' matches $_n_match server(s):"
+                    echo "$MATCHES" | sed 's/^/  - /'
+                    for m in $MATCHES; do _stop_one "$m"; done
+                    ;;
+                  *)
+                    # auto / all: exact first, then unique-prefix, else refuse
+                    if [ -f "/tmp/web-${NAME}.pid" ]; then
+                      _stop_one "$NAME"
+                      continue
+                    fi
+                    MATCHES=$(_list_prefix_matches "$NAME")
+                    if [ -z "$MATCHES" ]; then
+                      echo "webstop: no server matching '$NAME'" >&2
+                      echo "webstop:   run 'weblist' to see what is running." >&2
+                      RC=1; continue
+                    fi
+                    _n_match=$(echo "$MATCHES" | wc -l | tr -d ' ')
+                    if [ "$_n_match" = "1" ]; then
+                      _stop_one "$MATCHES"
+                      continue
+                    fi
+                    echo "webstop: '$NAME' is AMBIGUOUS — matches $_n_match servers:" >&2
+                    echo "$MATCHES" | sed 's/^/  - /' >&2
+                    echo "webstop:   refusing to kill multiple servers from one base name." >&2
+                    echo "webstop:   either pass the EXACT name (e.g. 'webstop ${NAME}-<port>')," >&2
+                    echo "webstop:   or use 'webstop --prefix $NAME' to stop them all explicitly." >&2
+                    RC=2
+                    ;;
+                esac
+              done
+              exit $RC
+              EOFWEBSTOP
+              chmod +x /usr/local/bin/webstop
+
+              cat > /usr/local/bin/weblist << 'EOFWEBLIST'
+              #!/bin/sh
+              # weblist - show running web servers (user-friendly).
+              #
+              # Anything started via `webstart` (typically by the AI agent) shows
+              # up here. To follow logs:  tail -f /tmp/web-<NAME>.log
+              found=0
+              FMT='  %-22s %-7s %-7s %s\n'
+              for PID in /tmp/web-*.pid; do
+                [ -f "$PID" ] || continue
+                NAME=$(basename "$PID" .pid); NAME=${NAME#web-}
+                P=$(cat "$PID" 2>/dev/null)
+                if [ -z "$P" ] || ! kill -0 "$P" 2>/dev/null; then
+                  rm -f "$PID"; continue
+                fi
+                if [ "$found" = "0" ]; then
+                  printf "$FMT" "NAME" "PID" "PORT" "COMMAND"
+                  printf "$FMT" "----" "---" "----" "-------"
+                fi
+                CMD=$(ps -p "$P" -o args= 2>/dev/null | head -c 100)
+                # Try the captured pid first; fall back to its direct children
+                # (npx → node, npm → node, etc.) since the listener may not be the
+                # process we originally spawned.
+                PORT=$(ss -tlnp 2>/dev/null | grep "pid=$P," | head -1 | awk '{print $4}' | sed 's/.*://')
+                if [ -z "$PORT" ]; then
+                  for kid in $(ps -o pid,ppid 2>/dev/null | awk -v par="$P" '$2==par {print $1}'); do
+                    PORT=$(ss -tlnp 2>/dev/null | grep "pid=$kid," | head -1 | awk '{print $4}' | sed 's/.*://')
+                    [ -n "$PORT" ] && break
+                  done
+                fi
+                printf "$FMT" "$NAME" "$P" "${PORT:-?}" "$CMD"
+                found=1
+              done
+              [ "$found" = "1" ] || echo "  (no servers running)"
+              EOFWEBLIST
+              chmod +x /usr/local/bin/weblist
 
               olares_run_omo
 

@@ -87,6 +87,13 @@ envs:
     editable: true
     default: "false"
     description: "Activate oh-my-opencode (OMO) multi-agent UI. The OMO package is always pre-installed; this toggle only controls whether the plugin is loaded at startup. Set to 'true' to enable the 4-agent OMO interface."
+  - envName: OPENCODE_OMO_VERSION
+    required: false
+    applyOnChange: true
+    type: string
+    editable: true
+    default: "3.17.4"
+    description: "Pin the oh-my-opencode (OMO) npm package version installed at container startup. ALWAYS use a concrete semver (e.g. '3.17.4', '3.18.0'). DO NOT use 'latest' or other npm dist-tags — they cannot be compared as strings, so the init container will reinstall OMO on EVERY pod restart, adding 30-60s of startup time and consuming bandwidth. Find published versions at https://www.npmjs.com/package/oh-my-opencode. On change, the init container detects the mismatch and reinstalls automatically."
 options:
   apiTimeout: 0
   allowedOutboundPorts:

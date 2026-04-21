@@ -1,0 +1,42 @@
+metadata:
+  title: OpenCode
+  description: 开源 AI 编程助手
+spec:
+  fullDescription: |
+    OpenCode 是一个开源代理，帮助你在终端、IDE 或桌面编写代码。
+
+    - 支持 LSP，可为 LLM 自动加载合适的 LSP
+    - 多会话，支持在同一项目中并行启动多个代理
+    - 会话分享，可分享任意会话链接以供参考或调试
+    - GitHub Copilot，支持通过 GitHub 登录以使用你的 Copilot 账号
+    - ChatGPT Plus/Pro，支持通过 OpenAI 登录以使用 ChatGPT Plus 或 Pro 账号
+    - 支持 75+ LLM 服务商和任意模型，基于 Models.dev，包括原生模型
+    - 任何编辑器，支持终端界面、桌面应用和 IDE 扩展
+
+    使用方法
+    - 打开应用，可直接在浏览器中使用 Web UI。
+    - 在 Web UI 中配置你的 LLM 服务商和 API 密钥。
+    - 你的代码工作区已挂载在 /home/opencode/workspace（链接到你的 Home/Code 目录）。
+  upgradeDescription: |
+    配置变更：
+    - 内置 oh-my-openagent (OMO) 多代理插件
+    - 新增 Terminal 入口，支持自动启动 TUI
+    升级 OpenCode 版本至 1.4.4
+
+    v1.4.4 更新：
+    - 新增阿里云服务商支持（含缓存）；MCP OAuth 连接持久化保存。
+    - 快照完全遵循 .gitignore；会话可在运行中更新项目权限。
+    - 新增 `opencode export --sanitize` 脱敏导出功能。
+    - 插件可注册自定义工作区适配器。
+
+    v1.4.3 更新：
+    核心功能：
+    - 修复了使用 OAuth 验证的 OpenAI 账户创建代理的问题。
+    - 被中断的 Bash 命令现在会保留其最终输出和截断详情，而不是直接中止。
+    - 为支持的 Claude 和 GPT 模型添加了快速模式选项。
+    TUI 界面：
+    - 恢复了默认隐藏的会话滚动条。
+    扩展功能：
+    - 为远程 MCP 服务器添加了可配置的 OAuth 重定向 URI。（@egze）
+
+    完整发布说明请见：https://github.com/anomalyco/opencode/releases/tag/v1.4.4
