@@ -6,11 +6,9 @@
   <component name="ChangeListManager">
     <list default="true" id="e9836655-cb5c-456b-aef7-0ca255338318" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tensorzero/Chart.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/tensorzero/Chart.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tensorzero/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/tensorzero/OlaresManifest.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tensorzero/templates/configmap.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/tensorzero/templates/configmap.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tensorzero/templates/ingress.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/tensorzero/templates/ingress.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tensorzero/templates/tensorzero.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/tensorzero/templates/tensorzero.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/opennotebook/Chart.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opennotebook/Chart.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/opennotebook/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opennotebook/OlaresManifest.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/opennotebook/templates/deployment.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opennotebook/templates/deployment.yaml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -18,7 +16,7 @@
     <option name="LAST_RESOLUTION" value="IGNORE" />
   </component>
   <component name="EmbeddingIndexingInfo">
-    <option name="cachedIndexableFilesCount" value="1277" />
+    <option name="cachedIndexableFilesCount" value="1286" />
     <option name="fileBasedEmbeddingIndicesEnabled" value="true" />
   </component>
   <component name="FileTemplateManagerImpl">
@@ -475,6 +473,7 @@
       <workItem from="1776396774500" duration="596000" />
       <workItem from="1776656338009" duration="598000" />
       <workItem from="1776743001403" duration="599000" />
+      <workItem from="1776915440981" duration="590000" />
     </task>
     <servers />
   </component>

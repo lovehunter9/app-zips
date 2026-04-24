@@ -415,6 +415,20 @@ spec:
         # Upstream supports this env via TimeoutMixin; cap is 3600s.
         - name: ESPERANTO_STT_TIMEOUT
           value: "1800"
+        # OLARES HOTFIX: force podcast TTS to serial (batch size 1).
+        #
+        # podcast_creator/nodes.py defaults TTS_BATCH_SIZE=5, issuing 5
+        # concurrent POSTs to the TTS endpoint per batch. Against self-hosted
+        # Speaches (Kokoro-82M-ONNX) on Olares, sustained concurrency drives
+        # the Speaches pod to OOM / connection drop mid-run: a first few
+        # batches succeed, then the whole worker pool starts returning
+        # "peer closed connection" and finally "All connection attempts
+        # failed" (TCP-level — Speaches restarted). Serializing to 1 sharply
+        # reduces peak memory pressure on Speaches and lets full episodes
+        # complete. Cost: +N*~1s wall clock for N clips. Safe to remove once
+        # Speaches has enough memory headroom to survive concurrent load.
+        - name: TTS_BATCH_SIZE
+          value: "1"
         {{- if .Values.olaresEnv.PASSWORD }}
         - name: OPEN_NOTEBOOK_PASSWORD
           value: "{{ .Values.olaresEnv.PASSWORD }}"
