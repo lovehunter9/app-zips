@@ -39,6 +39,7 @@ data:
     import threading
     import logging
     import time
+    import copy
 
     sys.path.insert(0, "/Whisper-WebUI")
 
@@ -61,6 +62,20 @@ data:
     _whisper_inf = None
     _lock = threading.Lock()
     _current_model = None
+
+    _LANG_PROMPTS = {
+        "zh": "以下是普通话的句子，使用简体中文标点符号。",
+        "en": "The following is a conversation in English with proper punctuation.",
+        "ja": "以下は日本語の文章です。句読点を正しく使用してください。",
+        "ko": "다음은 한국어 문장입니다. 올바른 구두점을 사용합니다.",
+        "fr": "Ce qui suit est une conversation en français avec une ponctuation correcte.",
+        "de": "Das Folgende ist ein Gespräch auf Deutsch mit korrekter Zeichensetzung.",
+        "es": "Lo siguiente es una conversación en español con puntuación correcta.",
+        "ru": "Далее следует разговор на русском языке с правильной пунктуацией.",
+        "pt": "A seguir está uma conversa em português com pontuação correta.",
+    }
+
+    _LANG_DETECT_CONFIDENCE = 0.8
 
     def _ensure_model_loaded(requested_model: str = None):
         """Load model on demand, switching if a different model is requested."""
@@ -117,13 +132,42 @@ data:
             tmp_path = tmp.name
 
         try:
-            kwargs = {"word_timestamps": True}
-            if language:
-                kwargs["language"] = language
+            kwargs = {
+                "word_timestamps": True,
+                "beam_size": 5,
+                "best_of": 5,
+                "vad_filter": True,
+                "vad_parameters": {
+                    "min_silence_duration_ms": 500,
+                    "speech_pad_ms": 400,
+                },
+                "compression_ratio_threshold": 2.4,
+                "log_prob_threshold": -1.0,
+                "no_speech_threshold": 0.6,
+                "temperature": [0, 0.2, 0.4, 0.6, 0.8, 1.0],
+            }
+
+            resolved_lang = language
+            if not resolved_lang:
+                with _lock:
+                    _ensure_model_loaded(model)
+                    _, detect_info = _whisper_inf.model.transcribe(
+                        tmp_path, vad_filter=True,
+                    )
+                if detect_info and detect_info.language_probability >= _LANG_DETECT_CONFIDENCE:
+                    resolved_lang = detect_info.language
+                    logger.info(
+                        f"Auto-detected language: {resolved_lang} "
+                        f"(confidence={detect_info.language_probability:.2f})"
+                    )
+
+            if resolved_lang:
+                kwargs["language"] = resolved_lang
+
             if prompt:
                 kwargs["initial_prompt"] = prompt
-            if temperature > 0:
-                kwargs["temperature"] = temperature
+            elif resolved_lang in _LANG_PROMPTS:
+                kwargs["initial_prompt"] = _LANG_PROMPTS[resolved_lang]
 
             with _lock:
                 _ensure_model_loaded(model)
@@ -152,10 +196,71 @@ data:
         logger.info(f"OpenAI-compatible API starting on port {port}")
         uvicorn.run(api_app, host="0.0.0.0", port=port, log_level="info")
 
+    _QUALITY_OVERRIDES = {
+        "whisper": {
+            "beam_size": 5,
+            "best_of": 5,
+            "temperature": 0,
+            "compression_ratio_threshold": 2.4,
+            "log_prob_threshold": -1.0,
+            "no_speech_threshold": 0.6,
+            "word_timestamps": False,
+        },
+        "vad": {
+            "vad_filter": True,
+            "threshold": 0.5,
+            "min_speech_duration_ms": 250,
+            "max_speech_duration_s": 9999,
+            "min_silence_duration_ms": 500,
+            "speech_pad_ms": 400,
+        },
+    }
+
+    def _patch_webui_config():
+        """Merge quality overrides into Whisper-WebUI's default_parameters.yaml.
+
+        Only touches keys listed in _QUALITY_OVERRIDES so that user
+        customisations on other keys (model_size, lang, diarization, etc.)
+        are preserved.
+        """
+        try:
+            from modules.utils.paths import DEFAULT_PARAMETERS_CONFIG_PATH
+            from modules.utils.files_manager import load_yaml, save_yaml
+        except ImportError:
+            logger.warning("Cannot import Whisper-WebUI paths; skipping config patch")
+            return
+
+        try:
+            params = load_yaml(DEFAULT_PARAMETERS_CONFIG_PATH)
+        except Exception:
+            logger.warning("Cannot load default_parameters.yaml; skipping config patch")
+            return
+
+        changed = False
+        for section, overrides in _QUALITY_OVERRIDES.items():
+            if section not in params:
+                params[section] = {}
+            for key, value in overrides.items():
+                if params[section].get(key) != value:
+                    params[section][key] = value
+                    changed = True
+
+        if changed:
+            try:
+                save_yaml(params, DEFAULT_PARAMETERS_CONFIG_PATH)
+                logger.info("Patched default_parameters.yaml with quality overrides")
+            except Exception as e:
+                logger.warning(f"Failed to save patched config: {e}")
+        else:
+            logger.info("default_parameters.yaml already has quality overrides")
+
     if __name__ == "__main__":
         from app import App, parser as app_parser
 
         args = app_parser.parse_args()
+
+        _patch_webui_config()
+
         app_instance = App(args)
 
         api_thread = threading.Thread(
