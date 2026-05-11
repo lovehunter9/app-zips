@@ -6,10 +6,9 @@
   <component name="ChangeListManager">
     <list default="true" id="e9836655-cb5c-456b-aef7-0ca255338318" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/whisperwebuiv2/Chart.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/whisperwebuiv2/Chart.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/whisperwebuiv2/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/whisperwebuiv2/OlaresManifest.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/whisperwebuiv2/whisperwebuiv2server/templates/api-proxy-configmap.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/whisperwebuiv2/whisperwebuiv2server/templates/api-proxy-configmap.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/whisperwebuiv2/whisperwebuiv2server/templates/terminal.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/whisperwebuiv2/whisperwebuiv2server/templates/terminal.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tensorzero/Chart.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/tensorzero/Chart.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tensorzero/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/tensorzero/OlaresManifest.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tensorzero/templates/tensorzero.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/tensorzero/templates/tensorzero.yaml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -17,7 +16,7 @@
     <option name="LAST_RESOLUTION" value="IGNORE" />
   </component>
   <component name="EmbeddingIndexingInfo">
-    <option name="cachedIndexableFilesCount" value="1289" />
+    <option name="cachedIndexableFilesCount" value="1318" />
     <option name="fileBasedEmbeddingIndicesEnabled" value="true" />
   </component>
   <component name="FileTemplateManagerImpl">
