@@ -527,6 +527,7 @@ data:
         "whisper": {
             "condition_on_previous_text": False,
             "hallucination_silence_threshold": 2,
+            "temperature": 0.2,
         },
         "vad": {
             "vad_filter": True,
