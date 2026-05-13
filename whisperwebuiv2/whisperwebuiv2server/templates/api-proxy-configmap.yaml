@@ -521,34 +521,26 @@ data:
         logger.info(f"OpenAI-compatible API starting on port {port}")
         uvicorn.run(api_app, host="0.0.0.0", port=port, log_level="info")
 
+    _PATCH_VERSION = 1
+
     _QUALITY_OVERRIDES = {
         "whisper": {
-            "beam_size": 5,
-            "best_of": 5,
-            "temperature": 0,
             "condition_on_previous_text": False,
             "hallucination_silence_threshold": 2,
-            "compression_ratio_threshold": 2.4,
-            "log_prob_threshold": -1.0,
-            "no_speech_threshold": 0.6,
-            "word_timestamps": False,
         },
         "vad": {
             "vad_filter": True,
-            "threshold": 0.5,
-            "min_speech_duration_ms": 250,
-            "max_speech_duration_s": 9999,
             "min_silence_duration_ms": 500,
             "speech_pad_ms": 400,
         },
     }
 
     def _patch_webui_config():
-        """Merge quality overrides into Whisper-WebUI's default_parameters.yaml.
+        """Version-aware config patcher.
 
-        Only touches keys listed in _QUALITY_OVERRIDES so that user
-        customisations on other keys (model_size, lang, diarization, etc.)
-        are preserved.
+        Only writes _QUALITY_OVERRIDES keys on fresh install or version
+        upgrade.  On normal restart (version unchanged) does nothing,
+        so user customisations via the WebUI are fully preserved.
         """
         try:
             from modules.utils.paths import DEFAULT_PARAMETERS_CONFIG_PATH
@@ -563,23 +555,31 @@ data:
             logger.warning("Cannot load default_parameters.yaml; skipping config patch")
             return
 
-        changed = False
+        current_ver = params.get("_patch_version", 0)
+        if current_ver >= _PATCH_VERSION:
+            logger.info(
+                "Config patch version %s is current (>= %s), skipping",
+                current_ver, _PATCH_VERSION,
+            )
+            return
+
+        logger.info(
+            "Upgrading config patch: %s -> %s", current_ver, _PATCH_VERSION
+        )
+
         for section, overrides in _QUALITY_OVERRIDES.items():
             if section not in params:
                 params[section] = {}
             for key, value in overrides.items():
-                if params[section].get(key) != value:
-                    params[section][key] = value
-                    changed = True
+                params[section][key] = value
 
-        if changed:
-            try:
-                save_yaml(params, DEFAULT_PARAMETERS_CONFIG_PATH)
-                logger.info("Patched default_parameters.yaml with quality overrides")
-            except Exception as e:
-                logger.warning(f"Failed to save patched config: {e}")
-        else:
-            logger.info("default_parameters.yaml already has quality overrides")
+        params["_patch_version"] = _PATCH_VERSION
+
+        try:
+            save_yaml(params, DEFAULT_PARAMETERS_CONFIG_PATH)
+            logger.info("Config patched to version %s", _PATCH_VERSION)
+        except Exception as e:
+            logger.warning(f"Failed to save patched config: {e}")
 
     if __name__ == "__main__":
         from app import App, parser as app_parser
