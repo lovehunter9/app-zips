@@ -39,7 +39,6 @@ data:
     import threading
     import logging
     import time
-    import copy
 
     sys.path.insert(0, "/Whisper-WebUI")
 
@@ -146,10 +145,10 @@ data:
             from modules.utils.paths import DEFAULT_PARAMETERS_CONFIG_PATH
             from modules.utils.files_manager import load_yaml
             params = load_yaml(DEFAULT_PARAMETERS_CONFIG_PATH)
-            default_model = params.get("whisper", {}).get("model_size", "large-v3")
+            default_model = params.get("whisper", {}).get("model_size", "large-v2")
             default_compute = params.get("whisper", {}).get("compute_type", "float16")
         except Exception:
-            default_model, default_compute = "large-v3", "float16"
+            default_model, default_compute = "large-v2", "float16"
 
         target = default_model if (not requested_model or requested_model == "whisper-1") else requested_model
         ctype = requested_compute_type or default_compute
