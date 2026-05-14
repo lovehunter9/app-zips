@@ -39,6 +39,7 @@ data:
     import threading
     import logging
     import time
+    import re
 
     sys.path.insert(0, "/Whisper-WebUI")
 
@@ -284,6 +285,7 @@ data:
         hf_token: str = Form(""),
         diarization_device: str = Form(None),
         diarization_enable_offload: bool = Form(True),
+        llm_correction: bool = Form(False),
     ):
         _DEFAULT_PREPEND_PUNCT = "\"" + chr(0x2018) + chr(0x201C) + chr(0x00BF) + "([{-"
         _DEFAULT_APPEND_PUNCT = "\"" + chr(0x2019) + "." + chr(0x3002) + "," + chr(0xFF0C) + "!" + chr(0xFF01) + "?" + chr(0xFF1F) + ":" + chr(0xFF1A) + chr(0x201D) + ")]}" + chr(0x3001)
@@ -418,6 +420,13 @@ data:
                         tmp_path, seg_list, hf_token, d_device, diarization_enable_offload,
                     )
 
+            if llm_correction and seg_list:
+                try:
+                    _llm_correct_segments(seg_list, resolved_lang)
+                    text = " ".join(s["text"] for s in seg_list).strip()
+                except Exception as e:
+                    logger.warning("API LLM correction skipped: %s", e)
+
             if response_format == "text":
                 return PlainTextResponse(text)
             elif response_format == "srt":
@@ -520,6 +529,343 @@ data:
         logger.info(f"OpenAI-compatible API starting on port {port}")
         uvicorn.run(api_app, host="0.0.0.0", port=port, log_level="info")
 
+    # ── Engine-level monkey-patches (temperature fallback, auto prompt, post-processing) ──
+
+    _TEMP_STEPS = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+
+    def _build_temp_fallback(user_temp):
+        """Build fallback temperature list starting from user's chosen value."""
+        if isinstance(user_temp, (list, tuple)):
+            return list(user_temp)
+        user_temp = float(user_temp)
+        fallback = [t for t in _TEMP_STEPS if t >= user_temp - 0.01]
+        if not fallback or abs(fallback[0] - user_temp) > 0.01:
+            fallback.insert(0, user_temp)
+        return fallback
+
+    _CJK_RE = re.compile(
+        r'[\u4e00-\u9fff\u3400-\u4dbf\u3000-\u303f\u3040-\u309f'
+        r'\u30a0-\u30ff\uac00-\ud7af]'
+    )
+    _REPEAT_RE = re.compile(r'(.{4,80}?)\1{2,}')
+    _PHRASE_PUNCT_RE = re.compile(r'[\s,，.。!！?？;；:：、\-—]')
+    _ASCII_TO_FULLWIDTH = str.maketrans({
+        ',': '\uff0c', '?': '\uff1f', '!': '\uff01', ':': '\uff1a',
+    })
+
+    def _collapse_if_phrase(m):
+        """Only collapse repetitions that look like phrase-level loops (contain
+        whitespace or punctuation).  Intentional single-char/syllable repeats
+        like '啦啦啦啦' or 'hahaha' are left untouched."""
+        unit = m.group(1)
+        if _PHRASE_PUNCT_RE.search(unit):
+            return unit
+        return m.group(0)
+
+    def _clean_segment_text(text):
+        """Post-process a single segment's text: dedup loops + CJK punctuation."""
+        text = _REPEAT_RE.sub(_collapse_if_phrase, text)
+        if _CJK_RE.search(text):
+            text = text.translate(_ASCII_TO_FULLWIDTH)
+        return text
+
+    _MIN_SEG_DURATION = 2.0
+    _MIN_SEG_CHARS = 5
+    _MAX_MERGE_GAP = 1.0
+
+    def _merge_short_segments(segments):
+        """Merge overly short segments into their neighbors."""
+        buf = None
+        merge_count = 0
+        for seg in segments:
+            if buf is None:
+                buf = seg
+                continue
+
+            buf_short = (buf.end - buf.start < _MIN_SEG_DURATION
+                         or len(buf.text.strip()) < _MIN_SEG_CHARS)
+            gap_small = seg.start - buf.end < _MAX_MERGE_GAP
+
+            if buf_short and gap_small:
+                joiner = "" if _CJK_RE.search(buf.text + seg.text) else " "
+                buf.text = buf.text.rstrip() + joiner + seg.text.lstrip()
+                buf.end = seg.end
+                merge_count += 1
+            else:
+                yield buf
+                buf = seg
+
+        if buf is not None:
+            yield buf
+        if merge_count:
+            logger.info("Segment merge: %d short segments merged with neighbors", merge_count)
+        else:
+            logger.info("Segment merge: no short segments found, all passed through")
+
+    def _patch_whisper_engine():
+        """Monkey-patch WhisperModel.transcribe for temperature fallback,
+        auto initial_prompt injection, and segment post-processing.
+        Works for both WebUI and API (idempotent for callers that already pass lists).
+        """
+        try:
+            from faster_whisper import WhisperModel
+        except ImportError:
+            logger.warning("Cannot import faster_whisper; skipping engine patch")
+            return
+
+        _orig_transcribe = WhisperModel.transcribe
+
+        def _patched_transcribe(self, audio, **kwargs):
+            temp = kwargs.get("temperature")
+            if temp is not None and isinstance(temp, (int, float)):
+                kwargs["temperature"] = _build_temp_fallback(temp)
+                logger.debug("Temperature fallback: %s -> %s", temp, kwargs["temperature"])
+
+            if not kwargs.get("initial_prompt"):
+                lang = kwargs.get("language")
+                if lang and lang in _LANG_PROMPTS:
+                    kwargs["initial_prompt"] = _LANG_PROMPTS[lang]
+                    logger.debug("Auto-injected initial_prompt for language: %s", lang)
+
+            segments_gen, info = _orig_transcribe(self, audio, **kwargs)
+
+            lang_for_llm = kwargs.get("language")
+
+            def _text_clean(segments):
+                clean_count = 0
+                total = 0
+                dedup_count = 0
+                punct_count = 0
+                for seg in segments:
+                    total += 1
+                    try:
+                        cleaned = seg.text
+                        deduped = _REPEAT_RE.sub(_collapse_if_phrase, cleaned)
+                        if deduped != cleaned:
+                            dedup_count += 1
+                            cleaned = deduped
+                        if _CJK_RE.search(cleaned):
+                            puncted = cleaned.translate(_ASCII_TO_FULLWIDTH)
+                            if puncted != cleaned:
+                                punct_count += 1
+                                cleaned = puncted
+                        if cleaned != seg.text:
+                            seg.text = cleaned
+                            clean_count += 1
+                    except Exception as e:
+                        logger.warning("Text cleaning failed, using original: %s", e)
+                    yield seg
+                logger.info(
+                    "Text clean: %d segments processed, %d dedup, %d punct-fix, %d total modified",
+                    total, dedup_count, punct_count, clean_count,
+                )
+
+            def _llm_pass(segments):
+                llm_count = 0
+                seg_count = 0
+                for seg in segments:
+                    seg_count += 1
+                    if _llm_correction_enabled and seg.text.strip():
+                        try:
+                            before = seg.text
+                            corrected = _llm_correct_text(before, lang_for_llm)
+                            if corrected != before:
+                                seg.text = corrected
+                                llm_count += 1
+                        except Exception as e:
+                            logger.warning("LLM correction failed for segment, using original: %s", e)
+                    yield seg
+                if _llm_correction_enabled:
+                    logger.info("LLM correction: %d/%d segments modified", llm_count, seg_count)
+                else:
+                    logger.info("LLM correction disabled, %d segments passed through", seg_count)
+
+            pipeline = _text_clean(segments_gen)
+            pipeline = _merge_short_segments(pipeline)
+            pipeline = _llm_pass(pipeline)
+            return pipeline, info
+
+        WhisperModel.transcribe = _patched_transcribe
+        logger.info(
+            "Whisper engine patched: temperature fallback + auto prompt + post-processing"
+        )
+
+    # ── Gradio UI patch: LLM Correction checkbox ──
+
+    def _patch_gradio_ui():
+        """Inject an 'LLM Correction' checkbox into the Advanced Parameters
+        section of each transcription tab (File / Youtube / Mic).
+        Must be called before App(args) so the patch is active when
+        App.launch() builds the UI."""
+        try:
+            from modules.whisper.data_classes import WhisperParams
+            import gradio as gr
+        except ImportError:
+            logger.warning("Cannot import WhisperParams/gradio; skipping UI patch")
+            return
+
+        _orig_to_gradio = WhisperParams.to_gradio_inputs
+
+        @classmethod
+        def _patched_to_gradio(cls, defaults=None, only_advanced=True, **kwargs):
+            if only_advanced:
+                cb = gr.Checkbox(
+                    label="LLM Correction",
+                    value=_llm_correction_enabled,
+                    info="Use local LLM (Qwen2.5-3B) to proofread each segment",
+                )
+                def _toggle(v):
+                    global _llm_correction_enabled
+                    _llm_correction_enabled = v
+                cb.change(fn=_toggle, inputs=[cb])
+
+            return _orig_to_gradio.__func__(cls, defaults=defaults,
+                                            only_advanced=only_advanced, **kwargs)
+
+        WhisperParams.to_gradio_inputs = _patched_to_gradio
+        logger.info("Gradio UI patched: LLM Correction checkbox added")
+
+    # ── LLM-based post-processing (optional, per-segment text correction) ──
+
+    _LLM_HF_REPO = "Qwen/Qwen2.5-3B-Instruct-GGUF"
+    _LLM_GGUF_FILE = "qwen2.5-3b-instruct-q4_k_m.gguf"
+    _LLM_MODEL_DIR = "/Whisper-WebUI/models"
+    _llm_model = None
+    _llm_lock = threading.Lock()
+    _llm_correction_enabled = True
+
+    def _ensure_llm_model_downloaded():
+        """Download the LLM GGUF file if not already present. Safe to call multiple times."""
+        model_path = os.path.join(_LLM_MODEL_DIR, _LLM_GGUF_FILE)
+        if os.path.exists(model_path):
+            size_mb = os.path.getsize(model_path) / (1024 * 1024)
+            logger.info("LLM model already present: %s (%.0f MB)", model_path, size_mb)
+            return True
+        logger.info("Downloading LLM model %s/%s ...", _LLM_HF_REPO, _LLM_GGUF_FILE)
+        try:
+            from huggingface_hub import hf_hub_download
+            from huggingface_hub.utils import tqdm as hf_tqdm
+            import functools
+
+            _last_log = [0.0]
+            _orig_update = None
+
+            class _LoggingTqdm(hf_tqdm):
+                def update(self, n=1):
+                    super().update(n)
+                    now = time.time()
+                    if now - _last_log[0] >= 10:
+                        _last_log[0] = now
+                        pct = self.n / self.total * 100 if self.total else 0
+                        mb = self.n / (1024 * 1024)
+                        total_mb = self.total / (1024 * 1024) if self.total else 0
+                        logger.info(
+                            "LLM model download: %.0f/%.0f MB (%.0f%%)",
+                            mb, total_mb, pct,
+                        )
+
+            hf_hub_download(
+                repo_id=_LLM_HF_REPO,
+                filename=_LLM_GGUF_FILE,
+                local_dir=_LLM_MODEL_DIR,
+                tqdm_class=_LoggingTqdm,
+            )
+            size_mb = os.path.getsize(model_path) / (1024 * 1024)
+            logger.info("LLM model downloaded: %s (%.0f MB)", model_path, size_mb)
+            return True
+        except Exception as e:
+            logger.warning("Failed to download LLM model: %s", e)
+            return False
+
+    def _get_llm():
+        """Lazy-load Qwen2.5-3B for text correction. Downloads GGUF if needed."""
+        global _llm_model
+        if _llm_model is not None:
+            return _llm_model
+
+        with _llm_lock:
+            if _llm_model is not None:
+                return _llm_model
+
+            try:
+                from llama_cpp import Llama
+            except ImportError:
+                raise HTTPException(
+                    503, "llama-cpp-python not installed; LLM correction unavailable"
+                )
+
+            if not _ensure_llm_model_downloaded():
+                raise HTTPException(503, "LLM model not available")
+
+            model_path = os.path.join(_LLM_MODEL_DIR, _LLM_GGUF_FILE)
+
+            gpu_layers = 0
+            device_label = "CPU"
+            try:
+                import torch as _t
+                if _t.cuda.is_available():
+                    gpu_layers = -1
+                    device_label = "GPU (all layers offloaded)"
+            except Exception:
+                pass
+
+            logger.info("Loading LLM model from %s (%s)", model_path, device_label)
+            _llm_model = Llama(
+                model_path=model_path,
+                n_ctx=512,
+                n_gpu_layers=gpu_layers,
+                verbose=False,
+            )
+            logger.info("LLM model loaded (%s, n_ctx=512)", device_label)
+            return _llm_model
+
+    _LLM_SYS_PROMPTS = {
+        "zh": (
+            "你是语音转写校对助手。修正明显的转写错误（错别字、同音字、"
+            "漏字），保持原意和说话风格不变。仅输出修正后的文本，不要解释。"
+        ),
+        "default": (
+            "You are a transcription proofreader. Fix obvious transcription "
+            "errors (misspellings, homophones, missing words) while preserving "
+            "the original meaning and style. Output only the corrected text."
+        ),
+    }
+
+    def _llm_correct_text(text, language=None):
+        """Correct a single piece of text via the local LLM.
+        Always returns usable text -- never raises, never disrupts the pipeline."""
+        if not text or not text.strip():
+            return text
+        try:
+            llm = _get_llm()
+            sys_key = "zh" if language and language.startswith("zh") else "default"
+            resp = llm.create_chat_completion(
+                messages=[
+                    {"role": "system", "content": _LLM_SYS_PROMPTS[sys_key]},
+                    {"role": "user", "content": text.strip()},
+                ],
+                max_tokens=max(len(text) * 3, 128),
+                temperature=0.1,
+            )
+            corrected = resp["choices"][0]["message"]["content"].strip()
+            return corrected if corrected else text
+        except Exception as e:
+            logger.warning("LLM correction skipped: %s", e)
+            return text
+
+    def _llm_correct_segments(seg_list, language=None):
+        """Run LLM correction on all segments. Modifies dicts in place."""
+        logger.info("Running LLM correction on %d segments ...", len(seg_list))
+        t0 = time.time()
+        for seg in seg_list:
+            original = seg["text"].strip()
+            if not original:
+                continue
+            seg["text"] = _llm_correct_text(original, language)
+        elapsed = time.time() - t0
+        logger.info("LLM correction completed in %.1fs", elapsed)
+        return seg_list
+
     _PATCH_VERSION = 1
 
     _QUALITY_OVERRIDES = {
@@ -587,6 +933,9 @@ data:
         args = app_parser.parse_args()
 
         _patch_webui_config()
+        _patch_whisper_engine()
+        _patch_gradio_ui()
+        _ensure_llm_model_downloaded()
 
         app_instance = App(args)
 

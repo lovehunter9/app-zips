@@ -8,7 +8,9 @@
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/whisperwebuiv2/Chart.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/whisperwebuiv2/Chart.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/whisperwebuiv2/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/whisperwebuiv2/OlaresManifest.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/whisperwebuiv2/whisperwebuiv2/templates/clientproxy.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/whisperwebuiv2/whisperwebuiv2/templates/clientproxy.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/whisperwebuiv2/whisperwebuiv2server/templates/api-proxy-configmap.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/whisperwebuiv2/whisperwebuiv2server/templates/api-proxy-configmap.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/whisperwebuiv2/whisperwebuiv2server/templates/deployment.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/whisperwebuiv2/whisperwebuiv2server/templates/deployment.yaml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -16,7 +18,7 @@
     <option name="LAST_RESOLUTION" value="IGNORE" />
   </component>
   <component name="EmbeddingIndexingInfo">
-    <option name="cachedIndexableFilesCount" value="1324" />
+    <option name="cachedIndexableFilesCount" value="1329" />
     <option name="fileBasedEmbeddingIndicesEnabled" value="true" />
   </component>
   <component name="FileTemplateManagerImpl">
@@ -81,8 +83,8 @@
   <component name="SharedIndexes">
     <attachedChunks>
       <set>
-        <option value="bundled-js-predefined-d6986cc7102b-c7e53b3be11b-JavaScript-PY-253.28294.336" />
-        <option value="bundled-python-sdk-0978a7220b69-9867c7d4c0a4-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-253.28294.336" />
+        <option value="bundled-gosdk-72a9cf600ed8-448e06e64ec5-org.jetbrains.plugins.go.sharedIndexes.bundled-GO-253.28294.337" />
+        <option value="bundled-js-predefined-d6986cc7102b-c7e53b3be11b-JavaScript-GO-253.28294.337" />
       </set>
     </attachedChunks>
   </component>
@@ -477,6 +479,7 @@
       <workItem from="1777001506105" duration="581000" />
       <workItem from="1778470915947" duration="517000" />
       <workItem from="1778557147989" duration="507000" />
+      <workItem from="1778643684032" duration="541000" />
     </task>
     <servers />
   </component>
