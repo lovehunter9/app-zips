@@ -58,7 +58,6 @@ spec:
               echo "All model files are ready."
               {{- end }}
               pip install audiofile dora-search einops hydra-colorlog hydra-core julius lameenc librosa ml-collections museval onnx onnx2pytorch openunmix soundfile submitit treetable --quiet 2>&1 | tail -3
-              pip install llama-cpp-python --prefer-binary --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu --quiet 2>&1 | tail -3 || echo "WARN: llama-cpp-python install failed; LLM correction will be unavailable"
               echo "Starting application..."
               python /Whisper-WebUI/whisper_openai_api.py --server_port 7860 --server_name 0.0.0.0 --whisper_type "$whisper_type"
           ports:
@@ -74,10 +73,10 @@ spec:
           resources:
             requests:
               cpu: "500m"
-              memory: 8Gi
+              memory: 6Gi
             limits:
               cpu: "4"
-              memory: 22Gi
+              memory: 18Gi
           volumeMounts:
             - name: models
               mountPath: /Whisper-WebUI/models

@@ -285,7 +285,8 @@ data:
         hf_token: str = Form(""),
         diarization_device: str = Form(None),
         diarization_enable_offload: bool = Form(True),
-        llm_correction: bool = Form(False),
+        text_cleaning: bool = Form(True),
+        segment_merging: bool = Form(True),
     ):
         _DEFAULT_PREPEND_PUNCT = "\"" + chr(0x2018) + chr(0x201C) + chr(0x00BF) + "([{-"
         _DEFAULT_APPEND_PUNCT = "\"" + chr(0x2019) + "." + chr(0x3002) + "," + chr(0xFF0C) + "!" + chr(0xFF01) + "?" + chr(0xFF1F) + ":" + chr(0xFF1A) + chr(0x201D) + ")]}" + chr(0x3001)
@@ -367,8 +368,12 @@ data:
             if not resolved_lang:
                 with _lock:
                     _ensure_model_loaded(model, compute_type)
+                    # _skip_pipeline=True: only ``info`` is consulted, so we
+                    # skip the cost of cleaning / merging on this throwaway
+                    # transcription.
                     _, detect_info = _whisper_inf.model.transcribe(
                         transcribe_path, vad_filter=True,
+                        _skip_pipeline=True,
                     )
                 if detect_info and detect_info.language_probability >= _LANG_DETECT_CONFIDENCE:
                     resolved_lang = detect_info.language
@@ -389,6 +394,11 @@ data:
                 kwargs["hotwords"] = hotwords
             if prefix:
                 kwargs["prefix"] = prefix
+
+            # Per-request post-processing toggles override the WebUI globals.
+            # ``None`` falls back to the global flag inside the engine patch.
+            kwargs["_text_cleaning"] = bool(text_cleaning)
+            kwargs["_segment_merging"] = bool(segment_merging)
 
             with _lock:
                 _ensure_model_loaded(model, compute_type)
@@ -419,13 +429,6 @@ data:
                     seg_list = _run_diarization(
                         tmp_path, seg_list, hf_token, d_device, diarization_enable_offload,
                     )
-
-            if llm_correction and seg_list:
-                try:
-                    _llm_correct_segments(seg_list, resolved_lang)
-                    text = " ".join(s["text"] for s in seg_list).strip()
-                except Exception as e:
-                    logger.warning("API LLM correction skipped: %s", e)
 
             if response_format == "text":
                 return PlainTextResponse(text)
@@ -531,6 +534,12 @@ data:
 
     # ── Engine-level monkey-patches (temperature fallback, auto prompt, post-processing) ──
 
+    # User-controllable post-processing flags.  Controlled by the WebUI
+    # checkboxes (see ``_patch_gradio_ui``) or per-request via the API's
+    # ``text_cleaning`` / ``segment_merging`` form fields.  Both default ON.
+    _text_cleaning_enabled = True
+    _segment_merging_enabled = True
+
     _TEMP_STEPS = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
 
     def _build_temp_fallback(user_temp):
@@ -553,6 +562,40 @@ data:
         ',': '\uff0c', '?': '\uff1f', '!': '\uff01', ':': '\uff1a',
     })
 
+    # Used by the merge logic to decide whether a segment "ends a thought".
+    # NOTE: ellipsis (U+2026 '…' or 2+ ASCII dots) is INTENTIONALLY excluded
+    # from the sentence-ending set -- in subtitle conventions it functions
+    # as a continuation marker (this line spills into the next).  Treating
+    # it as a sentence end caused 1.0.15 to leave broken-mid-sentence pairs
+    # like "...emotion in a..." / "nature such as his..." un-merged.
+    _SENT_END_CHARS = frozenset('.!?\u3002\uff01\uff1f')
+    _CLOSING_QUOTE_BRACKET_CHARS = frozenset(
+        '"\'\u201d\u2019\u300d\u300f\u3015\uff09)]}'
+    )
+
+    def _is_complete_thought(text):
+        """True iff ``text`` ends with sentence-ending punctuation that is
+        NOT an ellipsis.  Trailing closing quotes / brackets are peeled off
+        before the final-character check so that
+
+            He said, "Hello."     -> complete
+            He said, "Hello..."   -> NOT complete (continuation)
+            Hello…                -> NOT complete
+            We can                -> NOT complete
+        """
+        if not text:
+            return False
+        text = text.rstrip()
+        while text and text[-1] in _CLOSING_QUOTE_BRACKET_CHARS:
+            text = text[:-1].rstrip()
+        if not text:
+            return False
+        if text[-1] == '\u2026':
+            return False
+        if len(text) >= 2 and text[-1] == '.' and text[-2] == '.':
+            return False
+        return text[-1] in _SENT_END_CHARS
+
     def _collapse_if_phrase(m):
         """Only collapse repetitions that look like phrase-level loops (contain
         whitespace or punctuation).  Intentional single-char/syllable repeats
@@ -572,40 +615,136 @@ data:
     _MIN_SEG_DURATION = 2.0
     _MIN_SEG_CHARS = 5
     _MAX_MERGE_GAP = 1.0
+    # Hard caps to stop "incomplete" merges from cascading when Whisper loses
+    # its punctuation rhythm over a long stretch (the lower-case run-on
+    # paragraphs seen in 1.0.15 testing).  Without them, dozens of segments
+    # without periods would get glued into one unreadable monster.
+    _MAX_MERGED_DURATION = 30.0
+    _MAX_MERGED_CHARS = 300
 
     def _merge_short_segments(segments):
-        """Merge overly short segments into their neighbors."""
+        """Merge short or sentence-incomplete segments into their neighbours.
+
+        A buffered segment is absorbed into the next one if ALL of:
+          1. (short OR incomplete)
+             - short      = duration < _MIN_SEG_DURATION OR chars < _MIN_SEG_CHARS
+             - incomplete = does not end with a sentence-ending punctuation
+                            (ellipsis is treated as continuation -> incomplete)
+          2. gap to the next segment < _MAX_MERGE_GAP
+          3. absorbing would not push the merged span past the hard caps
+             (_MAX_MERGED_DURATION / _MAX_MERGED_CHARS)
+
+        Rule (3) is what keeps things readable when Whisper occasionally
+        emits a long lower-case run-on across many segments.
+        """
         buf = None
         merge_count = 0
+        short_merges = 0
+        incomplete_merges = 0
+        cap_stops = 0
         for seg in segments:
             if buf is None:
                 buf = seg
                 continue
 
+            buf_text = buf.text.strip()
             buf_short = (buf.end - buf.start < _MIN_SEG_DURATION
-                         or len(buf.text.strip()) < _MIN_SEG_CHARS)
+                         or len(buf_text) < _MIN_SEG_CHARS)
+            buf_incomplete = not _is_complete_thought(buf_text)
             gap_small = seg.start - buf.end < _MAX_MERGE_GAP
 
-            if buf_short and gap_small:
+            would_be_duration = seg.end - buf.start
+            would_be_chars = len(buf.text) + 1 + len(seg.text)
+            cap_ok = (would_be_duration <= _MAX_MERGED_DURATION
+                      and would_be_chars <= _MAX_MERGED_CHARS)
+
+            if (buf_short or buf_incomplete) and gap_small and cap_ok:
                 joiner = "" if _CJK_RE.search(buf.text + seg.text) else " "
                 buf.text = buf.text.rstrip() + joiner + seg.text.lstrip()
                 buf.end = seg.end
                 merge_count += 1
+                if buf_short:
+                    short_merges += 1
+                elif buf_incomplete:
+                    incomplete_merges += 1
             else:
+                if (buf_short or buf_incomplete) and gap_small and not cap_ok:
+                    cap_stops += 1
                 yield buf
                 buf = seg
 
         if buf is not None:
             yield buf
-        if merge_count:
-            logger.info("Segment merge: %d short segments merged with neighbors", merge_count)
+        if merge_count or cap_stops:
+            logger.info(
+                "Segment merge: %d total (%d short, %d incomplete), %d cap-stops",
+                merge_count, short_merges, incomplete_merges, cap_stops,
+            )
         else:
-            logger.info("Segment merge: no short segments found, all passed through")
+            logger.info("Segment merge: no merges performed")
+
+    _PROGRESS_LOG_EVERY = 25  # log every N segments produced by Whisper
+
+    def _text_clean_segments(segments):
+        """Generator: dedup loops + CJK punctuation fix per segment.
+
+        Also emits periodic ``Whisper progress`` log lines so a long
+        transcription is visible in ``kubectl logs`` even when the UI's
+        progress bar takes a while to start moving.
+        """
+        clean_count = 0
+        total = 0
+        dedup_count = 0
+        punct_count = 0
+        for seg in segments:
+            total += 1
+            if total % _PROGRESS_LOG_EVERY == 0:
+                logger.info("Whisper progress: %d segments produced so far", total)
+            try:
+                cleaned = seg.text
+                deduped = _REPEAT_RE.sub(_collapse_if_phrase, cleaned)
+                if deduped != cleaned:
+                    dedup_count += 1
+                    cleaned = deduped
+                if _CJK_RE.search(cleaned):
+                    puncted = cleaned.translate(_ASCII_TO_FULLWIDTH)
+                    if puncted != cleaned:
+                        punct_count += 1
+                        cleaned = puncted
+                if cleaned != seg.text:
+                    seg.text = cleaned
+                    clean_count += 1
+            except Exception as e:
+                logger.warning("Text cleaning failed, using original: %s", e)
+            yield seg
+        logger.info(
+            "Text clean: %d segments processed, %d dedup, %d punct-fix, %d total modified",
+            total, dedup_count, punct_count, clean_count,
+        )
 
     def _patch_whisper_engine():
-        """Monkey-patch WhisperModel.transcribe for temperature fallback,
-        auto initial_prompt injection, and segment post-processing.
-        Works for both WebUI and API (idempotent for callers that already pass lists).
+        """Monkey-patch WhisperModel.transcribe so it:
+          1. Builds a temperature fallback list from the single float WebUI passes
+          2. Auto-injects an initial_prompt when language is known but none was given
+          3. Optionally chains text-cleaning + short-segment merge as a streaming
+             generator pipeline.  Segments flow out one by one, so the
+             WebUI's progress bar updates naturally.
+
+        Each post-processing stage can be toggled independently:
+
+        * ``_text_cleaning`` (kwarg) or ``_text_cleaning_enabled`` (global,
+          driven by the WebUI checkbox): per-segment dedup + CJK punctuation.
+        * ``_segment_merging`` (kwarg) or ``_segment_merging_enabled``
+          (global): merge short / sentence-incomplete segments into the next
+          one, subject to the 30s / 300char hard caps.
+
+        Per-call kwargs win over the globals when not ``None``.  When both
+        stages are disabled, raw faster-whisper segments are streamed
+        through unchanged.
+
+        ``_skip_pipeline=True`` is an internal short-circuit (e.g. the API's
+        pre-pass language detection) that bypasses BOTH stages regardless of
+        the flags above.
         """
         try:
             from faster_whisper import WhisperModel
@@ -616,6 +755,10 @@ data:
         _orig_transcribe = WhisperModel.transcribe
 
         def _patched_transcribe(self, audio, **kwargs):
+            skip_pipeline = kwargs.pop("_skip_pipeline", False)
+            text_clean_override = kwargs.pop("_text_cleaning", None)
+            seg_merge_override = kwargs.pop("_segment_merging", None)
+
             temp = kwargs.get("temperature")
             if temp is not None and isinstance(temp, (int, float)):
                 kwargs["temperature"] = _build_temp_fallback(temp)
@@ -629,74 +772,47 @@ data:
 
             segments_gen, info = _orig_transcribe(self, audio, **kwargs)
 
-            lang_for_llm = kwargs.get("language")
+            if skip_pipeline:
+                return segments_gen, info
 
-            def _text_clean(segments):
-                clean_count = 0
-                total = 0
-                dedup_count = 0
-                punct_count = 0
-                for seg in segments:
-                    total += 1
-                    try:
-                        cleaned = seg.text
-                        deduped = _REPEAT_RE.sub(_collapse_if_phrase, cleaned)
-                        if deduped != cleaned:
-                            dedup_count += 1
-                            cleaned = deduped
-                        if _CJK_RE.search(cleaned):
-                            puncted = cleaned.translate(_ASCII_TO_FULLWIDTH)
-                            if puncted != cleaned:
-                                punct_count += 1
-                                cleaned = puncted
-                        if cleaned != seg.text:
-                            seg.text = cleaned
-                            clean_count += 1
-                    except Exception as e:
-                        logger.warning("Text cleaning failed, using original: %s", e)
-                    yield seg
-                logger.info(
-                    "Text clean: %d segments processed, %d dedup, %d punct-fix, %d total modified",
-                    total, dedup_count, punct_count, clean_count,
-                )
+            text_clean_on = (text_clean_override if text_clean_override is not None
+                             else _text_cleaning_enabled)
+            seg_merge_on = (seg_merge_override if seg_merge_override is not None
+                            else _segment_merging_enabled)
 
-            def _llm_pass(segments):
-                llm_count = 0
-                seg_count = 0
-                for seg in segments:
-                    seg_count += 1
-                    if _llm_correction_enabled and seg.text.strip():
-                        try:
-                            before = seg.text
-                            corrected = _llm_correct_text(before, lang_for_llm)
-                            if corrected != before:
-                                seg.text = corrected
-                                llm_count += 1
-                        except Exception as e:
-                            logger.warning("LLM correction failed for segment, using original: %s", e)
-                    yield seg
-                if _llm_correction_enabled:
-                    logger.info("LLM correction: %d/%d segments modified", llm_count, seg_count)
-                else:
-                    logger.info("LLM correction disabled, %d segments passed through", seg_count)
+            pipeline = segments_gen
+            if text_clean_on:
+                pipeline = _text_clean_segments(pipeline)
+            else:
+                logger.info("Text cleaning disabled, segments will pass through unchanged")
+            if seg_merge_on:
+                pipeline = _merge_short_segments(pipeline)
+            else:
+                logger.info("Segment merging disabled, segments will pass through unchanged")
 
-            pipeline = _text_clean(segments_gen)
-            pipeline = _merge_short_segments(pipeline)
-            pipeline = _llm_pass(pipeline)
             return pipeline, info
 
         WhisperModel.transcribe = _patched_transcribe
         logger.info(
-            "Whisper engine patched: temperature fallback + auto prompt + post-processing"
+            "Whisper engine patched: temperature fallback + auto prompt + "
+            "streaming post-processing (toggleable per stage)"
         )
 
-    # ── Gradio UI patch: LLM Correction checkbox ──
+    # ── Gradio UI patch: post-processing checkboxes ──
 
     def _patch_gradio_ui():
-        """Inject an 'LLM Correction' checkbox into the Advanced Parameters
-        section of each transcription tab (File / Youtube / Mic).
-        Must be called before App(args) so the patch is active when
-        App.launch() builds the UI."""
+        """Inject two 'post-processing' checkboxes into the Advanced
+        Parameters section of each transcription tab (File / Youtube / Mic):
+
+          * Text Cleaning   -- dedup + CJK punctuation normalization
+          * Segment Merging -- merge short/incomplete neighbouring segments
+
+        Each checkbox writes to the matching module-level global AND
+        persists the new value to ``default_parameters.yaml`` (see
+        ``_persist_post_processing_state``), so user choices survive Pod
+        restarts.  Must be called AFTER ``_load_post_processing_state``
+        (so the initial checkbox values reflect the persisted state) and
+        BEFORE App(args)."""
         try:
             from modules.whisper.data_classes import WhisperParams
             import gradio as gr
@@ -709,162 +825,40 @@ data:
         @classmethod
         def _patched_to_gradio(cls, defaults=None, only_advanced=True, **kwargs):
             if only_advanced:
-                cb = gr.Checkbox(
-                    label="LLM Correction",
-                    value=_llm_correction_enabled,
-                    info="Use local LLM (Qwen2.5-3B) to proofread each segment",
+                cb_text = gr.Checkbox(
+                    label="Text Cleaning",
+                    value=_text_cleaning_enabled,
+                    info="Deduplicate phrase loops & normalize CJK punctuation",
                 )
-                def _toggle(v):
-                    global _llm_correction_enabled
-                    _llm_correction_enabled = v
-                cb.change(fn=_toggle, inputs=[cb])
+                cb_merge = gr.Checkbox(
+                    label="Segment Merging",
+                    value=_segment_merging_enabled,
+                    info="Merge short or sentence-incomplete segments "
+                         "(capped at 30s / 300 chars per merged segment)",
+                )
+
+                def _toggle_text(v):
+                    global _text_cleaning_enabled
+                    _text_cleaning_enabled = bool(v)
+                    logger.info("Text Cleaning toggled: %s", _text_cleaning_enabled)
+                    _persist_post_processing_state()
+
+                def _toggle_merge(v):
+                    global _segment_merging_enabled
+                    _segment_merging_enabled = bool(v)
+                    logger.info("Segment Merging toggled: %s", _segment_merging_enabled)
+                    _persist_post_processing_state()
+
+                cb_text.change(fn=_toggle_text, inputs=[cb_text])
+                cb_merge.change(fn=_toggle_merge, inputs=[cb_merge])
 
             return _orig_to_gradio.__func__(cls, defaults=defaults,
                                             only_advanced=only_advanced, **kwargs)
 
         WhisperParams.to_gradio_inputs = _patched_to_gradio
-        logger.info("Gradio UI patched: LLM Correction checkbox added")
-
-    # ── LLM-based post-processing (optional, per-segment text correction) ──
-
-    _LLM_HF_REPO = "Qwen/Qwen2.5-3B-Instruct-GGUF"
-    _LLM_GGUF_FILE = "qwen2.5-3b-instruct-q4_k_m.gguf"
-    _LLM_MODEL_DIR = "/Whisper-WebUI/models"
-    _llm_model = None
-    _llm_lock = threading.Lock()
-    _llm_correction_enabled = True
-
-    def _ensure_llm_model_downloaded():
-        """Download the LLM GGUF file if not already present. Safe to call multiple times."""
-        model_path = os.path.join(_LLM_MODEL_DIR, _LLM_GGUF_FILE)
-        if os.path.exists(model_path):
-            size_mb = os.path.getsize(model_path) / (1024 * 1024)
-            logger.info("LLM model already present: %s (%.0f MB)", model_path, size_mb)
-            return True
-        logger.info("Downloading LLM model %s/%s ...", _LLM_HF_REPO, _LLM_GGUF_FILE)
-        try:
-            from huggingface_hub import hf_hub_download
-            from huggingface_hub.utils import tqdm as hf_tqdm
-            import functools
-
-            _last_log = [0.0]
-            _orig_update = None
-
-            class _LoggingTqdm(hf_tqdm):
-                def update(self, n=1):
-                    super().update(n)
-                    now = time.time()
-                    if now - _last_log[0] >= 10:
-                        _last_log[0] = now
-                        pct = self.n / self.total * 100 if self.total else 0
-                        mb = self.n / (1024 * 1024)
-                        total_mb = self.total / (1024 * 1024) if self.total else 0
-                        logger.info(
-                            "LLM model download: %.0f/%.0f MB (%.0f%%)",
-                            mb, total_mb, pct,
-                        )
-
-            hf_hub_download(
-                repo_id=_LLM_HF_REPO,
-                filename=_LLM_GGUF_FILE,
-                local_dir=_LLM_MODEL_DIR,
-                tqdm_class=_LoggingTqdm,
-            )
-            size_mb = os.path.getsize(model_path) / (1024 * 1024)
-            logger.info("LLM model downloaded: %s (%.0f MB)", model_path, size_mb)
-            return True
-        except Exception as e:
-            logger.warning("Failed to download LLM model: %s", e)
-            return False
-
-    def _get_llm():
-        """Lazy-load Qwen2.5-3B for text correction. Downloads GGUF if needed."""
-        global _llm_model
-        if _llm_model is not None:
-            return _llm_model
-
-        with _llm_lock:
-            if _llm_model is not None:
-                return _llm_model
-
-            try:
-                from llama_cpp import Llama
-            except ImportError:
-                raise HTTPException(
-                    503, "llama-cpp-python not installed; LLM correction unavailable"
-                )
-
-            if not _ensure_llm_model_downloaded():
-                raise HTTPException(503, "LLM model not available")
-
-            model_path = os.path.join(_LLM_MODEL_DIR, _LLM_GGUF_FILE)
-
-            gpu_layers = 0
-            device_label = "CPU"
-            try:
-                import torch as _t
-                if _t.cuda.is_available():
-                    gpu_layers = -1
-                    device_label = "GPU (all layers offloaded)"
-            except Exception:
-                pass
-
-            logger.info("Loading LLM model from %s (%s)", model_path, device_label)
-            _llm_model = Llama(
-                model_path=model_path,
-                n_ctx=512,
-                n_gpu_layers=gpu_layers,
-                verbose=False,
-            )
-            logger.info("LLM model loaded (%s, n_ctx=512)", device_label)
-            return _llm_model
-
-    _LLM_SYS_PROMPTS = {
-        "zh": (
-            "你是语音转写校对助手。修正明显的转写错误（错别字、同音字、"
-            "漏字），保持原意和说话风格不变。仅输出修正后的文本，不要解释。"
-        ),
-        "default": (
-            "You are a transcription proofreader. Fix obvious transcription "
-            "errors (misspellings, homophones, missing words) while preserving "
-            "the original meaning and style. Output only the corrected text."
-        ),
-    }
-
-    def _llm_correct_text(text, language=None):
-        """Correct a single piece of text via the local LLM.
-        Always returns usable text -- never raises, never disrupts the pipeline."""
-        if not text or not text.strip():
-            return text
-        try:
-            llm = _get_llm()
-            sys_key = "zh" if language and language.startswith("zh") else "default"
-            resp = llm.create_chat_completion(
-                messages=[
-                    {"role": "system", "content": _LLM_SYS_PROMPTS[sys_key]},
-                    {"role": "user", "content": text.strip()},
-                ],
-                max_tokens=max(len(text) * 3, 128),
-                temperature=0.1,
-            )
-            corrected = resp["choices"][0]["message"]["content"].strip()
-            return corrected if corrected else text
-        except Exception as e:
-            logger.warning("LLM correction skipped: %s", e)
-            return text
-
-    def _llm_correct_segments(seg_list, language=None):
-        """Run LLM correction on all segments. Modifies dicts in place."""
-        logger.info("Running LLM correction on %d segments ...", len(seg_list))
-        t0 = time.time()
-        for seg in seg_list:
-            original = seg["text"].strip()
-            if not original:
-                continue
-            seg["text"] = _llm_correct_text(original, language)
-        elapsed = time.time() - t0
-        logger.info("LLM correction completed in %.1fs", elapsed)
-        return seg_list
+        logger.info(
+            "Gradio UI patched: Text Cleaning + Segment Merging checkboxes added"
+        )
 
     _PATCH_VERSION = 1
 
@@ -927,15 +921,132 @@ data:
         except Exception as e:
             logger.warning(f"Failed to save patched config: {e}")
 
+    # ── Persistence for post-processing checkbox state ──
+    #
+    # ``_text_cleaning_enabled`` / ``_segment_merging_enabled`` are mutated by
+    # the WebUI checkboxes (see ``_patch_gradio_ui``).  Without persistence
+    # those mutations would only live in-process and reset to the code
+    # defaults on every Pod restart, which is a surprising UX.
+    #
+    # The two helpers below mirror the conventions used by ``_patch_webui_config``:
+    #   * read on startup → restore the user's last choice
+    #   * write on every checkbox change → outlive Pod restarts
+    # The state is stored in its own top-level ``_post_processing`` section
+    # in ``default_parameters.yaml`` so we don't pollute Whisper-WebUI's
+    # native schema and don't conflict with ``_QUALITY_OVERRIDES``.
+
+    def _load_post_processing_state():
+        """Restore Text Cleaning / Segment Merging checkbox state from
+        ``default_parameters.yaml``.
+
+        On FIRST install (``_post_processing`` section absent) this function
+        seeds the section with the code defaults so the keys are visible /
+        editable in the yaml from day one — symmetric with how
+        ``_patch_webui_config`` seeds the six quality params.  Subsequent
+        startups become read-only and respect whatever the user set.
+
+        Falls back to the code defaults (both True) when the file is
+        unreadable.  Individual keys missing or having a non-bool value are
+        also tolerated (the corresponding global keeps its default).
+        """
+        global _text_cleaning_enabled, _segment_merging_enabled
+        try:
+            from modules.utils.paths import DEFAULT_PARAMETERS_CONFIG_PATH
+            from modules.utils.files_manager import load_yaml, save_yaml
+        except ImportError:
+            logger.warning(
+                "Cannot import Whisper-WebUI paths; "
+                "post-processing state will use code defaults (both True)"
+            )
+            return
+        try:
+            params = load_yaml(DEFAULT_PARAMETERS_CONFIG_PATH)
+        except Exception as e:
+            logger.warning(
+                "Cannot load default_parameters.yaml for post-proc state: %s; "
+                "using code defaults", e,
+            )
+            return
+
+        pp = params.get("_post_processing")
+
+        if pp is None:
+            # First-install path: seed the section so it's visible to admins
+            # inspecting the yaml.  Defaults match the code-level globals.
+            params["_post_processing"] = {
+                "text_cleaning": _text_cleaning_enabled,
+                "segment_merging": _segment_merging_enabled,
+            }
+            try:
+                save_yaml(params, DEFAULT_PARAMETERS_CONFIG_PATH)
+                logger.info(
+                    "Post-processing section absent; seeded defaults to yaml: "
+                    "text_cleaning=%s, segment_merging=%s",
+                    _text_cleaning_enabled, _segment_merging_enabled,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to seed _post_processing defaults to yaml: %s; "
+                    "code defaults still in effect for this run", e,
+                )
+            return
+
+        tc = pp.get("text_cleaning")
+        sm = pp.get("segment_merging")
+        if isinstance(tc, bool):
+            _text_cleaning_enabled = tc
+        if isinstance(sm, bool):
+            _segment_merging_enabled = sm
+        logger.info(
+            "Post-processing state loaded: text_cleaning=%s, segment_merging=%s",
+            _text_cleaning_enabled, _segment_merging_enabled,
+        )
+
+    def _persist_post_processing_state():
+        """Write current Text Cleaning / Segment Merging globals to
+        ``default_parameters.yaml``.  Called from the checkbox change
+        handlers; never raises, just warns on failure so a transient
+        write error never breaks the WebUI.
+        """
+        try:
+            from modules.utils.paths import DEFAULT_PARAMETERS_CONFIG_PATH
+            from modules.utils.files_manager import load_yaml, save_yaml
+        except ImportError:
+            logger.warning(
+                "Cannot import Whisper-WebUI paths; "
+                "post-processing state NOT persisted (in-memory only)"
+            )
+            return
+        try:
+            params = load_yaml(DEFAULT_PARAMETERS_CONFIG_PATH)
+        except Exception as e:
+            logger.warning(
+                "Cannot load default_parameters.yaml: %s; "
+                "post-processing state NOT persisted", e,
+            )
+            return
+        params["_post_processing"] = {
+            "text_cleaning": _text_cleaning_enabled,
+            "segment_merging": _segment_merging_enabled,
+        }
+        try:
+            save_yaml(params, DEFAULT_PARAMETERS_CONFIG_PATH)
+            logger.info(
+                "Post-processing state persisted: text_cleaning=%s, segment_merging=%s",
+                _text_cleaning_enabled, _segment_merging_enabled,
+            )
+        except Exception as e:
+            logger.warning("Failed to persist post-processing state: %s", e)
+
     if __name__ == "__main__":
         from app import App, parser as app_parser
 
         args = app_parser.parse_args()
 
         _patch_webui_config()
+        _load_post_processing_state()
         _patch_whisper_engine()
         _patch_gradio_ui()
-        _ensure_llm_model_downloaded()
 
         app_instance = App(args)
 

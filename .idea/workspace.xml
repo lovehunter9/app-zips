@@ -8,7 +8,7 @@
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/whisperwebuiv2/Chart.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/whisperwebuiv2/Chart.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/whisperwebuiv2/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/whisperwebuiv2/OlaresManifest.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/whisperwebuiv2/whisperwebuiv2/templates/clientproxy.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/whisperwebuiv2/whisperwebuiv2/templates/clientproxy.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/whisperwebuiv2/whisperwebuiv2server/Chart.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/whisperwebuiv2/whisperwebuiv2server/Chart.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/whisperwebuiv2/whisperwebuiv2server/templates/api-proxy-configmap.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/whisperwebuiv2/whisperwebuiv2server/templates/api-proxy-configmap.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/whisperwebuiv2/whisperwebuiv2server/templates/deployment.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/whisperwebuiv2/whisperwebuiv2server/templates/deployment.yaml" afterDir="false" />
     </list>
@@ -18,7 +18,7 @@
     <option name="LAST_RESOLUTION" value="IGNORE" />
   </component>
   <component name="EmbeddingIndexingInfo">
-    <option name="cachedIndexableFilesCount" value="1329" />
+    <option name="cachedIndexableFilesCount" value="2170" />
     <option name="fileBasedEmbeddingIndicesEnabled" value="true" />
   </component>
   <component name="FileTemplateManagerImpl">
@@ -480,6 +480,7 @@
       <workItem from="1778470915947" duration="517000" />
       <workItem from="1778557147989" duration="507000" />
       <workItem from="1778643684032" duration="541000" />
+      <workItem from="1778729946421" duration="561000" />
     </task>
     <servers />
   </component>

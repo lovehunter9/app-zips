@@ -7,7 +7,7 @@ metadata:
   description: A Web UI for easy subtitle using whisper model.
   icon: https://app.cdn.olares.com/appstore/whisperwebui/icon.png
   appid: whisperwebuiv2
-  version: '1.0.14'
+  version: '1.0.15'
   title: Whisper-WebUI
   categories:
   - AI
@@ -100,14 +100,14 @@ spec:
       url: https://github.com/jhj0517/Whisper-WebUI?tab=Apache-2.0-1-ov-file
 
   {{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
-  requiredMemory: 8.5Gi
-  limitedMemory: 24Gi
-  requiredDisk: 15Gi
-  limitedDisk: 25Gi
+  requiredMemory: 6.5Gi
+  limitedMemory: 20Gi
+  requiredDisk: 12Gi
+  limitedDisk: 20Gi
   requiredCpu: 1
   limitedCpu: 5
   requiredGpu: 8Gi
-  limitedGpu: 18Gi
+  limitedGpu: 16Gi
   {{- else }}
   requiredMemory: 64Mi
   limitedMemory: 500Mi
