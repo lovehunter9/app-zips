@@ -40,11 +40,14 @@ data:
     import logging
     import time
     import re
+    import json
+    import shutil
+    from typing import List, Optional
 
     sys.path.insert(0, "/Whisper-WebUI")
 
-    from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-    from fastapi.responses import PlainTextResponse
+    from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Query
+    from fastapi.responses import PlainTextResponse, JSONResponse, Response
     from fastapi.middleware.cors import CORSMiddleware
     import uvicorn
 
@@ -228,9 +231,137 @@ data:
             logger.warning(f"Diarization failed, returning segments without speaker labels: {e}")
         return segments
 
-    @api_app.post("/v1/audio/transcriptions")
-    async def transcribe(
-        file: UploadFile = File(...),
+    # ──────────────────────────────────────────────────────────────
+    # Shared helpers used by the audio endpoints below.  Routes own the
+    # life-cycle of the source audio file (upload or YouTube download);
+    # ``_do_transcribe`` is task-agnostic and only owns ``vocals_path``
+    # (the BGM-separated working copy it creates internally, if any).
+    # ──────────────────────────────────────────────────────────────
+
+    async def _save_upload_to_temp(file: UploadFile) -> str:
+        """Spool an UploadFile to a unique temp file.  Caller unlinks."""
+        suffix = os.path.splitext(file.filename or "")[1] or ".wav"
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False, prefix="up_") as tmp:
+            tmp.write(await file.read())
+            return tmp.name
+
+    def _download_youtube_audio(url: str) -> str:
+        """Download an audio-only stream from YouTube to a per-request temp
+        directory and return the absolute file path.
+
+        Uses ``pytubefix`` (the actively-maintained pytube fork that
+        upstream Whisper-WebUI ships in its requirements).  We deliberately
+        do NOT reuse upstream's ``modules.utils.youtube_manager.get_ytaudio``
+        because that helper writes to a fixed global ``modules/yt_tmp.wav``
+        path which is not safe under concurrent API calls.  Each request
+        gets its own ``mkdtemp`` directory that the caller cleans up.
+        """
+        try:
+            from pytubefix import YouTube
+        except ImportError as exc:
+            raise HTTPException(
+                500,
+                "pytubefix is not installed inside the runtime image; "
+                "rebuild / reinstall the chart to pull in this dependency.",
+            ) from exc
+
+        try:
+            yt = YouTube(url)
+            stream = yt.streams.get_audio_only()
+            if stream is None:
+                raise RuntimeError("no audio-only stream available for this video")
+            tmpdir = tempfile.mkdtemp(prefix="yt_")
+            audio_path = stream.download(output_path=tmpdir, skip_existing=False)
+            if not audio_path or not os.path.exists(audio_path):
+                raise RuntimeError("pytubefix returned no output path")
+            return audio_path
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(400, f"Failed to download YouTube audio: {exc}") from exc
+
+    # ──────────────────────────────────────────────────────────────
+    # Subtitle parsers used by the NLLB / DeepL text-translation routes
+    # so callers can hand us an SRT/VTT upload and get the same format
+    # back without writing to disk.  Re-emission goes through the same
+    # ``_segments_to_srt`` / ``_segments_to_vtt`` / ``_segments_to_lrc``
+    # helpers the audio routes already use, so timestamp formatting is
+    # consistent across all output paths.
+    # ──────────────────────────────────────────────────────────────
+
+    _SRT_TS_RE = re.compile(r"(\d{1,2}):(\d{2}):(\d{2})[,\.](\d{1,3})")
+
+    def _parse_ts_str(ts: str) -> float:
+        m = _SRT_TS_RE.match(ts.strip())
+        if not m:
+            return 0.0
+        h, mn, s, ms = m.groups()
+        return int(h) * 3600 + int(mn) * 60 + int(s) + int(ms.ljust(3, "0")[:3]) / 1000.0
+
+    def _parse_srt(content: str) -> List[dict]:
+        out = []
+        for blk in re.split(r"\n\s*\n", content.strip()):
+            lines = [ln for ln in blk.splitlines() if ln.strip()]
+            if len(lines) < 2:
+                continue
+            idx = 1 if lines[0].strip().isdigit() else 0
+            if idx >= len(lines) or "-->" not in lines[idx]:
+                continue
+            start_str, end_str = [s.strip() for s in lines[idx].split("-->", 1)]
+            text = "\n".join(lines[idx + 1:]).strip()
+            if not text:
+                continue
+            out.append({"start": _parse_ts_str(start_str), "end": _parse_ts_str(end_str), "text": text})
+        return out
+
+    def _parse_vtt(content: str) -> List[dict]:
+        if content.lstrip().startswith("WEBVTT"):
+            content = content.split("\n", 1)[1] if "\n" in content else ""
+        out = []
+        for blk in re.split(r"\n\s*\n", content.strip()):
+            first = blk.lstrip().split("\n", 1)[0].strip().upper()
+            if first.startswith(("NOTE", "STYLE", "REGION")):
+                continue
+            lines = [ln for ln in blk.splitlines() if ln.strip()]
+            if not lines:
+                continue
+            if "-->" not in lines[0]:
+                if len(lines) < 2 or "-->" not in lines[1]:
+                    continue
+                lines = lines[1:]
+            start_str, end_str = [s.strip() for s in lines[0].split("-->", 1)]
+            text = "\n".join(lines[1:]).strip()
+            if not text:
+                continue
+            out.append({
+                "start": _parse_ts_str(start_str.replace(".", ",")),
+                "end": _parse_ts_str(end_str.replace(".", ",")),
+                "text": text,
+            })
+        return out
+
+    def _parse_subtitle_bytes(filename: str, raw: bytes) -> List[dict]:
+        try:
+            content = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            content = raw.decode("utf-8", errors="replace")
+        name = (filename or "").lower()
+        if name.endswith(".vtt") or content.lstrip()[:8].upper().startswith("WEBVTT"):
+            return _parse_vtt(content)
+        return _parse_srt(content)
+
+    # ──────────────────────────────────────────────────────────────
+    # Whisper transcribe Form-param dependency.  Declaring all 56
+    # parameters once and reusing them via ``Depends`` across the
+    # three audio routes (upload-transcribe / upload-translate /
+    # youtube-transcribe) is what gives the translations endpoint
+    # full parity with transcriptions without duplicating signatures.
+    # The signature is faithfully copied from the legacy in-line
+    # /v1/audio/transcriptions handler -- DO NOT remove or rename
+    # fields here without auditing every audio endpoint downstream.
+    # ──────────────────────────────────────────────────────────────
+
+    def _transcribe_form_params(
         model: str = Form("whisper-1"),
         language: str = Form(None),
         response_format: str = Form("json"),
@@ -289,87 +420,106 @@ data:
         segment_merging: bool = Form(True),
         batched: bool = Form(None),
         batch_size: int = Form(None),
-    ):
-        _DEFAULT_PREPEND_PUNCT = "\"" + chr(0x2018) + chr(0x201C) + chr(0x00BF) + "([{-"
-        _DEFAULT_APPEND_PUNCT = "\"" + chr(0x2019) + "." + chr(0x3002) + "," + chr(0xFF0C) + "!" + chr(0xFF01) + "?" + chr(0xFF1F) + ":" + chr(0xFF1A) + chr(0x201D) + ")]}" + chr(0x3001)
-        if prepend_punctuations is None:
-            prepend_punctuations = _DEFAULT_PREPEND_PUNCT
-        if append_punctuations is None:
-            append_punctuations = _DEFAULT_APPEND_PUNCT
+    ) -> dict:
+        return {k: v for k, v in locals().items()}
 
-        suffix = os.path.splitext(file.filename)[1] if file.filename else ".wav"
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-            tmp.write(await file.read())
-            tmp_path = tmp.name
+    async def _do_transcribe(audio_path: str, force_task: Optional[str] = None, **p):
+        """Run the full transcription pipeline against a local audio file.
+
+        Caller owns ``audio_path`` (does NOT get deleted here); this function
+        only owns the optional BGM-separated working copy it creates.
+
+        ``force_task`` allows the /v1/audio/translations route to pin
+        ``task="translate"`` regardless of what the form field said.
+        Diarization deliberately runs against the ORIGINAL audio mix
+        (``audio_path``), not the BGM-separated vocals -- speaker labels
+        come out more stable on the mixed signal.
+        """
+        task = force_task or p.get("task") or "transcribe"
+
+        _DEFAULT_PREPEND_PUNCT = "\"" + chr(0x2018) + chr(0x201C) + chr(0x00BF) + "([{-"
+        _DEFAULT_APPEND_PUNCT = (
+            "\"" + chr(0x2019) + "." + chr(0x3002) + "," + chr(0xFF0C)
+            + "!" + chr(0xFF01) + "?" + chr(0xFF1F) + ":" + chr(0xFF1A)
+            + chr(0x201D) + ")]}" + chr(0x3001)
+        )
+        prepend_punctuations = p.get("prepend_punctuations") or _DEFAULT_PREPEND_PUNCT
+        append_punctuations = p.get("append_punctuations") or _DEFAULT_APPEND_PUNCT
+
+        response_format = p.get("response_format") or "json"
+        word_timestamps = bool(p.get("word_timestamps", False))
+        is_separate_bgm = bool(p.get("is_separate_bgm", False))
 
         vocals_path = None
         try:
             if is_separate_bgm:
                 with _lock:
                     vocals_path = _run_bgm_separation(
-                        tmp_path, uvr_model_size,
-                        uvr_device or ("cuda" if _whisper_inf and hasattr(_whisper_inf, "device") else "cpu"),
-                        uvr_segment_size, uvr_save_file, uvr_enable_offload,
+                        audio_path,
+                        p.get("uvr_model_size") or "UVR-MDX-NET-Inst_HQ_4",
+                        p.get("uvr_device") or ("cuda" if _whisper_inf and hasattr(_whisper_inf, "device") else "cpu"),
+                        int(p.get("uvr_segment_size") or 256),
+                        bool(p.get("uvr_save_file", False)),
+                        bool(p.get("uvr_enable_offload", True)),
                     )
                 transcribe_path = vocals_path
             else:
-                transcribe_path = tmp_path
+                transcribe_path = audio_path
 
             need_segments = response_format in ("verbose_json", "srt", "vtt", "lrc")
-            temps = _parse_temperature(temperature)
+            temps = _parse_temperature(p.get("temperature") or "0,0.2,0.4,0.6,0.8,1.0")
 
             vad_params = {
-                "threshold": vad_threshold,
-                "min_speech_duration_ms": vad_min_speech_duration_ms,
-                "max_speech_duration_s": vad_max_speech_duration_s,
-                "min_silence_duration_ms": vad_min_silence_duration_ms,
-                "speech_pad_ms": vad_speech_pad_ms,
-                "min_silence_at_max_speech": vad_min_silence_at_max_speech,
-                "use_max_poss_sil_at_max_speech": vad_use_max_poss_sil_at_max_speech,
+                "threshold": p.get("vad_threshold", 0.5),
+                "min_speech_duration_ms": p.get("vad_min_speech_duration_ms", 250),
+                "max_speech_duration_s": p.get("vad_max_speech_duration_s", 9999),
+                "min_silence_duration_ms": p.get("vad_min_silence_duration_ms", 500),
+                "speech_pad_ms": p.get("vad_speech_pad_ms", 400),
+                "min_silence_at_max_speech": p.get("vad_min_silence_at_max_speech", 98),
+                "use_max_poss_sil_at_max_speech": p.get("vad_use_max_poss_sil_at_max_speech", True),
             }
-            if vad_neg_threshold is not None:
-                vad_params["neg_threshold"] = vad_neg_threshold
+            if p.get("vad_neg_threshold") is not None:
+                vad_params["neg_threshold"] = p["vad_neg_threshold"]
 
             kwargs = {
                 "task": task,
-                "beam_size": beam_size,
-                "best_of": best_of,
-                "patience": patience,
-                "length_penalty": length_penalty,
-                "repetition_penalty": repetition_penalty,
-                "no_repeat_ngram_size": no_repeat_ngram_size,
-                "condition_on_previous_text": condition_on_previous_text,
-                "prompt_reset_on_temperature": prompt_reset_on_temperature,
-                "hallucination_silence_threshold": hallucination_silence_threshold,
-                "compression_ratio_threshold": compression_ratio_threshold,
-                "log_prob_threshold": log_prob_threshold,
-                "no_speech_threshold": no_speech_threshold,
+                "beam_size": p.get("beam_size", 5),
+                "best_of": p.get("best_of", 5),
+                "patience": p.get("patience", 1),
+                "length_penalty": p.get("length_penalty", 1),
+                "repetition_penalty": p.get("repetition_penalty", 1),
+                "no_repeat_ngram_size": p.get("no_repeat_ngram_size", 0),
+                "condition_on_previous_text": p.get("condition_on_previous_text", False),
+                "prompt_reset_on_temperature": p.get("prompt_reset_on_temperature", 0.5),
+                "hallucination_silence_threshold": p.get("hallucination_silence_threshold", 2),
+                "compression_ratio_threshold": p.get("compression_ratio_threshold", 2.4),
+                "log_prob_threshold": p.get("log_prob_threshold", -1.0),
+                "no_speech_threshold": p.get("no_speech_threshold", 0.6),
                 "temperature": temps,
                 "word_timestamps": word_timestamps or need_segments,
-                "without_timestamps": without_timestamps,
-                "max_initial_timestamp": max_initial_timestamp,
-                "suppress_blank": suppress_blank,
-                "suppress_tokens": _parse_int_list(suppress_tokens),
+                "without_timestamps": p.get("without_timestamps", False),
+                "max_initial_timestamp": p.get("max_initial_timestamp", 1.0),
+                "suppress_blank": p.get("suppress_blank", True),
+                "suppress_tokens": _parse_int_list(p.get("suppress_tokens") or "-1"),
                 "prepend_punctuations": prepend_punctuations,
                 "append_punctuations": append_punctuations,
-                "multilingual": multilingual,
-                "log_progress": log_progress,
-                "language_detection_threshold": language_detection_threshold,
-                "language_detection_segments": language_detection_segments,
-                "vad_filter": vad_filter,
+                "multilingual": p.get("multilingual", False),
+                "log_progress": p.get("log_progress", False),
+                "language_detection_threshold": p.get("language_detection_threshold", 0.5),
+                "language_detection_segments": p.get("language_detection_segments", 1),
+                "vad_filter": p.get("vad_filter", True),
                 "vad_parameters": vad_params,
-                "clip_timestamps": clip_timestamps,
+                "clip_timestamps": p.get("clip_timestamps") or "0",
             }
+            if p.get("max_new_tokens") is not None:
+                kwargs["max_new_tokens"] = p["max_new_tokens"]
+            if p.get("chunk_length") is not None:
+                kwargs["chunk_length"] = p["chunk_length"]
 
-            if max_new_tokens is not None:
-                kwargs["max_new_tokens"] = max_new_tokens
-            if chunk_length is not None:
-                kwargs["chunk_length"] = chunk_length
-
-            resolved_lang = language
+            resolved_lang = p.get("language")
             if not resolved_lang:
                 with _lock:
-                    _ensure_model_loaded(model, compute_type)
+                    _ensure_model_loaded(p.get("model"), p.get("compute_type"))
                     # _skip_pipeline=True: only ``info`` is consulted, so we
                     # skip the cost of cleaning / merging on this throwaway
                     # transcription.
@@ -387,27 +537,25 @@ data:
             if resolved_lang:
                 kwargs["language"] = resolved_lang
 
-            if prompt:
-                kwargs["initial_prompt"] = prompt
+            if p.get("prompt"):
+                kwargs["initial_prompt"] = p["prompt"]
             elif resolved_lang in _LANG_PROMPTS:
                 kwargs["initial_prompt"] = _LANG_PROMPTS[resolved_lang]
 
-            if hotwords:
-                kwargs["hotwords"] = hotwords
-            if prefix:
-                kwargs["prefix"] = prefix
+            if p.get("hotwords"):
+                kwargs["hotwords"] = p["hotwords"]
+            if p.get("prefix"):
+                kwargs["prefix"] = p["prefix"]
 
-            # Per-request runtime toggles override the WebUI globals.
-            # ``None`` falls back to the global flag inside the engine patch.
-            kwargs["_text_cleaning"] = bool(text_cleaning)
-            kwargs["_segment_merging"] = bool(segment_merging)
-            if batched is not None:
-                kwargs["_batched"] = bool(batched)
-            if batch_size is not None:
-                kwargs["_batch_size"] = int(batch_size)
+            kwargs["_text_cleaning"] = bool(p.get("text_cleaning", True))
+            kwargs["_segment_merging"] = bool(p.get("segment_merging", True))
+            if p.get("batched") is not None:
+                kwargs["_batched"] = bool(p["batched"])
+            if p.get("batch_size") is not None:
+                kwargs["_batch_size"] = int(p["batch_size"])
 
             with _lock:
-                _ensure_model_loaded(model, compute_type)
+                _ensure_model_loaded(p.get("model"), p.get("compute_type"))
                 segments_gen, info = _whisper_inf.model.transcribe(transcribe_path, **kwargs)
                 seg_list = []
                 for seg in segments_gen:
@@ -429,22 +577,23 @@ data:
                     seg_list.append(seg_dict)
                 text = " ".join(s["text"] for s in seg_list).strip()
 
-            if is_diarize and seg_list:
+            if p.get("is_diarize") and seg_list:
                 with _lock:
-                    d_device = diarization_device or ("cuda" if _whisper_inf and hasattr(_whisper_inf, "device") else "cpu")
+                    d_device = p.get("diarization_device") or ("cuda" if _whisper_inf and hasattr(_whisper_inf, "device") else "cpu")
                     seg_list = _run_diarization(
-                        tmp_path, seg_list, hf_token, d_device, diarization_enable_offload,
+                        audio_path, seg_list, p.get("hf_token", ""),
+                        d_device, bool(p.get("diarization_enable_offload", True)),
                     )
 
             if response_format == "text":
                 return PlainTextResponse(text)
-            elif response_format == "srt":
+            if response_format == "srt":
                 return PlainTextResponse(_segments_to_srt(seg_list), media_type="text/plain")
-            elif response_format == "vtt":
+            if response_format == "vtt":
                 return PlainTextResponse(_segments_to_vtt(seg_list), media_type="text/vtt")
-            elif response_format == "lrc":
+            if response_format == "lrc":
                 return PlainTextResponse(_segments_to_lrc(seg_list), media_type="text/plain")
-            elif response_format == "verbose_json":
+            if response_format == "verbose_json":
                 return {
                     "task": task,
                     "language": info.language if info else None,
@@ -452,92 +601,402 @@ data:
                     "text": text,
                     "segments": seg_list,
                 }
-            else:
-                return {"text": text}
+            return {"text": text}
+        finally:
+            if vocals_path and vocals_path != audio_path and os.path.exists(vocals_path):
+                try:
+                    os.unlink(vocals_path)
+                except OSError:
+                    pass
+
+    @api_app.post("/v1/audio/transcriptions")
+    async def transcribe(
+        file: UploadFile = File(...),
+        p: dict = Depends(_transcribe_form_params),
+    ):
+        """OpenAI-compatible transcription endpoint.  Accepts every Whisper
+        decoder / VAD / BGM / diarization / post-processing knob the engine
+        supports -- see /docs (FastAPI auto-OpenAPI) for the full schema.
+        """
+        tmp_path = await _save_upload_to_temp(file)
+        try:
+            return await _do_transcribe(tmp_path, **p)
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Transcription error: {e}")
             raise HTTPException(500, str(e))
         finally:
-            os.unlink(tmp_path)
-            if vocals_path and vocals_path != tmp_path and os.path.exists(vocals_path):
-                os.unlink(vocals_path)
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+
+    @api_app.post("/v1/audio/transcriptions/youtube")
+    async def transcribe_youtube_url(
+        youtube_url: str = Form(...),
+        p: dict = Depends(_transcribe_form_params),
+    ):
+        """Transcribe a YouTube video by URL.  Audio is downloaded via
+        pytubefix into a per-request temp directory then handed to the
+        same pipeline as the file-upload endpoint, so every form
+        parameter (language / VAD / Batched / Cleaning / Merging /
+        Diarization / etc.) applies here too.
+        """
+        audio_path = _download_youtube_audio(youtube_url)
+        tmp_dir = os.path.dirname(audio_path)
+        try:
+            return await _do_transcribe(audio_path, **p)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"YouTube transcription error: {e}")
+            raise HTTPException(500, str(e))
+        finally:
+            if tmp_dir and os.path.isdir(tmp_dir):
+                shutil.rmtree(tmp_dir, ignore_errors=True)
 
     @api_app.post("/v1/audio/translations")
     async def translate_audio(
         file: UploadFile = File(...),
-        model: str = Form("whisper-1"),
-        response_format: str = Form("json"),
-        prompt: str = Form(None),
-        temperature: str = Form("0,0.2,0.4,0.6,0.8,1.0"),
-        batched: bool = Form(None),
-        batch_size: int = Form(None),
+        p: dict = Depends(_transcribe_form_params),
     ):
-        """OpenAI-compatible translation endpoint. Translates audio into English."""
-        suffix = os.path.splitext(file.filename)[1] if file.filename else ".wav"
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-            tmp.write(await file.read())
-            tmp_path = tmp.name
-
+        """OpenAI-compatible translation endpoint -- translates speech to
+        English.  Accepts the SAME full parameter set as the transcription
+        endpoint; we deliberately exceed OpenAI's narrow public spec here
+        so that VAD / BGM / Diarization / Batched / post-processing are
+        all available on the translation path too.  Form field ``task``
+        is force-overridden to ``translate``.
+        """
+        tmp_path = await _save_upload_to_temp(file)
         try:
-            temps = _parse_temperature(temperature)
-            kwargs = {
-                "task": "translate",
-                "beam_size": 5,
-                "best_of": 5,
-                "condition_on_previous_text": False,
-                "hallucination_silence_threshold": 2,
-                "vad_filter": True,
-                "vad_parameters": {"min_silence_duration_ms": 500, "speech_pad_ms": 400},
-                "compression_ratio_threshold": 2.4,
-                "log_prob_threshold": -1.0,
-                "no_speech_threshold": 0.6,
-                "temperature": temps,
-                "word_timestamps": response_format in ("verbose_json", "srt", "vtt", "lrc"),
-            }
-            if prompt:
-                kwargs["initial_prompt"] = prompt
-
-            if batched is not None:
-                kwargs["_batched"] = bool(batched)
-            if batch_size is not None:
-                kwargs["_batch_size"] = int(batch_size)
-
-            with _lock:
-                _ensure_model_loaded(model)
-                segments_gen, info = _whisper_inf.model.transcribe(tmp_path, **kwargs)
-                seg_list = []
-                for seg in segments_gen:
-                    seg_list.append({
-                        "id": seg.id, "start": seg.start, "end": seg.end,
-                        "text": seg.text, "avg_logprob": seg.avg_logprob,
-                        "compression_ratio": seg.compression_ratio,
-                        "no_speech_prob": seg.no_speech_prob, "temperature": seg.temperature,
-                    })
-                text = " ".join(s["text"] for s in seg_list).strip()
-
-            if response_format == "text":
-                return PlainTextResponse(text)
-            elif response_format == "srt":
-                return PlainTextResponse(_segments_to_srt(seg_list), media_type="text/plain")
-            elif response_format == "vtt":
-                return PlainTextResponse(_segments_to_vtt(seg_list), media_type="text/vtt")
-            elif response_format == "lrc":
-                return PlainTextResponse(_segments_to_lrc(seg_list), media_type="text/plain")
-            elif response_format == "verbose_json":
-                return {
-                    "task": "translate",
-                    "language": info.language if info else None,
-                    "duration": info.duration if info else None,
-                    "text": text,
-                    "segments": seg_list,
-                }
-            else:
-                return {"text": text}
+            return await _do_transcribe(tmp_path, force_task="translate", **p)
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Translation error: {e}")
             raise HTTPException(500, str(e))
         finally:
-            os.unlink(tmp_path)
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+
+    @api_app.get("/v1/youtube/metadata")
+    async def youtube_metadata(url: str = Query(..., description="YouTube video URL")):
+        """Fetch metadata (title, description, thumbnail, duration) for a
+        YouTube URL without downloading the audio.  Mirrors the side panel
+        shown next to upstream Whisper-WebUI's "Youtube" tab.
+        """
+        try:
+            from pytubefix import YouTube
+        except ImportError as exc:
+            raise HTTPException(
+                500,
+                "pytubefix is not installed inside the runtime image.",
+            ) from exc
+        try:
+            yt = YouTube(url)
+            return {
+                "title": getattr(yt, "title", None),
+                "author": getattr(yt, "author", None),
+                "description": getattr(yt, "description", None),
+                "thumbnail_url": getattr(yt, "thumbnail_url", None),
+                "length_seconds": getattr(yt, "length", None),
+                "views": getattr(yt, "views", None),
+                "publish_date": yt.publish_date.isoformat() if getattr(yt, "publish_date", None) else None,
+                "channel_url": getattr(yt, "channel_url", None),
+            }
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(400, f"Failed to fetch YouTube metadata: {e}")
+
+    # ──────────────────────────────────────────────────────────────
+    # NLLB text / subtitle translation
+    # (modules.translation.nllb_inference.NLLBInference)
+    # ──────────────────────────────────────────────────────────────
+
+    _nllb_inf = None
+    _nllb_init_lock = threading.Lock()
+    _nllb_call_lock = threading.Lock()
+
+    def _get_nllb():
+        """Lazy-init the upstream NLLBInference singleton."""
+        global _nllb_inf
+        if _nllb_inf is not None:
+            return _nllb_inf
+        with _nllb_init_lock:
+            if _nllb_inf is not None:
+                return _nllb_inf
+            try:
+                from modules.translation.nllb_inference import NLLBInference
+                from modules.utils.paths import NLLB_MODELS_DIR, TRANSLATION_OUTPUT_DIR
+                _nllb_inf = NLLBInference(
+                    model_dir=NLLB_MODELS_DIR,
+                    output_dir=TRANSLATION_OUTPUT_DIR,
+                )
+                return _nllb_inf
+            except Exception as exc:
+                logger.exception("NLLBInference unavailable")
+                raise HTTPException(500, f"NLLB unavailable: {exc}")
+
+    def _nllb_apply_pair(model_size: str, src_lang: str, tgt_lang: str):
+        """Force-reload the HF translation pipeline for (model, src, tgt).
+
+        Upstream's ``update_model`` short-circuits on unchanged ``model_size``
+        and may leave the pipeline pinned to a stale (src, tgt) pair.  Calling
+        the underlying loader directly avoids that gotcha for API users.
+        """
+        nllb = _get_nllb()
+        try:
+            import gradio as gr
+            nllb.update_model(model_size, src_lang, tgt_lang, gr.Progress())
+        except Exception as exc:
+            raise HTTPException(500, f"Failed to load NLLB model: {exc}")
+
+    @api_app.get("/v1/translations/nllb/models")
+    async def nllb_models():
+        """List NLLB-200 model variants the upstream module advertises."""
+        nllb = _get_nllb()
+        return {
+            "object": "list",
+            "data": [
+                {"id": m, "object": "model", "owned_by": "facebook", "created": 0}
+                for m in getattr(nllb, "available_models", [])
+            ],
+        }
+
+    @api_app.get("/v1/translations/nllb/languages")
+    async def nllb_languages():
+        """List NLLB language friendly-name → code mappings.
+        Either side (name or code) is accepted by the translate endpoint.
+        """
+        try:
+            from modules.translation.nllb_inference import NLLB_AVAILABLE_LANGS
+            return {
+                "object": "list",
+                "data": [{"name": name, "code": code} for name, code in NLLB_AVAILABLE_LANGS.items()],
+            }
+        except Exception as exc:
+            raise HTTPException(500, f"NLLB language list unavailable: {exc}")
+
+    @api_app.post("/v1/text/translations/nllb")
+    async def nllb_translate(
+        src_lang: str = Form(..., description="Source language (friendly name or NLLB code)"),
+        tgt_lang: str = Form(..., description="Target language (friendly name or NLLB code)"),
+        model_size: str = Form("facebook/nllb-200-distilled-600M"),
+        max_length: int = Form(200),
+        text: str = Form(None, description="Plain string OR JSON-encoded list of strings"),
+        file: UploadFile = File(None, description="Optional .srt / .vtt upload"),
+        response_format: str = Form("json", description="json / text / srt / vtt / lrc"),
+    ):
+        """Translate plain text OR a subtitle file using Facebook NLLB-200.
+
+        Provide EITHER ``text`` OR ``file``, not both.
+
+        ``text`` can be a single string (returned as ``{"text": "..."}``)
+        or a JSON-encoded list of strings (returned as ``{"texts": [...]}`` ).
+
+        For ``file`` uploads (.srt/.vtt), the subtitle is parsed in-memory,
+        every cue's text is translated, and the file is rebuilt in the
+        requested ``response_format`` (default ``json`` returns both the
+        joined text and the segments array).
+        """
+        if (not text) and file is None:
+            raise HTTPException(400, "Provide either 'text' or 'file'")
+        if text and file is not None:
+            raise HTTPException(400, "Provide only one of 'text' or 'file'")
+
+        nllb = _get_nllb()
+
+        if text:
+            items = None
+            stripped = text.lstrip()
+            if stripped.startswith("["):
+                try:
+                    parsed = json.loads(text)
+                    if isinstance(parsed, list) and all(isinstance(x, str) for x in parsed):
+                        items = parsed
+                except (ValueError, TypeError):
+                    items = None
+            if items is None:
+                items = [text]
+
+            with _nllb_call_lock:
+                _nllb_apply_pair(model_size, src_lang, tgt_lang)
+                outs = [nllb.translate(t, max_length=max_length) for t in items]
+
+            if response_format == "text":
+                return PlainTextResponse("\n".join(outs))
+            if len(items) == 1:
+                return {"text": outs[0]}
+            return {"texts": outs}
+
+        raw = await file.read()
+        segs = _parse_subtitle_bytes(file.filename or "", raw)
+        if not segs:
+            raise HTTPException(400, "No subtitle segments parsed from the uploaded file")
+
+        with _nllb_call_lock:
+            _nllb_apply_pair(model_size, src_lang, tgt_lang)
+            for s in segs:
+                s["text"] = nllb.translate(s["text"], max_length=max_length)
+
+        full_text = "\n".join(s["text"] for s in segs).strip()
+        if response_format == "srt":
+            return PlainTextResponse(_segments_to_srt(segs), media_type="text/plain")
+        if response_format == "vtt":
+            return PlainTextResponse(_segments_to_vtt(segs), media_type="text/vtt")
+        if response_format == "lrc":
+            return PlainTextResponse(_segments_to_lrc(segs), media_type="text/plain")
+        if response_format == "text":
+            return PlainTextResponse(full_text)
+        return {"text": full_text, "segments": segs}
+
+    # ──────────────────────────────────────────────────────────────
+    # DeepL text / subtitle translation
+    # (modules.translation.deepl_api.DeepLAPI)
+    #
+    # Caller supplies their own DeepL API key per request.  Nothing
+    # is stored server-side -- we deliberately bypass upstream's
+    # ``translate_deepl`` because that one serialises the key to
+    # ``configs/default_parameters.yaml`` as a side effect.  We call
+    # the inner ``request_deepl_translate`` directly to keep the key
+    # in-memory only.
+    # ──────────────────────────────────────────────────────────────
+
+    _deepl_api = None
+    _deepl_init_lock = threading.Lock()
+
+    def _get_deepl():
+        global _deepl_api
+        if _deepl_api is not None:
+            return _deepl_api
+        with _deepl_init_lock:
+            if _deepl_api is not None:
+                return _deepl_api
+            try:
+                from modules.translation.deepl_api import DeepLAPI
+                from modules.utils.paths import TRANSLATION_OUTPUT_DIR
+                _deepl_api = DeepLAPI(output_dir=TRANSLATION_OUTPUT_DIR)
+                return _deepl_api
+            except Exception as exc:
+                logger.exception("DeepLAPI unavailable")
+                raise HTTPException(500, f"DeepL unavailable: {exc}")
+
+    def _normalise_deepl_results(res):
+        out = []
+        for r in res or []:
+            if isinstance(r, dict):
+                out.append(r.get("text", ""))
+            else:
+                out.append(str(r))
+        return out
+
+    @api_app.get("/v1/translations/deepl/languages")
+    async def deepl_languages():
+        """Return DeepL's accepted source / target language sets.
+        Use these names verbatim or substitute the raw DeepL code.
+        """
+        try:
+            from modules.translation.deepl_api import (
+                DEEPL_AVAILABLE_SOURCE_LANGS,
+                DEEPL_AVAILABLE_TARGET_LANGS,
+            )
+            return {
+                "source": [{"name": n, "code": c} for n, c in DEEPL_AVAILABLE_SOURCE_LANGS.items()],
+                "target": [{"name": n, "code": c} for n, c in DEEPL_AVAILABLE_TARGET_LANGS.items()],
+            }
+        except Exception as exc:
+            raise HTTPException(500, f"DeepL language list unavailable: {exc}")
+
+    @api_app.post("/v1/text/translations/deepl")
+    async def deepl_translate(
+        auth_key: str = Form(..., description="DeepL API key (free or Pro)"),
+        src_lang: str = Form(..., description="Source language (name or DeepL code)"),
+        tgt_lang: str = Form(..., description="Target language (name or DeepL code)"),
+        is_pro: bool = Form(False, description="Pro tier? Routes to api.deepl.com vs api-free.deepl.com"),
+        text: str = Form(None, description="Plain string OR JSON-encoded list of strings"),
+        file: UploadFile = File(None, description="Optional .srt / .vtt upload"),
+        response_format: str = Form("json", description="json / text / srt / vtt / lrc"),
+    ):
+        """Translate plain text or a subtitle file via DeepL.
+
+        Provide EITHER ``text`` OR ``file``.  Subtitle uploads are parsed
+        in-memory, translated in batches of 50 (DeepL's default), and
+        re-emitted in the requested ``response_format``.
+
+        The caller-supplied ``auth_key`` is forwarded to DeepL via the
+        ``Authorization: DeepL-Auth-Key`` header and is NEVER persisted
+        to disk on this server -- we bypass upstream's helper that
+        otherwise caches it in ``default_parameters.yaml``.
+        """
+        if (not text) and file is None:
+            raise HTTPException(400, "Provide either 'text' or 'file'")
+        if text and file is not None:
+            raise HTTPException(400, "Provide only one of 'text' or 'file'")
+
+        deepl = _get_deepl()
+
+        if text:
+            items = None
+            stripped = text.lstrip()
+            if stripped.startswith("["):
+                try:
+                    parsed = json.loads(text)
+                    if isinstance(parsed, list) and all(isinstance(x, str) for x in parsed):
+                        items = parsed
+                except (ValueError, TypeError):
+                    items = None
+            if items is None:
+                items = [text]
+
+            try:
+                res = deepl.request_deepl_translate(auth_key, items, src_lang, tgt_lang, is_pro)
+            except Exception as exc:
+                raise HTTPException(502, f"DeepL request failed: {exc}")
+            outs = _normalise_deepl_results(res)
+            if len(outs) != len(items):
+                raise HTTPException(502, f"DeepL returned {len(outs)} items for {len(items)} inputs")
+
+            if response_format == "text":
+                return PlainTextResponse("\n".join(outs))
+            if len(items) == 1:
+                return {"text": outs[0]}
+            return {"texts": outs}
+
+        raw = await file.read()
+        segs = _parse_subtitle_bytes(file.filename or "", raw)
+        if not segs:
+            raise HTTPException(400, "No subtitle segments parsed from the uploaded file")
+
+        BATCH = 50
+        translated = []
+        try:
+            for i in range(0, len(segs), BATCH):
+                chunk = [s["text"] for s in segs[i:i + BATCH]]
+                res = deepl.request_deepl_translate(auth_key, chunk, src_lang, tgt_lang, is_pro)
+                translated.extend(_normalise_deepl_results(res))
+        except Exception as exc:
+            raise HTTPException(502, f"DeepL request failed: {exc}")
+        if len(translated) != len(segs):
+            raise HTTPException(502, f"DeepL returned {len(translated)} items for {len(segs)} segments")
+
+        for s, t in zip(segs, translated):
+            s["text"] = t
+        full_text = "\n".join(s["text"] for s in segs).strip()
+        if response_format == "srt":
+            return PlainTextResponse(_segments_to_srt(segs), media_type="text/plain")
+        if response_format == "vtt":
+            return PlainTextResponse(_segments_to_vtt(segs), media_type="text/vtt")
+        if response_format == "lrc":
+            return PlainTextResponse(_segments_to_lrc(segs), media_type="text/plain")
+        if response_format == "text":
+            return PlainTextResponse(full_text)
+        return {"text": full_text, "segments": segs}
 
     def run_api(whisper_inf, port=8000):
         global _whisper_inf
