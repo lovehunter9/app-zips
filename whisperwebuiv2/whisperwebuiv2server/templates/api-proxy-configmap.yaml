@@ -287,6 +287,8 @@ data:
         diarization_enable_offload: bool = Form(True),
         text_cleaning: bool = Form(True),
         segment_merging: bool = Form(True),
+        batched: bool = Form(None),
+        batch_size: int = Form(None),
     ):
         _DEFAULT_PREPEND_PUNCT = "\"" + chr(0x2018) + chr(0x201C) + chr(0x00BF) + "([{-"
         _DEFAULT_APPEND_PUNCT = "\"" + chr(0x2019) + "." + chr(0x3002) + "," + chr(0xFF0C) + "!" + chr(0xFF01) + "?" + chr(0xFF1F) + ":" + chr(0xFF1A) + chr(0x201D) + ")]}" + chr(0x3001)
@@ -395,10 +397,14 @@ data:
             if prefix:
                 kwargs["prefix"] = prefix
 
-            # Per-request post-processing toggles override the WebUI globals.
+            # Per-request runtime toggles override the WebUI globals.
             # ``None`` falls back to the global flag inside the engine patch.
             kwargs["_text_cleaning"] = bool(text_cleaning)
             kwargs["_segment_merging"] = bool(segment_merging)
+            if batched is not None:
+                kwargs["_batched"] = bool(batched)
+            if batch_size is not None:
+                kwargs["_batch_size"] = int(batch_size)
 
             with _lock:
                 _ensure_model_loaded(model, compute_type)
@@ -463,6 +469,8 @@ data:
         response_format: str = Form("json"),
         prompt: str = Form(None),
         temperature: str = Form("0,0.2,0.4,0.6,0.8,1.0"),
+        batched: bool = Form(None),
+        batch_size: int = Form(None),
     ):
         """OpenAI-compatible translation endpoint. Translates audio into English."""
         suffix = os.path.splitext(file.filename)[1] if file.filename else ".wav"
@@ -488,6 +496,11 @@ data:
             }
             if prompt:
                 kwargs["initial_prompt"] = prompt
+
+            if batched is not None:
+                kwargs["_batched"] = bool(batched)
+            if batch_size is not None:
+                kwargs["_batch_size"] = int(batch_size)
 
             with _lock:
                 _ensure_model_loaded(model)
@@ -532,13 +545,59 @@ data:
         logger.info(f"OpenAI-compatible API starting on port {port}")
         uvicorn.run(api_app, host="0.0.0.0", port=port, log_level="info")
 
-    # ── Engine-level monkey-patches (temperature fallback, auto prompt, post-processing) ──
+    # ── Engine-level monkey-patches (batched routing, temperature fallback, auto prompt, post-processing) ──
 
-    # User-controllable post-processing flags.  Controlled by the WebUI
-    # checkboxes (see ``_patch_gradio_ui``) or per-request via the API's
-    # ``text_cleaning`` / ``segment_merging`` form fields.  Both default ON.
+    # User-controllable runtime flags.  Controlled by the WebUI checkboxes
+    # (see ``_patch_gradio_ui``) or per-request via the API form fields.
+    # All three default ON; persisted to ``default_parameters.yaml`` under
+    # the ``_post_processing`` section so user choices survive Pod restarts.
     _text_cleaning_enabled = True
     _segment_merging_enabled = True
+    _batched_enabled = True
+
+    # Serialises every yaml read-modify-write inside this process so two
+    # Gradio change-callbacks (which run on Gradio's threadpool) can't
+    # interleave their ``open('w')`` -- ``load_yaml`` -- ``save_yaml``
+    # sequences against each other.  Without this, a rapid double-toggle
+    # was reproducibly causing one thread to ``load_yaml`` an empty file
+    # mid-truncate, get ``None`` back, then raise ``TypeError`` on
+    # ``params["_post_processing"] = ...`` and tear down the Gradio
+    # request handler (whose 500 also kicked the frontend WebSocket --
+    # which is why "Connection errored out" surfaces alongside the
+    # backend TypeError).  The lock only protects us against ourselves;
+    # upstream's ``cache_parameters`` (called from transcribe) writes
+    # the same file without sharing this lock, which is why every call
+    # site below ALSO does an explicit ``isinstance(params, dict)``
+    # bail-out -- best-effort defence against an external truncate
+    # racing our read.  When that bail-out fires, we simply skip this
+    # particular write; the next change event will retry.
+    _yaml_lock = threading.Lock()
+
+    # Default batch size for BatchedInferencePipeline.  16 is the value
+    # recommended in faster-whisper Discussion #1057 for GPU inference;
+    # callers can override per-request via the ``_batch_size`` kwarg or
+    # API form field.
+    _BATCHED_DEFAULT_BATCH_SIZE = 16
+
+    # Kwargs silently popped when routing to BatchedInferencePipeline.
+    # The Batched path either FORCES these internally or BYPASSES them
+    # entirely, so leaving them in kwargs would either be a no-op or
+    # raise a TypeError depending on faster-whisper version.  We strip
+    # them defensively and log at DEBUG so users can see in the logs that
+    # the yaml setting had no effect under Batched mode.
+    #
+    #   * condition_on_previous_text  -- forced False (chunks independent)
+    #   * prompt_reset_on_temperature -- moot without temperature fallback
+    #   * hallucination_silence_threshold -- needs in-chunk silences that
+    #     BatchedInferencePipeline's VAD has already cut out
+    #   * vad_filter / vad_parameters -- replaced by Batched VAD model
+    _BATCHED_DROPPED_KWARGS = frozenset({
+        "condition_on_previous_text",
+        "prompt_reset_on_temperature",
+        "hallucination_silence_threshold",
+        "vad_filter",
+        "vad_parameters",
+    })
 
     _TEMP_STEPS = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
 
@@ -724,27 +783,43 @@ data:
 
     def _patch_whisper_engine():
         """Monkey-patch WhisperModel.transcribe so it:
-          1. Builds a temperature fallback list from the single float WebUI passes
-          2. Auto-injects an initial_prompt when language is known but none was given
-          3. Optionally chains text-cleaning + short-segment merge as a streaming
-             generator pipeline.  Segments flow out one by one, so the
-             WebUI's progress bar updates naturally.
+          1. Optionally routes to BatchedInferencePipeline (WhisperX-style
+             VAD Cut & Merge with parallel batch inference) when the
+             ``_batched_enabled`` global / ``_batched`` kwarg is True.
+          2. Builds a temperature fallback list from the single float WebUI
+             passes -- BUFFERED path only.  BatchedInferencePipeline uses a
+             single temperature value with no fallback.
+          3. Auto-injects an initial_prompt when language is known but none
+             was given (both paths).
+          4. Optionally chains text-cleaning + short-segment merge as a
+             streaming generator pipeline (both paths).  Segments flow out
+             one by one, so the WebUI's progress bar updates naturally.
 
-        Each post-processing stage can be toggled independently:
+        Each runtime stage can be toggled independently:
 
+        * ``_batched`` (kwarg) or ``_batched_enabled`` (global, driven by
+          the WebUI checkbox): route to BatchedInferencePipeline for
+          WhisperX-style VAD chunking + parallel transcription.  Trades
+          temperature fallback / ``condition_on_previous_text`` /
+          ``hallucination_silence_threshold`` / ``vad_filter`` /
+          ``vad_parameters`` / ``prompt_reset_on_temperature`` (all
+          silently dropped under Batched -- see ``_BATCHED_DROPPED_KWARGS``)
+          for long-audio stability and ~3-5x throughput.
         * ``_text_cleaning`` (kwarg) or ``_text_cleaning_enabled`` (global,
           driven by the WebUI checkbox): per-segment dedup + CJK punctuation.
         * ``_segment_merging`` (kwarg) or ``_segment_merging_enabled``
-          (global): merge short / sentence-incomplete segments into the next
-          one, subject to the 30s / 300char hard caps.
+          (global): merge short / sentence-incomplete segments into the
+          next one, subject to the 30s / 300char hard caps.
 
         Per-call kwargs win over the globals when not ``None``.  When both
-        stages are disabled, raw faster-whisper segments are streamed
-        through unchanged.
+        post-processing stages are disabled, raw faster-whisper segments
+        are streamed through unchanged.
 
-        ``_skip_pipeline=True`` is an internal short-circuit (e.g. the API's
-        pre-pass language detection) that bypasses BOTH stages regardless of
-        the flags above.
+        ``_skip_pipeline=True`` is an internal short-circuit (e.g. the
+        API's pre-pass language detection) that bypasses BOTH the batched
+        routing AND post-processing regardless of the flags above -- the
+        cheap Buffered path is used so we don't pay the BatchedInferencePipeline
+        construction cost for a throwaway 30-second probe.
         """
         try:
             from faster_whisper import WhisperModel
@@ -752,25 +827,182 @@ data:
             logger.warning("Cannot import faster_whisper; skipping engine patch")
             return
 
+        try:
+            from faster_whisper import BatchedInferencePipeline
+            _has_batched = True
+        except ImportError:
+            logger.warning(
+                "faster_whisper.BatchedInferencePipeline unavailable in this "
+                "version; Batched mode will fall back to Buffered transparently"
+            )
+            BatchedInferencePipeline = None
+            _has_batched = False
+
         _orig_transcribe = WhisperModel.transcribe
+
+        # Single-slot cache for BatchedInferencePipeline.
+        #
+        # HISTORY: 1.0.16 first cut shipped a multi-entry dict cache
+        # keyed by ``id(model)``.  That LEAKED GPU memory and OOM'd on
+        # a 16GB GPU after ~5 transcriptions because:
+        #   1. Whisper-WebUI defaults ``WhisperParams.enable_offload``
+        #      to True, so ``self.offload()`` runs after every
+        #      transcription and does ``del self.model``.
+        #   2. The next transcription's ``update_model()`` then creates
+        #      a fresh ``WhisperModel`` -- new object, new ``id()``.
+        #   3. Our old dict cache HELD a strong reference to the prior
+        #      ``BatchedInferencePipeline``, which in turn held a
+        #      strong reference to the prior ``WhisperModel``.
+        #   4. ``del self.model`` therefore freed only one of two refs;
+        #      the model stayed alive in GPU memory.
+        #   5. ``torch.cuda.empty_cache()`` after ``del`` was a no-op
+        #      because the model was still referenced.
+        #   6. Each subsequent transcription added another ~3GB
+        #      large-v2 instance to GPU, accumulating until
+        #      ``cuMemoryAllocate failed res=2``.
+        #
+        # FIX: single-slot cache that EVICTS on model-id change and
+        # explicitly runs ``gc.collect()`` + ``torch.cuda.empty_cache()``
+        # to synchronously reclaim the old model's GPU memory BEFORE
+        # constructing the new pipeline.
+        #
+        # Cache-hit scenario (API flow, no offload between calls):
+        #   same ``id(model)`` across calls → reuse cached pipeline →
+        #   saves ~6s of Silero VAD warm-up per call.
+        #
+        # Cache-miss scenario (WebUI flow, offload after each call):
+        #   ``id(model)`` differs every time → evict + GC + create →
+        #   GPU footprint stays at 1 model + 1 pipeline.
+        _batched_cache = {}
+
+        def _get_or_create_batched(model):
+            key = id(model)
+
+            # Cache-hit fast path
+            if key in _batched_cache:
+                return _batched_cache[key]
+
+            # Cache-miss: evict any stale entry FIRST so the old
+            # pipeline's strong ref to the old model is dropped before
+            # we try to ``empty_cache``.  Without this ordering the
+            # ``empty_cache`` is a no-op because the model is still
+            # live via the cached pipeline.
+            if _batched_cache:
+                evicted_ids = list(_batched_cache.keys())
+                _batched_cache.clear()
+                try:
+                    import gc
+                    gc.collect()
+                    if _torch.cuda.is_available():
+                        _torch.cuda.empty_cache()
+                    logger.info(
+                        "BatchedInferencePipeline cache evicted (old "
+                        "ids=%s); ran gc + cuda.empty_cache to free GPU "
+                        "memory before constructing new pipeline",
+                        evicted_ids,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Cache eviction GC failed (non-fatal): %s", e,
+                    )
+
+            pipeline = BatchedInferencePipeline(model=model)
+            _batched_cache[key] = pipeline
+            logger.info(
+                "BatchedInferencePipeline created (model id=%s)", key,
+            )
+            return pipeline
 
         def _patched_transcribe(self, audio, **kwargs):
             skip_pipeline = kwargs.pop("_skip_pipeline", False)
             text_clean_override = kwargs.pop("_text_cleaning", None)
             seg_merge_override = kwargs.pop("_segment_merging", None)
+            batched_override = kwargs.pop("_batched", None)
+            batch_size_override = kwargs.pop("_batch_size", None)
 
-            temp = kwargs.get("temperature")
-            if temp is not None and isinstance(temp, (int, float)):
-                kwargs["temperature"] = _build_temp_fallback(temp)
-                logger.debug("Temperature fallback: %s -> %s", temp, kwargs["temperature"])
-
+            # Auto initial_prompt injection works for both paths
             if not kwargs.get("initial_prompt"):
                 lang = kwargs.get("language")
                 if lang and lang in _LANG_PROMPTS:
                     kwargs["initial_prompt"] = _LANG_PROMPTS[lang]
                     logger.debug("Auto-injected initial_prompt for language: %s", lang)
 
-            segments_gen, info = _orig_transcribe(self, audio, **kwargs)
+            # Route decision: explicit kwarg > persisted global.  The
+            # internal short-circuit (language detection) always uses the
+            # cheap Buffered path so we don't construct a
+            # BatchedInferencePipeline for a throwaway probe.
+            use_batched = (
+                (batched_override if batched_override is not None
+                 else _batched_enabled)
+                and _has_batched
+                and not skip_pipeline
+            )
+
+            if use_batched:
+                # Batched path: WhisperX-style VAD Cut & Merge + parallel.
+                # Collapse temperature list to scalar (Batched uses a
+                # single value, no fallback).  Save the original list so
+                # we can restore it if we fall back to Buffered below.
+                orig_temp = kwargs.get("temperature")
+                if isinstance(orig_temp, (list, tuple)) and orig_temp:
+                    kwargs["temperature"] = float(orig_temp[0])
+                    logger.debug(
+                        "Batched mode: collapsed temperature list %s to scalar %s",
+                        list(orig_temp), kwargs["temperature"],
+                    )
+
+                # Drop kwargs the Batched path silently ignores so we can
+                # log it instead of leaving the user wondering why a yaml
+                # param has no effect.  Preserve them for the Buffered
+                # fallback path below.
+                dropped = {}
+                for k in _BATCHED_DROPPED_KWARGS:
+                    if k in kwargs:
+                        dropped[k] = kwargs.pop(k)
+                if dropped:
+                    logger.debug(
+                        "Batched mode: silently dropped Buffered-only kwargs %s "
+                        "(forced/bypassed by BatchedInferencePipeline)",
+                        sorted(dropped.keys()),
+                    )
+
+                kwargs.setdefault(
+                    "batch_size",
+                    batch_size_override or _BATCHED_DEFAULT_BATCH_SIZE,
+                )
+
+                batched = _get_or_create_batched(self)
+                try:
+                    segments_gen, info = batched.transcribe(audio, **kwargs)
+                    logger.info(
+                        "Batched transcription started (batch_size=%s)",
+                        kwargs["batch_size"],
+                    )
+                except TypeError as e:
+                    # Defensive: if a particular faster-whisper version's
+                    # BatchedInferencePipeline rejects an unknown kwarg,
+                    # fall through to Buffered with the *original*
+                    # (un-dropped) kwargs so behaviour is at worst
+                    # equivalent to 1.0.15.
+                    logger.warning(
+                        "Batched transcription rejected kwargs (%s); "
+                        "falling back to Buffered for this call", e,
+                    )
+                    kwargs.update(dropped)
+                    if isinstance(orig_temp, (list, tuple)) and orig_temp:
+                        kwargs["temperature"] = orig_temp
+                    kwargs.pop("batch_size", None)
+                    segments_gen, info = _orig_transcribe(self, audio, **kwargs)
+            else:
+                # Buffered path: existing 1.0.15 behaviour, intact.
+                temp = kwargs.get("temperature")
+                if temp is not None and isinstance(temp, (int, float)):
+                    kwargs["temperature"] = _build_temp_fallback(temp)
+                    logger.debug(
+                        "Buffered mode: temperature fallback %s -> %s",
+                        temp, kwargs["temperature"],
+                    )
+                segments_gen, info = _orig_transcribe(self, audio, **kwargs)
 
             if skip_pipeline:
                 return segments_gen, info
@@ -794,25 +1026,50 @@ data:
 
         WhisperModel.transcribe = _patched_transcribe
         logger.info(
-            "Whisper engine patched: temperature fallback + auto prompt + "
-            "streaming post-processing (toggleable per stage)"
+            "Whisper engine patched: batched routing (%s) + temperature fallback + "
+            "auto prompt + streaming post-processing (all toggleable)",
+            "available" if _has_batched else "unavailable, Buffered-only",
         )
 
     # ── Gradio UI patch: post-processing checkboxes ──
 
     def _patch_gradio_ui():
-        """Inject two 'post-processing' checkboxes into the Advanced
-        Parameters section of each transcription tab (File / Youtube / Mic):
+        """Inject three runtime checkboxes into the Advanced Parameters
+        section of each transcription tab (File / Youtube / Mic):
 
-          * Text Cleaning   -- dedup + CJK punctuation normalization
-          * Segment Merging -- merge short/incomplete neighbouring segments
+          * Batched Inference -- WhisperX-style VAD Cut & Merge + parallel
+                                 batch transcription via
+                                 ``faster_whisper.BatchedInferencePipeline``.
+                                 Recommended for long audio (>10 min).
+          * Text Cleaning     -- dedup + CJK punctuation normalization
+          * Segment Merging   -- merge short/incomplete neighbouring segments
 
         Each checkbox writes to the matching module-level global AND
         persists the new value to ``default_parameters.yaml`` (see
         ``_persist_post_processing_state``), so user choices survive Pod
         restarts.  Must be called AFTER ``_load_post_processing_state``
         (so the initial checkbox values reflect the persisted state) and
-        BEFORE App(args)."""
+        BEFORE App(args).
+
+        UX note: when Batched is ON, some Advanced Parameters silently
+        have no effect (see ``_BATCHED_DROPPED_KWARGS``).  We intentionally
+        do NOT grey them out -- toggling Batched mid-session would require
+        re-rendering the whole panel, which Gradio doesn't make easy.
+        Instead the engine logs at DEBUG which kwargs were dropped so
+        users investigating "this setting did nothing" find the answer in
+        the logs.  Document this in the user-facing guide.
+
+        Persistence-after-refresh note: ``value=<bool>`` in a Gradio
+        component constructor is BAKED into the Blocks definition at
+        construction time and does NOT track the in-process global.
+        On browser refresh Gradio re-hydrates the page from the Blocks
+        initial state, so the checkbox would revert to the value that
+        was current AT SERVER STARTUP -- ignoring everything the user
+        changed since.  Gradio's documented workaround is to pass a
+        callable for ``value``; it gets called on every page load.
+        That's what the lambdas below are for: they let the checkbox's
+        initial state on a fresh browser reflect the yaml-persisted
+        global, not the snapshot taken at startup."""
         try:
             from modules.whisper.data_classes import WhisperParams
             import gradio as gr
@@ -825,30 +1082,80 @@ data:
         @classmethod
         def _patched_to_gradio(cls, defaults=None, only_advanced=True, **kwargs):
             if only_advanced:
+                # NOTE: ``value=lambda: <global>`` (not ``value=<global>``)
+                # is essential here -- see the docstring "Persistence-after-
+                # refresh note".  Without the callable wrapper, a browser
+                # refresh would silently revert the checkbox to whatever
+                # the yaml said AT SERVER STARTUP, discarding every toggle
+                # the user made since.
+                cb_batched = gr.Checkbox(
+                    label="Batched Inference (WhisperX-style)",
+                    value=lambda: _batched_enabled,
+                    info="Use BatchedInferencePipeline: cut audio by VAD, "
+                         "transcribe chunks in parallel. Recommended for "
+                         "long audio (>10 min). Silently disables: temperature "
+                         "fallback, condition_on_previous_text, vad_filter / "
+                         "vad_parameters, hallucination_silence_threshold, "
+                         "prompt_reset_on_temperature.",
+                )
                 cb_text = gr.Checkbox(
                     label="Text Cleaning",
-                    value=_text_cleaning_enabled,
+                    value=lambda: _text_cleaning_enabled,
                     info="Deduplicate phrase loops & normalize CJK punctuation",
                 )
                 cb_merge = gr.Checkbox(
                     label="Segment Merging",
-                    value=_segment_merging_enabled,
+                    value=lambda: _segment_merging_enabled,
                     info="Merge short or sentence-incomplete segments "
                          "(capped at 30s / 300 chars per merged segment)",
                 )
 
+                # NOTE: callbacks MUST NOT raise.  Any uncaught
+                # exception here propagates back through Gradio's
+                # request handler, which logs a 500 AND tears down the
+                # frontend's WebSocket connection ("Connection errored
+                # out" toast).  Defence in depth: the persist function
+                # is already non-raising, but a stray TypeError from
+                # ``_persist_post_processing_state`` (e.g. a regression
+                # in the future) would still break the WebUI without
+                # this outer try/except.
+                def _toggle_batched(v):
+                    global _batched_enabled
+                    try:
+                        _batched_enabled = bool(v)
+                        logger.info("Batched Inference toggled: %s", _batched_enabled)
+                        _persist_post_processing_state()
+                    except Exception as e:
+                        logger.warning(
+                            "Batched toggle callback failed: %s "
+                            "(state in-memory may still have updated)", e,
+                        )
+
                 def _toggle_text(v):
                     global _text_cleaning_enabled
-                    _text_cleaning_enabled = bool(v)
-                    logger.info("Text Cleaning toggled: %s", _text_cleaning_enabled)
-                    _persist_post_processing_state()
+                    try:
+                        _text_cleaning_enabled = bool(v)
+                        logger.info("Text Cleaning toggled: %s", _text_cleaning_enabled)
+                        _persist_post_processing_state()
+                    except Exception as e:
+                        logger.warning(
+                            "Text Cleaning toggle callback failed: %s "
+                            "(state in-memory may still have updated)", e,
+                        )
 
                 def _toggle_merge(v):
                     global _segment_merging_enabled
-                    _segment_merging_enabled = bool(v)
-                    logger.info("Segment Merging toggled: %s", _segment_merging_enabled)
-                    _persist_post_processing_state()
+                    try:
+                        _segment_merging_enabled = bool(v)
+                        logger.info("Segment Merging toggled: %s", _segment_merging_enabled)
+                        _persist_post_processing_state()
+                    except Exception as e:
+                        logger.warning(
+                            "Segment Merging toggle callback failed: %s "
+                            "(state in-memory may still have updated)", e,
+                        )
 
+                cb_batched.change(fn=_toggle_batched, inputs=[cb_batched])
                 cb_text.change(fn=_toggle_text, inputs=[cb_text])
                 cb_merge.change(fn=_toggle_merge, inputs=[cb_merge])
 
@@ -857,7 +1164,8 @@ data:
 
         WhisperParams.to_gradio_inputs = _patched_to_gradio
         logger.info(
-            "Gradio UI patched: Text Cleaning + Segment Merging checkboxes added"
+            "Gradio UI patched: Batched + Text Cleaning + Segment Merging "
+            "checkboxes added"
         )
 
     _PATCH_VERSION = 1
@@ -889,124 +1197,193 @@ data:
             logger.warning("Cannot import Whisper-WebUI paths; skipping config patch")
             return
 
-        try:
-            params = load_yaml(DEFAULT_PARAMETERS_CONFIG_PATH)
-        except Exception:
-            logger.warning("Cannot load default_parameters.yaml; skipping config patch")
-            return
+        with _yaml_lock:
+            try:
+                params = load_yaml(DEFAULT_PARAMETERS_CONFIG_PATH)
+            except Exception:
+                logger.warning("Cannot load default_parameters.yaml; skipping config patch")
+                return
+            if not isinstance(params, dict):
+                logger.warning(
+                    "load_yaml returned %s instead of dict during config "
+                    "patch; skipping (will retry on next pod restart)",
+                    type(params).__name__,
+                )
+                return
 
-        current_ver = params.get("_patch_version", 0)
-        if current_ver >= _PATCH_VERSION:
+            current_ver = params.get("_patch_version", 0)
+            if current_ver >= _PATCH_VERSION:
+                logger.info(
+                    "Config patch version %s is current (>= %s), skipping",
+                    current_ver, _PATCH_VERSION,
+                )
+                return
+
             logger.info(
-                "Config patch version %s is current (>= %s), skipping",
-                current_ver, _PATCH_VERSION,
+                "Upgrading config patch: %s -> %s", current_ver, _PATCH_VERSION
             )
-            return
 
-        logger.info(
-            "Upgrading config patch: %s -> %s", current_ver, _PATCH_VERSION
-        )
+            for section, overrides in _QUALITY_OVERRIDES.items():
+                if section not in params:
+                    params[section] = {}
+                for key, value in overrides.items():
+                    params[section][key] = value
 
-        for section, overrides in _QUALITY_OVERRIDES.items():
-            if section not in params:
-                params[section] = {}
-            for key, value in overrides.items():
-                params[section][key] = value
+            params["_patch_version"] = _PATCH_VERSION
 
-        params["_patch_version"] = _PATCH_VERSION
+            try:
+                save_yaml(params, DEFAULT_PARAMETERS_CONFIG_PATH)
+                logger.info("Config patched to version %s", _PATCH_VERSION)
+            except Exception as e:
+                logger.warning(f"Failed to save patched config: {e}")
 
-        try:
-            save_yaml(params, DEFAULT_PARAMETERS_CONFIG_PATH)
-            logger.info("Config patched to version %s", _PATCH_VERSION)
-        except Exception as e:
-            logger.warning(f"Failed to save patched config: {e}")
-
-    # ── Persistence for post-processing checkbox state ──
+    # ── Persistence for runtime checkbox state ──
     #
-    # ``_text_cleaning_enabled`` / ``_segment_merging_enabled`` are mutated by
-    # the WebUI checkboxes (see ``_patch_gradio_ui``).  Without persistence
-    # those mutations would only live in-process and reset to the code
-    # defaults on every Pod restart, which is a surprising UX.
+    # ``_text_cleaning_enabled`` / ``_segment_merging_enabled`` /
+    # ``_batched_enabled`` are mutated by the WebUI checkboxes (see
+    # ``_patch_gradio_ui``).  Without persistence those mutations would
+    # only live in-process and reset to the code defaults on every Pod
+    # restart, which is a surprising UX.
     #
-    # The two helpers below mirror the conventions used by ``_patch_webui_config``:
+    # The two helpers below mirror the conventions used by
+    # ``_patch_webui_config``:
     #   * read on startup → restore the user's last choice
     #   * write on every checkbox change → outlive Pod restarts
     # The state is stored in its own top-level ``_post_processing`` section
     # in ``default_parameters.yaml`` so we don't pollute Whisper-WebUI's
     # native schema and don't conflict with ``_QUALITY_OVERRIDES``.
+    # (The section name is historical -- it now houses ``batched`` too.)
 
     def _load_post_processing_state():
-        """Restore Text Cleaning / Segment Merging checkbox state from
-        ``default_parameters.yaml``.
+        """Restore Batched / Text Cleaning / Segment Merging checkbox state
+        from ``default_parameters.yaml``.
 
-        On FIRST install (``_post_processing`` section absent) this function
-        seeds the section with the code defaults so the keys are visible /
-        editable in the yaml from day one — symmetric with how
-        ``_patch_webui_config`` seeds the six quality params.  Subsequent
-        startups become read-only and respect whatever the user set.
+        Three paths handled here:
 
-        Falls back to the code defaults (both True) when the file is
-        unreadable.  Individual keys missing or having a non-bool value are
-        also tolerated (the corresponding global keeps its default).
+        * FIRST install (section absent): seed all three keys with code
+          defaults so they're visible / editable in the yaml from day one.
+        * UPGRADE from 1.0.15 (section exists but missing ``batched``):
+          silently add the missing key with the code default
+          (``_batched_enabled = True``) and save back to yaml.  Users
+          upgrading inherit Batched=ON without manual intervention.
+        * NORMAL restart (all keys present): apply persisted values to
+          the in-process globals, no writes.
+
+        Falls back to code defaults (all True) when the file is
+        unreadable.  Individual keys having a non-bool value are
+        tolerated (the corresponding global keeps its default).
         """
-        global _text_cleaning_enabled, _segment_merging_enabled
+        global _text_cleaning_enabled, _segment_merging_enabled, _batched_enabled
         try:
             from modules.utils.paths import DEFAULT_PARAMETERS_CONFIG_PATH
             from modules.utils.files_manager import load_yaml, save_yaml
         except ImportError:
             logger.warning(
                 "Cannot import Whisper-WebUI paths; "
-                "post-processing state will use code defaults (both True)"
+                "post-processing state will use code defaults (all True)"
             )
             return
-        try:
-            params = load_yaml(DEFAULT_PARAMETERS_CONFIG_PATH)
-        except Exception as e:
-            logger.warning(
-                "Cannot load default_parameters.yaml for post-proc state: %s; "
-                "using code defaults", e,
-            )
-            return
-
-        pp = params.get("_post_processing")
-
-        if pp is None:
-            # First-install path: seed the section so it's visible to admins
-            # inspecting the yaml.  Defaults match the code-level globals.
-            params["_post_processing"] = {
-                "text_cleaning": _text_cleaning_enabled,
-                "segment_merging": _segment_merging_enabled,
-            }
+        with _yaml_lock:
             try:
-                save_yaml(params, DEFAULT_PARAMETERS_CONFIG_PATH)
-                logger.info(
-                    "Post-processing section absent; seeded defaults to yaml: "
-                    "text_cleaning=%s, segment_merging=%s",
-                    _text_cleaning_enabled, _segment_merging_enabled,
-                )
+                params = load_yaml(DEFAULT_PARAMETERS_CONFIG_PATH)
             except Exception as e:
                 logger.warning(
-                    "Failed to seed _post_processing defaults to yaml: %s; "
-                    "code defaults still in effect for this run", e,
+                    "Cannot load default_parameters.yaml for post-proc state: %s; "
+                    "using code defaults", e,
                 )
-            return
+                return
+            if not isinstance(params, dict):
+                logger.warning(
+                    "load_yaml returned %s instead of dict at startup; "
+                    "using code defaults (all True) for this run",
+                    type(params).__name__,
+                )
+                return
 
-        tc = pp.get("text_cleaning")
-        sm = pp.get("segment_merging")
-        if isinstance(tc, bool):
-            _text_cleaning_enabled = tc
-        if isinstance(sm, bool):
-            _segment_merging_enabled = sm
+            pp = params.get("_post_processing")
+
+            if pp is None:
+                # First-install path: seed the section so it's visible
+                # to admins inspecting the yaml.  Defaults match the
+                # code-level globals.
+                params["_post_processing"] = {
+                    "batched": _batched_enabled,
+                    "text_cleaning": _text_cleaning_enabled,
+                    "segment_merging": _segment_merging_enabled,
+                }
+                try:
+                    save_yaml(params, DEFAULT_PARAMETERS_CONFIG_PATH)
+                    logger.info(
+                        "Post-processing section absent; seeded defaults to yaml: "
+                        "batched=%s, text_cleaning=%s, segment_merging=%s",
+                        _batched_enabled, _text_cleaning_enabled,
+                        _segment_merging_enabled,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Failed to seed _post_processing defaults to yaml: %s; "
+                        "code defaults still in effect for this run", e,
+                    )
+                return
+
+            # Apply persisted values to globals
+            b = pp.get("batched")
+            tc = pp.get("text_cleaning")
+            sm = pp.get("segment_merging")
+            if isinstance(b, bool):
+                _batched_enabled = b
+            if isinstance(tc, bool):
+                _text_cleaning_enabled = tc
+            if isinstance(sm, bool):
+                _segment_merging_enabled = sm
+
+            # Upgrade path: section exists but is missing a key we now
+            # manage.  E.g. pre-1.0.16 yaml lacks ``batched`` -- seed
+            # it with the current default so the yaml accurately
+            # reflects the runtime state, and on the next checkbox
+            # toggle the whole dict is consistent.
+            missing = []
+            if "batched" not in pp:
+                pp["batched"] = _batched_enabled
+                missing.append(f"batched={_batched_enabled}")
+            if "text_cleaning" not in pp:
+                pp["text_cleaning"] = _text_cleaning_enabled
+                missing.append(f"text_cleaning={_text_cleaning_enabled}")
+            if "segment_merging" not in pp:
+                pp["segment_merging"] = _segment_merging_enabled
+                missing.append(f"segment_merging={_segment_merging_enabled}")
+            if missing:
+                try:
+                    save_yaml(params, DEFAULT_PARAMETERS_CONFIG_PATH)
+                    logger.info(
+                        "Post-processing schema migrated: seeded missing keys %s",
+                        ", ".join(missing),
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Failed to seed missing _post_processing keys: %s; "
+                        "code defaults still in effect for this run", e,
+                    )
+
         logger.info(
-            "Post-processing state loaded: text_cleaning=%s, segment_merging=%s",
-            _text_cleaning_enabled, _segment_merging_enabled,
+            "Post-processing state loaded: batched=%s, text_cleaning=%s, "
+            "segment_merging=%s",
+            _batched_enabled, _text_cleaning_enabled, _segment_merging_enabled,
         )
 
     def _persist_post_processing_state():
-        """Write current Text Cleaning / Segment Merging globals to
-        ``default_parameters.yaml``.  Called from the checkbox change
+        """Write current Batched / Text Cleaning / Segment Merging globals
+        to ``default_parameters.yaml``.  Called from the checkbox change
         handlers; never raises, just warns on failure so a transient
         write error never breaks the WebUI.
+
+        Concurrency-safe via ``_yaml_lock``: rapid double-toggles used
+        to trigger ``load_yaml`` returning ``None`` mid-truncate from a
+        sibling persist call.  Now serialised against itself.  Still
+        defends ``isinstance(params, dict)`` so an external truncate
+        (e.g. upstream's ``cache_parameters`` running concurrently with
+        a transcribe) just causes us to skip this write rather than
+        clobber the yaml with a single-key dict.
         """
         try:
             from modules.utils.paths import DEFAULT_PARAMETERS_CONFIG_PATH
@@ -1017,26 +1394,299 @@ data:
                 "post-processing state NOT persisted (in-memory only)"
             )
             return
+        with _yaml_lock:
+            try:
+                params = load_yaml(DEFAULT_PARAMETERS_CONFIG_PATH)
+            except Exception as e:
+                logger.warning(
+                    "Cannot load default_parameters.yaml: %s; "
+                    "post-processing state NOT persisted", e,
+                )
+                return
+            if not isinstance(params, dict):
+                logger.warning(
+                    "load_yaml returned %s instead of dict (likely racing "
+                    "with another writer); skipping this persist, next "
+                    "change event will retry",
+                    type(params).__name__,
+                )
+                return
+            params["_post_processing"] = {
+                "batched": _batched_enabled,
+                "text_cleaning": _text_cleaning_enabled,
+                "segment_merging": _segment_merging_enabled,
+            }
+            try:
+                save_yaml(params, DEFAULT_PARAMETERS_CONFIG_PATH)
+                logger.info(
+                    "Post-processing state persisted: batched=%s, "
+                    "text_cleaning=%s, segment_merging=%s",
+                    _batched_enabled, _text_cleaning_enabled,
+                    _segment_merging_enabled,
+                )
+            except Exception as e:
+                logger.warning("Failed to persist post-processing state: %s", e)
+
+    # ── Browser-refresh persistence: rehydrate UI from yaml on every page load ──
+    #
+    # The Gradio limitation: ``gr.Xxx(value=<literal>)`` bakes the value
+    # into the Blocks structure at construction time.  Browser refresh
+    # makes Gradio re-send those baked literals, so the UI reverts to
+    # whatever yaml said AT App.__init__ time.  Vanilla Whisper-WebUI has
+    # this limitation too -- ``cache_parameters`` writes user choices to
+    # yaml on every transcription, but those writes don't surface until
+    # the next Pod restart, which is surprising to anyone who expects
+    # "yaml is the live source of truth".
+    #
+    # Fix: register a ``demo.load(...)`` event.  Gradio fires this on
+    # every page load (including browser refresh) and lets us push fresh
+    # ``gr.update(value=...)`` payloads to the components.  We mirror
+    # ``App.create_pipeline_inputs``'s construction order -- coupling
+    # us to upstream's layout, but giving us a single hook for the
+    # entire pipeline panel (Model / Lang / Format / Advanced / VAD /
+    # Diarization / BGM) instead of patching each ``to_gradio_inputs``
+    # individually.
+    #
+    # NOTE: per-component change-callbacks are intentionally NOT added
+    # here.  Vanilla persists via ``cache_parameters`` on transcribe;
+    # any UI tweaks the user makes BEFORE clicking transcribe are
+    # ephemeral by design, and adding a write-on-change handler to
+    # every component would risk write-storms for sliders being dragged.
+
+    def _patch_app_persistence():
+        """Patch App.create_pipeline_inputs so that, immediately after
+        the original returns its component list, we register a
+        ``self.app.load(...)`` event that re-reads
+        ``default_parameters.yaml`` on every page load and pushes the
+        fresh values onto the same component list.
+
+        Must run AFTER ``_patch_gradio_ui`` (so our 3 checkboxes are in
+        place -- though they're not in this load handler's outputs
+        because they already use ``value=lambda: <global>`` for the
+        same effect) and BEFORE ``App(args)`` (so the monkey-patch is
+        active when ``App.launch`` calls ``create_pipeline_inputs``).
+
+        Coupling note: the value list MUST stay in the same order as
+        ``create_pipeline_inputs`` builds its outputs (see
+        https://github.com/jhj0517/Whisper-WebUI/blob/master/app.py and
+        each ``to_gradio_inputs`` classmethod in data_classes.py).  If
+        upstream re-orders a field, the load handler will silently
+        misalign value-to-component pairs.  The length check below
+        catches a total mismatch and falls back to a pass-through
+        (``gr.update()`` no-op) so a broken refresh degrades to "stale
+        values" instead of "wrong values".
+        """
         try:
-            params = load_yaml(DEFAULT_PARAMETERS_CONFIG_PATH)
-        except Exception as e:
+            from app import App
+            from modules.utils.paths import DEFAULT_PARAMETERS_CONFIG_PATH
+            from modules.utils.files_manager import load_yaml
+            from modules.utils.constants import AUTOMATIC_DETECTION
+            import gradio as gr
+        except ImportError:
             logger.warning(
-                "Cannot load default_parameters.yaml: %s; "
-                "post-processing state NOT persisted", e,
+                "Cannot import App / paths / gradio; skipping refresh-"
+                "persistence patch (browser refresh will revert UI to "
+                "construction-time defaults)"
             )
             return
-        params["_post_processing"] = {
-            "text_cleaning": _text_cleaning_enabled,
-            "segment_merging": _segment_merging_enabled,
-        }
-        try:
-            save_yaml(params, DEFAULT_PARAMETERS_CONFIG_PATH)
-            logger.info(
-                "Post-processing state persisted: text_cleaning=%s, segment_merging=%s",
-                _text_cleaning_enabled, _segment_merging_enabled,
+
+        _orig_create_pipeline_inputs = App.create_pipeline_inputs
+
+        def _build_values_from_yaml():
+            """Mirror create_pipeline_inputs construction order.  Returns
+            a list of ``gr.update(value=...)`` payloads aligned with
+            pipeline_inputs + [dd_file_format, cb_timestamp]; ``None``
+            in yaml becomes ``gr.update()`` (no-op) so we don't clobber
+            a usable default with ``None``.
+
+            Holds ``_yaml_lock`` only for the actual ``load_yaml`` call --
+            we don't want to block transcribe-time persists for the
+            duration of building a 50-element value list, and a stale
+            read here is fine (the next refresh re-reads).
+            """
+            with _yaml_lock:
+                try:
+                    params = load_yaml(DEFAULT_PARAMETERS_CONFIG_PATH)
+                except Exception as e:
+                    logger.warning("Page load: failed to reload yaml: %s", e)
+                    return None
+            if not isinstance(params, dict):
+                logger.warning(
+                    "Page load: yaml load returned %s instead of dict "
+                    "(likely racing with cache_parameters write); "
+                    "passing through no-op so components keep their "
+                    "construction-time values",
+                    type(params).__name__,
+                )
+                return None
+
+            whisper_p = params.get("whisper", {}) or {}
+            vad_p = params.get("vad", {}) or {}
+            diar_p = params.get("diarization", {}) or {}
+            uvr_p = params.get("bgm_separation", {}) or {}
+
+            # Language: yaml stores AUTOMATIC_DETECTION.unwrap() as a
+            # plain string; the UI dropdown uses the sentinel object.
+            lang_yaml = whisper_p.get("lang")
+            try:
+                auto_str = AUTOMATIC_DETECTION.unwrap()
+            except Exception:
+                auto_str = "Automatic Detection"
+            if lang_yaml == auto_str:
+                lang_val = AUTOMATIC_DETECTION
+            else:
+                lang_val = lang_yaml
+
+            values = [
+                whisper_p.get("model_size"),
+                lang_val,
+                whisper_p.get("is_translate"),
+            ]
+
+            # WhisperParams.to_gradio_inputs(only_advanced=True) order
+            # (faster_whisper branch -- our deployment):
+            #   beam_size, log_prob_threshold, no_speech_threshold,
+            #   compute_type, best_of, patience,
+            #   condition_on_previous_text, prompt_reset_on_temperature,
+            #   initial_prompt, temperature, compression_ratio_threshold,
+            #   length_penalty, repetition_penalty, no_repeat_ngram_size,
+            #   prefix, suppress_blank, suppress_tokens,
+            #   max_initial_timestamp, word_timestamps,
+            #   prepend_punctuations, append_punctuations,
+            #   max_new_tokens, chunk_length,
+            #   hallucination_silence_threshold, hotwords,
+            #   language_detection_threshold, language_detection_segments,
+            #   batch_size (insanely_fast_whisper, invisible for faster),
+            #   enable_offload
+            values += [
+                whisper_p.get("beam_size"),
+                whisper_p.get("log_prob_threshold"),
+                whisper_p.get("no_speech_threshold"),
+                whisper_p.get("compute_type"),
+                whisper_p.get("best_of"),
+                whisper_p.get("patience"),
+                whisper_p.get("condition_on_previous_text"),
+                whisper_p.get("prompt_reset_on_temperature"),
+                whisper_p.get("initial_prompt"),
+                whisper_p.get("temperature"),
+                whisper_p.get("compression_ratio_threshold"),
+                whisper_p.get("length_penalty"),
+                whisper_p.get("repetition_penalty"),
+                whisper_p.get("no_repeat_ngram_size"),
+                whisper_p.get("prefix"),
+                whisper_p.get("suppress_blank"),
+                whisper_p.get("suppress_tokens"),
+                whisper_p.get("max_initial_timestamp"),
+                whisper_p.get("word_timestamps"),
+                whisper_p.get("prepend_punctuations"),
+                whisper_p.get("append_punctuations"),
+                whisper_p.get("max_new_tokens"),
+                whisper_p.get("chunk_length"),
+                whisper_p.get("hallucination_silence_threshold"),
+                whisper_p.get("hotwords"),
+                whisper_p.get("language_detection_threshold"),
+                whisper_p.get("language_detection_segments"),
+                whisper_p.get("batch_size"),
+                whisper_p.get("enable_offload"),
+            ]
+
+            # VadParams.to_gradio_inputs order
+            values += [
+                vad_p.get("vad_filter"),
+                vad_p.get("threshold"),
+                vad_p.get("min_speech_duration_ms"),
+                vad_p.get("max_speech_duration_s"),
+                vad_p.get("min_silence_duration_ms"),
+                vad_p.get("speech_pad_ms"),
+            ]
+
+            # DiarizationParams.to_gradio_inputs order
+            # NOTE: upstream reads ``defaults.get("device", device)`` for
+            # the Device dropdown but stores ``diarization_device`` in
+            # yaml -- a known upstream quirk.  We mirror the behaviour:
+            # ``device`` key absent → ``None`` → ``gr.update()`` no-op,
+            # leaving the construction-time auto-detected device intact.
+            values += [
+                diar_p.get("is_diarize"),
+                diar_p.get("device"),
+                diar_p.get("hf_token"),
+                diar_p.get("enable_offload"),
+            ]
+
+            # BGMSeparationParams.to_gradio_input order (same "device"
+            # quirk as diarization).
+            values += [
+                uvr_p.get("is_separate_bgm"),
+                uvr_p.get("uvr_model_size"),
+                uvr_p.get("device"),
+                uvr_p.get("segment_size"),
+                uvr_p.get("save_file"),
+                uvr_p.get("enable_offload"),
+            ]
+
+            # Trailing: dd_file_format, cb_timestamp (created outside
+            # the Advanced accordion in create_pipeline_inputs).
+            values += [
+                whisper_p.get("file_format"),
+                whisper_p.get("add_timestamp"),
+            ]
+
+            return [
+                gr.update(value=v) if v is not None else gr.update()
+                for v in values
+            ]
+
+        def _patched_create_pipeline_inputs(self):
+            pipeline_inputs, dd_file_format, cb_timestamp = (
+                _orig_create_pipeline_inputs(self)
             )
-        except Exception as e:
-            logger.warning("Failed to persist post-processing state: %s", e)
+
+            outputs = list(pipeline_inputs) + [dd_file_format, cb_timestamp]
+
+            def _reload():
+                # Outer try/except is the LAST line of defence: if
+                # anything in here raises, Gradio renders every output
+                # component as a red "错误" / "Error" badge AND drops the
+                # frontend WebSocket connection ("Connection errored
+                # out" toast), forcing the user into a full reload that
+                # often loops because demo.load fires again on reload.
+                # Returning a list of no-ops is always safe.
+                try:
+                    v = _build_values_from_yaml()
+                    if v is None:
+                        return [gr.update() for _ in outputs]
+                    if len(v) != len(outputs):
+                        logger.warning(
+                            "Page-load refresh: yaml-values count (%d) does "
+                            "not match outputs count (%d); skipping to avoid "
+                            "value-to-component misalignment.  This usually "
+                            "means upstream re-ordered to_gradio_inputs; check "
+                            "data_classes.py against the order documented in "
+                            "_patch_app_persistence.",
+                            len(v), len(outputs),
+                        )
+                        return [gr.update() for _ in outputs]
+                    return v
+                except Exception as e:
+                    logger.exception(
+                        "Page-load refresh callback crashed: %s; "
+                        "returning no-ops so UI keeps construction-time values",
+                        e,
+                    )
+                    return [gr.update() for _ in outputs]
+
+            self.app.load(fn=_reload, outputs=outputs)
+            logger.info(
+                "Registered page-load refresh for %d pipeline components",
+                len(outputs),
+            )
+            return pipeline_inputs, dd_file_format, cb_timestamp
+
+        App.create_pipeline_inputs = _patched_create_pipeline_inputs
+        logger.info(
+            "App persistence patched: demo.load() will rehydrate UI from "
+            "yaml on every browser refresh"
+        )
 
     if __name__ == "__main__":
         from app import App, parser as app_parser
@@ -1047,6 +1697,7 @@ data:
         _load_post_processing_state()
         _patch_whisper_engine()
         _patch_gradio_ui()
+        _patch_app_persistence()
 
         app_instance = App(args)
 
