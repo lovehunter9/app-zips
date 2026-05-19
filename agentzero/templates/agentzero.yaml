@@ -40,21 +40,6 @@ spec:
             - name: agentzero-data
               mountPath: /a0/usr
               subPath: usr
-{{/*            - name: agentzero-data*/}}
-{{/*              mountPath: /a0/memory*/}}
-{{/*              subPath: memory*/}}
-{{/*            - name: agentzero-data*/}}
-{{/*              mountPath: /a0/knowledge*/}}
-{{/*              subPath: knowledge*/}}
-{{/*            - name: agentzero-data*/}}
-{{/*              mountPath: /a0/instruments*/}}
-{{/*              subPath: instruments*/}}
-{{/*            - name: agentzero-data*/}}
-{{/*              mountPath: /a0/prompts*/}}
-{{/*              subPath: prompts*/}}
-{{/*            - name: agentzero-data*/}}
-{{/*              mountPath: /a0/logs*/}}
-{{/*              subPath: logs*/}}
           livenessProbe:
             httpGet:
               path: /health
@@ -75,15 +60,7 @@ spec:
         - name: agentzero-data
           hostPath:
             type: DirectoryOrCreate
-                {{- if .Values.sysVersion }}
-                  {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
-            path: '{{ .Values.userspace.appCache }}'
-                  {{- else }}
-            path: '{{ .Values.userspace.appCache }}/agentzero'
-                  {{- end }}
-                {{- else }}
-            path: '{{ .Values.userspace.appCache }}/agentzero'
-                {{- end }}
+            path: '{{ .Values.userspace.appData }}'
 
 ---
 apiVersion: v1
