@@ -1,0 +1,124 @@
+olaresManifest.version: '0.11.0'
+olaresManifest.type: app
+metadata:
+  name: librespeed
+  description: No Flash, No Java, No Websocket, No Bullshit. Self-hosted HTML5 speed test.
+  icon: https://app.cdn.olares.com/appstore/default/defaulticon.webp
+  appid: librespeed
+  version: '1.0.0'
+  title: LibreSpeed
+  categories:
+  - Productivity_v112
+  - Utilities
+permission:
+  appData: true
+  userData:
+  - Home
+spec:
+  versionName: '6.1.0'
+  fullDescription: |
+    LibreSpeed is a very lightweight self-hosted speed test implemented in JavaScript,
+    using XMLHttpRequest and Web Workers. No Flash, No Java, No Websocket, No Bullshit.
+
+    Features:
+    - Download / Upload / Ping / Jitter measurement
+    - IP / ISP / distance lookup (offline GeoIP DB)
+    - Telemetry persisted in PostgreSQL; results can be shared as a permalink/image
+    - Dual mode: this Olares acts as the local test point AND lets you add more
+      remote test points via an editable, persistent servers.json
+    - Modern frontend enabled by default; classic frontend still available via `?design=old`
+    - Mobile friendly, works in all modern browsers (Chrome, Firefox, Safari, Edge, IE11)
+
+    This Olares port runs LibreSpeed in `dual` mode on port 8080 with telemetry,
+    ID obfuscation and offline ISP lookup enabled. The `speedtest_users` table is
+    created automatically on first install via an init container.
+
+    Editable / persistent configuration:
+    - servers.json: on first install, a default file with the local server (and a
+      placeholder remote entry) is copied to `appData/librespeed/servers.json`.
+      Edit it in the Files app or via SSH to add real remote test points; the file
+      survives pod restarts and helm upgrades.
+  developer: Federico Dossena (adolfintel)
+  website: https://librespeed.org/
+  submitter: Olares
+  locale:
+  - en-US
+  - zh-CN
+  requiredMemory: 384Mi
+  limitedMemory: 1.5Gi
+  requiredDisk: 128Mi
+  limitedDisk: 1Gi
+  requiredCpu: 0.2
+  limitedCpu: 1.5
+  doc: https://github.com/librespeed/speedtest
+  license:
+  - text: LGPL-3.0
+    url: https://github.com/librespeed/speedtest/blob/master/LICENSE
+  supportArch:
+  - amd64
+  - arm64
+options:
+  dependencies:
+  - name: olares
+    type: system
+    version: '>=1.12.4-0'
+entrances:
+- authLevel: internal
+  name: librespeed
+  port: 8080
+  host: librespeedingress
+  title: LibreSpeed
+  icon: https://app.cdn.olares.com/appstore/default/defaulticon.webp
+  openMethod: window
+middleware:
+  postgres:
+    username: librespeed
+    databases:
+      - name: librespeeddb
+        distributed: false
+envs:
+  - envName: MODE
+    type: string
+    required: false
+    editable: true
+    applyOnChange: true
+    default: "dual"
+    description: "LibreSpeed run mode. 'dual' (recommended) = this Olares is both the local test point AND the UI for picking remote test points listed in servers.json. 'standalone' = local test point only, ignore servers.json. 'frontend' = no local backend; ALL tests go to remote servers listed in servers.json (remove the 'Local' entry from servers.json or it will fail). 'backend' = no UI; this container only exposes PHP endpoints so OTHER LibreSpeed instances can use it as a remote test point — opening the app entrance in this mode shows nothing useful."
+    options:
+      - title: "Dual — local test point + remote servers (default, recommended)"
+        value: "dual"
+      - title: "Standalone — local test point only"
+        value: "standalone"
+      - title: "Frontend — UI only, all tests go to remote servers"
+        value: "frontend"
+      - title: "Backend — no UI, expose this Olares as a remote test point for others"
+        value: "backend"
+  - envName: TELEMETRY
+    type: bool
+    required: false
+    editable: true
+    applyOnChange: true
+    default: "true"
+    description: "Persist every test result to the bundled PostgreSQL database. Enables result-sharing (permalink/image) and the password-protected stats page at /results/stats.php. Has no effect in 'backend' mode (no UI to record from)."
+  - envName: PASSWORD
+    type: password
+    required: false
+    editable: true
+    applyOnChange: true
+    default: ""
+    description: "Password for the /results/stats.php page. Leave empty (default) to disable the stats UI altogether (recommended unless you actually want to review history). Minimum 6 characters when set."
+    regex: '^$|^[\w\-!@#$%^&*()+={}\[\]:,.?~]{6,}$'
+  - envName: GDPR_EMAIL
+    type: email
+    required: false
+    editable: true
+    applyOnChange: true
+    default: ""
+    description: "Email shown in the privacy policy for GDPR data-deletion requests. Leave empty if you don't publicly expose this instance."
+  - envName: IPINFO_APIKEY
+    type: password
+    required: false
+    editable: true
+    applyOnChange: true
+    default: ""
+    description: "Optional ipinfo.io API token. Without it, only the bundled offline GeoIP database is used (city, ISP). With it, the result page also shows the geographic distance to the test point. Get a free token at https://ipinfo.io/signup."

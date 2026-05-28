@@ -5,13 +5,17 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="e9836655-cb5c-456b-aef7-0ca255338318" name="Changes" comment="">
+      <change afterPath="$PROJECT_DIR$/librespeed/.helmignore" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/librespeed/Chart.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/librespeed/OlaresManifest.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/librespeed/i18n/en-US/OlaresManifest.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/librespeed/i18n/zh-CN/OlaresManifest.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/librespeed/owners" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/librespeed/templates/configmap.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/librespeed/templates/ingress.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/librespeed/templates/librespeed.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/librespeed/values.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/radicale/Chart.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/radicale/Chart.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/radicale/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/radicale/OlaresManifest.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/radicale/i18n/en-US/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/radicale/i18n/en-US/OlaresManifest.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/radicale/i18n/zh-CN/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/radicale/i18n/zh-CN/OlaresManifest.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/radicale/owners" beforeDir="false" afterPath="$PROJECT_DIR$/radicale/owners" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/radicale/templates/all.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/radicale/templates/all.yaml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
