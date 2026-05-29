@@ -26,7 +26,6 @@ spec:
     - Telemetry persisted in PostgreSQL; results can be shared as a permalink/image
     - Dual mode: this Olares acts as the local test point AND lets you add more
       remote test points via an editable, persistent servers.json
-    - Modern frontend enabled by default; classic frontend still available via `?design=old`
     - Mobile friendly, works in all modern browsers (Chrome, Firefox, Safari, Edge, IE11)
 
     This Olares port runs LibreSpeed in `dual` mode on port 8080 with telemetry,
@@ -34,9 +33,9 @@ spec:
     created automatically on first install via an init container.
 
     Editable / persistent configuration:
-    - servers.json: on first install, a default file with the local server (and a
-      placeholder remote entry) is copied to `appData/librespeed/servers.json`.
-      Edit it in the Files app or via SSH to add real remote test points; the file
+    - servers.json: on first install, a default file with the local server and two
+      verified public remote test points is copied to `appData/librespeed/servers.json`.
+      Edit it in the Files app or via SSH to add or remove test points; the file
       survives pod restarts and helm upgrades.
   developer: Federico Dossena (adolfintel)
   website: https://librespeed.org/
@@ -49,7 +48,7 @@ spec:
   requiredDisk: 128Mi
   limitedDisk: 1Gi
   requiredCpu: 0.2
-  limitedCpu: 1.5
+  limitedCpu: 2.0
   doc: https://github.com/librespeed/speedtest
   license:
   - text: LGPL-3.0
@@ -83,7 +82,7 @@ envs:
     editable: true
     applyOnChange: true
     default: "dual"
-    description: "LibreSpeed run mode. 'dual' (recommended) = this Olares is both the local test point AND the UI for picking remote test points listed in servers.json. 'standalone' = local test point only, ignore servers.json. 'frontend' = no local backend; ALL tests go to remote servers listed in servers.json (remove the 'Local' entry from servers.json or it will fail). 'backend' = no UI; this container only exposes PHP endpoints so OTHER LibreSpeed instances can use it as a remote test point — opening the app entrance in this mode shows nothing useful."
+    description: "LibreSpeed run mode. 'dual' (recommended) = this Olares is both the local test point AND the UI for picking remote test points listed in servers.json. 'standalone' = local test point only; UI shows Local only (your servers.json edits are preserved but not used until you switch back). 'frontend' = no local backend; all tests go to remote servers in servers.json — the Local entry pointing at this Olares is filtered out automatically. 'backend' = no UI; this container only exposes PHP endpoints so OTHER LibreSpeed instances can use it as a remote test point — opening the app entrance in this mode shows nothing useful, and external users need Public authentication (see docs)."
     options:
       - title: "Dual — local test point + remote servers (default, recommended)"
         value: "dual"
@@ -99,14 +98,14 @@ envs:
     editable: true
     applyOnChange: true
     default: "true"
-    description: "Persist every test result to the bundled PostgreSQL database. Enables result-sharing (permalink/image) and the password-protected stats page at /results/stats.php. Has no effect in 'backend' mode (no UI to record from)."
+    description: "Persist every test result to the bundled PostgreSQL database. Enables result-sharing (permalink/image) and the /results/stats.php history page. Has no effect in 'backend' mode (no UI to record from)."
   - envName: PASSWORD
     type: password
     required: false
     editable: true
     applyOnChange: true
     default: ""
-    description: "Password for the /results/stats.php page. Leave empty (default) to disable the stats UI altogether (recommended unless you actually want to review history). Minimum 6 characters when set."
+    description: "Password for the /results/stats.php history page. Leave empty (default) = anyone who can open the URL can log in with a blank password and view all history. Set at least 6 characters to restrict access."
     regex: '^$|^[\w\-!@#$%^&*()+={}\[\]:,.?~]{6,}$'
   - envName: GDPR_EMAIL
     type: email
@@ -121,4 +120,4 @@ envs:
     editable: true
     applyOnChange: true
     default: ""
-    description: "Optional ipinfo.io API token. Without it, only the bundled offline GeoIP database is used (city, ISP). With it, the result page also shows the geographic distance to the test point. Get a free token at https://ipinfo.io/signup."
+    description: "Optional ipinfo.io API token. Without it, only the bundled offline GeoIP database is used. With it, telemetry and shared results include richer location/ISP data and distance to the test point. The main speed-test UI only shows your IP. Get a free token at https://ipinfo.io/signup."

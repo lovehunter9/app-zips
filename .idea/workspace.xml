@@ -5,17 +5,10 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="e9836655-cb5c-456b-aef7-0ca255338318" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/librespeed/.helmignore" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/librespeed/Chart.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/librespeed/OlaresManifest.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/librespeed/i18n/en-US/OlaresManifest.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/librespeed/i18n/zh-CN/OlaresManifest.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/librespeed/owners" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/librespeed/templates/configmap.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/librespeed/templates/ingress.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/librespeed/templates/librespeed.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/librespeed/values.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/librespeed/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/librespeed/OlaresManifest.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/librespeed/i18n/en-US/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/librespeed/i18n/en-US/OlaresManifest.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/librespeed/i18n/zh-CN/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/librespeed/i18n/zh-CN/OlaresManifest.yaml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -23,7 +16,7 @@
     <option name="LAST_RESOLUTION" value="IGNORE" />
   </component>
   <component name="EmbeddingIndexingInfo">
-    <option name="cachedIndexableFilesCount" value="2227" />
+    <option name="cachedIndexableFilesCount" value="2346" />
     <option name="fileBasedEmbeddingIndicesEnabled" value="true" />
   </component>
   <component name="FileTemplateManagerImpl">
@@ -490,6 +483,11 @@
       <workItem from="1778816518237" duration="560000" />
       <workItem from="1779162094680" duration="540000" />
       <workItem from="1779248503527" duration="515000" />
+      <workItem from="1779422420166" duration="554000" />
+      <workItem from="1779680602584" duration="530000" />
+      <workItem from="1779766608402" duration="541000" />
+      <workItem from="1779853450187" duration="534000" />
+      <workItem from="1779939796198" duration="584000" />
     </task>
     <servers />
   </component>
