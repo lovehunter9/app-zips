@@ -7,7 +7,7 @@ metadata:
   description: OpenAI-compatible TTS/STT server
   appid: speaches
   title: Speaches
-  version: '1.0.14'
+  version: '1.0.13'
   categories:
     - Utilities_v112
     - AI
@@ -92,17 +92,17 @@ spec:
   limitedMemory: 20Gi
   requiredDisk: 2Gi
   limitedDisk: 20Gi
-  requiredCpu: 1
-  limitedCpu: 5
+  requiredCpu: 0.6
+  limitedCpu: 4.5
   requiredGpu: 8Gi
   limitedGpu: 16Gi
   {{- else }}
-  requiredMemory: 4Gi
-  limitedMemory: 16Gi
+  requiredMemory: 4.5Gi
+  limitedMemory: 14Gi
   requiredDisk: 2Gi
   limitedDisk: 20Gi
   requiredCpu: 0.6
-  limitedCpu: 5
+  limitedCpu: 4.5
   {{- end }}
   {{- else }}
   requiredMemory: 64Mi

@@ -5,7 +5,7 @@
 {{- $speachesDomain := index $speachesDomainENV "_0" -}}
 {{- $topDomain := regexReplaceAll ".*?([^.]+\\.[^.]+)$" $speachesDomain "$1" -}}
 {{- $defaultChatUrl := printf "http://d54536a50.shared.%s/v1" $topDomain -}}
-{{- $userChatUrl := index $env "CHAT_COMPLETION_BASE_URL" | default "" -}}
+{{- $userChatUrl := index $env "CHAT_COMPLETION_BASE_URL" | default "" | trim -}}
 
 ---
 apiVersion: apps/v1
@@ -210,75 +210,6 @@ spec:
               if s != o:
                   f.write_text(s)
                   patched.append('audio_chat.py (LLM dropdown error handling)')
-
-              # stt.py: graceful models.list() for STT dropdown
-              f = pathlib.Path('/home/ubuntu/speaches/src/speaches/ui/tabs/stt.py')
-              s = f.read_text()
-              o = s
-              old_stt_dropdown = (
-                  '    async def update_whisper_model_dropdown(request: gr.Request) -> gr.Dropdown:\n'
-                  '        openai_client = openai_client_from_gradio_req(request, config)\n'
-                  '        models = (await openai_client.models.list()).data\n'
-                  '        model_ids: list[str] = [model.id for model in models]\n'
-                  '        recommended_models = {model for model in model_ids if model.startswith("Systran")}\n'
-                  '        other_models = [model for model in model_ids if model not in recommended_models]\n'
-                  '        model_ids = list(recommended_models) + other_models\n'
-                  '        return gr.Dropdown(choices=model_ids, label="Model")'
-              )
-              new_stt_dropdown = (
-                  '    async def update_whisper_model_dropdown(request: gr.Request) -> gr.Dropdown:\n'
-                  '        try:\n'
-                  '            openai_client = openai_client_from_gradio_req(request, config)\n'
-                  '            models = (await openai_client.models.list()).data\n'
-                  '            model_ids: list[str] = [model.id for model in models]\n'
-                  '            recommended_models = {model for model in model_ids if model.startswith("Systran")}\n'
-                  '            other_models = [model for model in model_ids if model not in recommended_models]\n'
-                  '            model_ids = list(recommended_models) + other_models\n'
-                  '            return gr.Dropdown(choices=model_ids, label="Model")\n'
-                  '        except Exception as e:\n'
-                  '            logger.exception("Failed to list STT models")\n'
-                  '            return gr.Dropdown(choices=[], label="Model", info=f"Could not load STT models: {e}")'
-              )
-              if old_stt_dropdown in s:
-                  s = s.replace(old_stt_dropdown, new_stt_dropdown)
-              if s != o:
-                  f.write_text(s)
-                  patched.append('stt.py (model dropdown error handling)')
-
-              # tts.py: graceful models.list() for TTS dropdown
-              f = pathlib.Path('/home/ubuntu/speaches/src/speaches/ui/tabs/tts.py')
-              s = f.read_text()
-              o = s
-              if 'import logging' not in s:
-                  s = s.replace('import gradio as gr\n', 'import logging\n\nimport gradio as gr\n')
-                  s = s.replace(
-                      'from speaches.ui.utils import http_client_from_gradio_req, openai_client_from_gradio_req\n',
-                      'from speaches.ui.utils import http_client_from_gradio_req, openai_client_from_gradio_req\n\n'
-                      'logger = logging.getLogger(__name__)\n',
-                  )
-              old_tts_dropdown = (
-                  '    async def update_model_dropdown(request: gr.Request) -> gr.Dropdown:\n'
-                  '        openai_client = openai_client_from_gradio_req(request, config)\n'
-                  '        models = (await openai_client.models.list(extra_query={"task": "text-to-speech"})).data\n'
-                  '        model_ids: list[str] = [model.id for model in models]\n'
-                  '        return gr.Dropdown(choices=model_ids, label="Model")'
-              )
-              new_tts_dropdown = (
-                  '    async def update_model_dropdown(request: gr.Request) -> gr.Dropdown:\n'
-                  '        try:\n'
-                  '            openai_client = openai_client_from_gradio_req(request, config)\n'
-                  '            models = (await openai_client.models.list(extra_query={"task": "text-to-speech"})).data\n'
-                  '            model_ids: list[str] = [model.id for model in models]\n'
-                  '            return gr.Dropdown(choices=model_ids, label="Model")\n'
-                  '        except Exception as e:\n'
-                  '            logger.exception("Failed to list TTS models")\n'
-                  '            return gr.Dropdown(choices=[], label="Model", info=f"Could not load TTS models: {e}")'
-              )
-              if old_tts_dropdown in s:
-                  s = s.replace(old_tts_dropdown, new_tts_dropdown)
-              if s != o:
-                  f.write_text(s)
-                  patched.append('tts.py (model dropdown error handling)')
 
               # Write mic-fix JS (delays submit click while mic upload is pending)
               mic_fix_head = (
