@@ -4,6 +4,8 @@
 {{- $speachesDomainENV := split "," .Values.domain.speaches -}}
 {{- $speachesDomain := index $speachesDomainENV "_0" -}}
 {{- $topDomain := regexReplaceAll ".*?([^.]+\\.[^.]+)$" $speachesDomain "$1" -}}
+{{- $defaultChatUrl := printf "http://d54536a50.shared.%s/v1" $topDomain -}}
+{{- $userChatUrl := index $env "CHAT_COMPLETION_BASE_URL" | default "" -}}
 
 ---
 apiVersion: apps/v1
@@ -154,6 +156,131 @@ spec:
               if s != o:
                   f.write_text(s)
                   patched.append('audio_chat.py')
+
+              # audio_chat.py: graceful models.list() for LLM dropdown (ollamav2 etc.)
+              f = pathlib.Path('/home/ubuntu/speaches/src/speaches/ui/tabs/audio_chat.py')
+              s = f.read_text()
+              o = s
+              old_llm_dropdown = (
+                  '    async def update_chat_model_dropdown() -> gr.Dropdown:\n'
+                  '        # NOTE: not using `openai_client_from_gradio_req` because we aren\'t intrested in making API calls to `speaches` but rather to whatever the user specified as LLM api\n'
+                  '        openai_client = AsyncOpenAI(\n'
+                  '            base_url=config.chat_completion_base_url,\n'
+                  '            api_key=config.chat_completion_api_key.get_secret_value()\n'
+                  '        )\n'
+                  '        models = (await openai_client.models.list()).data\n'
+                  '        model_ids: list[str] = [model.id for model in models]\n'
+                  '        return gr.Dropdown(\n'
+                  '            choices=model_ids,\n'
+                  '            label="Chat Model",\n'
+                  '            value=model_ids[0],\n'
+                  '        )'
+              )
+              new_llm_dropdown = (
+                  '    async def update_chat_model_dropdown() -> gr.Dropdown:\n'
+                  '        openai_client = AsyncOpenAI(\n'
+                  '            base_url=config.chat_completion_base_url,\n'
+                  '            api_key=config.chat_completion_api_key.get_secret_value(),\n'
+                  '            max_retries=0,\n'
+                  '        )\n'
+                  '        try:\n'
+                  '            models = (await openai_client.models.list()).data\n'
+                  '            model_ids: list[str] = [model.id for model in models]\n'
+                  '            if not model_ids:\n'
+                  '                return gr.Dropdown(\n'
+                  '                    choices=[],\n'
+                  '                    label="Chat Model",\n'
+                  '                    value=None,\n'
+                  '                    info="LLM backend returned no models. Check ollamav2 is running and has models pulled.",\n'
+                  '                )\n'
+                  '            return gr.Dropdown(\n'
+                  '                choices=model_ids,\n'
+                  '                label="Chat Model",\n'
+                  '                value=model_ids[0],\n'
+                  '            )\n'
+                  '        except Exception as e:\n'
+                  '            logger.exception("Failed to list LLM models for Audio Chat dropdown")\n'
+                  '            return gr.Dropdown(\n'
+                  '                choices=[],\n'
+                  '                label="Chat Model",\n'
+                  '                value=None,\n'
+                  '                info=f"LLM backend unavailable ({config.chat_completion_base_url}): {e}",\n'
+                  '            )'
+              )
+              if old_llm_dropdown in s:
+                  s = s.replace(old_llm_dropdown, new_llm_dropdown)
+              if s != o:
+                  f.write_text(s)
+                  patched.append('audio_chat.py (LLM dropdown error handling)')
+
+              # stt.py: graceful models.list() for STT dropdown
+              f = pathlib.Path('/home/ubuntu/speaches/src/speaches/ui/tabs/stt.py')
+              s = f.read_text()
+              o = s
+              old_stt_dropdown = (
+                  '    async def update_whisper_model_dropdown(request: gr.Request) -> gr.Dropdown:\n'
+                  '        openai_client = openai_client_from_gradio_req(request, config)\n'
+                  '        models = (await openai_client.models.list()).data\n'
+                  '        model_ids: list[str] = [model.id for model in models]\n'
+                  '        recommended_models = {model for model in model_ids if model.startswith("Systran")}\n'
+                  '        other_models = [model for model in model_ids if model not in recommended_models]\n'
+                  '        model_ids = list(recommended_models) + other_models\n'
+                  '        return gr.Dropdown(choices=model_ids, label="Model")'
+              )
+              new_stt_dropdown = (
+                  '    async def update_whisper_model_dropdown(request: gr.Request) -> gr.Dropdown:\n'
+                  '        try:\n'
+                  '            openai_client = openai_client_from_gradio_req(request, config)\n'
+                  '            models = (await openai_client.models.list()).data\n'
+                  '            model_ids: list[str] = [model.id for model in models]\n'
+                  '            recommended_models = {model for model in model_ids if model.startswith("Systran")}\n'
+                  '            other_models = [model for model in model_ids if model not in recommended_models]\n'
+                  '            model_ids = list(recommended_models) + other_models\n'
+                  '            return gr.Dropdown(choices=model_ids, label="Model")\n'
+                  '        except Exception as e:\n'
+                  '            logger.exception("Failed to list STT models")\n'
+                  '            return gr.Dropdown(choices=[], label="Model", info=f"Could not load STT models: {e}")'
+              )
+              if old_stt_dropdown in s:
+                  s = s.replace(old_stt_dropdown, new_stt_dropdown)
+              if s != o:
+                  f.write_text(s)
+                  patched.append('stt.py (model dropdown error handling)')
+
+              # tts.py: graceful models.list() for TTS dropdown
+              f = pathlib.Path('/home/ubuntu/speaches/src/speaches/ui/tabs/tts.py')
+              s = f.read_text()
+              o = s
+              if 'import logging' not in s:
+                  s = s.replace('import gradio as gr\n', 'import logging\n\nimport gradio as gr\n')
+                  s = s.replace(
+                      'from speaches.ui.utils import http_client_from_gradio_req, openai_client_from_gradio_req\n',
+                      'from speaches.ui.utils import http_client_from_gradio_req, openai_client_from_gradio_req\n\n'
+                      'logger = logging.getLogger(__name__)\n',
+                  )
+              old_tts_dropdown = (
+                  '    async def update_model_dropdown(request: gr.Request) -> gr.Dropdown:\n'
+                  '        openai_client = openai_client_from_gradio_req(request, config)\n'
+                  '        models = (await openai_client.models.list(extra_query={"task": "text-to-speech"})).data\n'
+                  '        model_ids: list[str] = [model.id for model in models]\n'
+                  '        return gr.Dropdown(choices=model_ids, label="Model")'
+              )
+              new_tts_dropdown = (
+                  '    async def update_model_dropdown(request: gr.Request) -> gr.Dropdown:\n'
+                  '        try:\n'
+                  '            openai_client = openai_client_from_gradio_req(request, config)\n'
+                  '            models = (await openai_client.models.list(extra_query={"task": "text-to-speech"})).data\n'
+                  '            model_ids: list[str] = [model.id for model in models]\n'
+                  '            return gr.Dropdown(choices=model_ids, label="Model")\n'
+                  '        except Exception as e:\n'
+                  '            logger.exception("Failed to list TTS models")\n'
+                  '            return gr.Dropdown(choices=[], label="Model", info=f"Could not load TTS models: {e}")'
+              )
+              if old_tts_dropdown in s:
+                  s = s.replace(old_tts_dropdown, new_tts_dropdown)
+              if s != o:
+                  f.write_text(s)
+                  patched.append('tts.py (model dropdown error handling)')
 
               # Write mic-fix JS (delays submit click while mic upload is pending)
               mic_fix_head = (
@@ -323,25 +450,29 @@ spec:
             - name: LOOPBACK_HOST_URL
               value: "http://localhost:8000"
             - name: CHAT_COMPLETION_BASE_URL
-              value: "http://d54536a50.shared.{{ $topDomain }}/v1"
+              {{- if $userChatUrl }}
+              value: {{ $userChatUrl | quote }}
+              {{- else }}
+              value: {{ $defaultChatUrl | quote }}
+              {{- end }}
           ports:
             - containerPort: 8000
               protocol: TCP
           resources:
             {{- if $speachesGpu }}
             limits:
-              cpu: "8"
-              memory: 8Gi
+              cpu: "4"
+              memory: 18Gi
             requests:
               cpu: 500m
-              memory: 2Gi
+              memory: 6Gi
             {{- else }}
             limits:
-              cpu: "8"
-              memory: 8Gi
+              cpu: "4"
+              memory: 12Gi
             requests:
               cpu: 500m
-              memory: 2Gi
+              memory: 4Gi
             {{- end }}
           volumeMounts:
             - name: speaches-hf-cache
