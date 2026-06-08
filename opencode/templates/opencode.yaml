@@ -764,13 +764,10 @@ spec:
               # copies that opencode/pkg-manager bind, and register uid 1000.
               seed_etc
 
-              # /bin is overlay-bound; ensure bash resolves via /bin/bash like before.
-              [ -e /bin/bash ] || ln -sf ../usr/bin/bash /bin/bash 2>/dev/null || true
-
-              # bash is baked (glibc is installed at build time, so there is no
-              # runtime glibc cascade-removal to repair). Only self-heal if the
-              # baked bash is somehow not runnable -- no network on the happy path.
-              if ! /usr/bin/bash -c 'true' 2>/dev/null; then
+              # bash is baked into the image (at /bin/bash) and rides the overlay
+              # lower. Only self-heal if it is genuinely not runnable; resolve via
+              # PATH (NOT a hardcoded /usr/bin/bash -- bash lives at /bin/bash).
+              if ! bash -c 'true' 2>/dev/null; then
                 echo "=== bash not runnable, reinstalling ==="
                 apk del bash 2>/dev/null || true
                 apk add --no-cache bash 2>&1 || echo "=== WARNING: bash reinstall failed in init, pkg-manager will fix ==="
@@ -996,7 +993,7 @@ spec:
             - "-c"
             - |
               echo "=== Runtime check ==="
-              [ -x /usr/bin/bash ] && echo "bash OK" || echo "bash: waiting for pkg-manager fix"
+              command -v bash >/dev/null 2>&1 && echo "bash OK" || echo "bash: waiting for pkg-manager fix"
               if [ ! -f "$HOME/.venv/bin/activate" ]; then
                 echo "Creating Python venv..."
                 python3 -m venv "$HOME/.venv"
@@ -1135,16 +1132,24 @@ spec:
 
               rm -f /lib/apk/db/lock 2>/dev/null || true
 
-              wget -q -O /dev/null https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/APKINDEX.tar.gz 2>/dev/null &
-              _wpid=$!
-              ( sleep 5 && kill "$_wpid" 2>/dev/null ) &
-              _gpid=$!
-              if ! wait "$_wpid" 2>/dev/null; then
-                echo "=== pkg-manager: switching to China mirrors ==="
-                sed -i 's|dl-cdn.alpinelinux.org|mirrors.aliyun.com|g' /etc/apk/repositories
-              fi
-              kill "$_gpid" 2>/dev/null || true
-              wait "$_gpid" 2>/dev/null || true
+              # Lazy, run-once mirror selection: only touches the network the first
+              # time the user actually triggers a package op. A plain restart with
+              # no package activity now stays fully offline.
+              _MIRROR_DONE=0
+              ensure_mirror() {
+                [ "$_MIRROR_DONE" = "1" ] && return 0
+                _MIRROR_DONE=1
+                wget -q -O /dev/null https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/APKINDEX.tar.gz 2>/dev/null &
+                _wpid=$!
+                ( sleep 5 && kill "$_wpid" 2>/dev/null ) &
+                _gpid=$!
+                if ! wait "$_wpid" 2>/dev/null; then
+                  echo "=== pkg-manager: switching to China mirrors ==="
+                  sed -i 's|dl-cdn.alpinelinux.org|mirrors.aliyun.com|g' /etc/apk/repositories
+                fi
+                kill "$_gpid" 2>/dev/null || true
+                wait "$_gpid" 2>/dev/null || true
+              }
 
               echo "=== APK DB check ==="
               echo "installed: $(wc -l < /lib/apk/db/installed 2>/dev/null || echo 'NOT FOUND')"
@@ -1154,14 +1159,17 @@ spec:
               echo "apk info count: $(apk info 2>/dev/null | wc -l)"
               echo "=== end DB check ==="
 
-              apk update 2>&1 || true
-
-              echo "=== Force-reinstalling bash (every start) ==="
-              apk del bash 2>/dev/null || true
-              if apk add --no-cache bash 2>&1; then
-                echo "=== bash reinstalled OK ==="
-              else
-                echo "=== WARNING: bash reinstall failed ==="
+              # bash + glibc are baked into the image (bash at /bin/bash) and ride
+              # the overlay lower, so no eager `apk update` / forced bash reinstall
+              # on every start (that used to hit the network unconditionally and
+              # would delete bash while offline). Only self-heal if bash is actually
+              # broken; resolve via PATH (NOT a hardcoded /usr/bin/bash).
+              if ! bash -c 'true' 2>/dev/null; then
+                echo "=== bash not runnable, repairing ==="
+                ensure_mirror
+                apk update 2>&1 || true
+                apk del bash 2>/dev/null || true
+                apk add --no-cache bash 2>&1 || echo "=== WARNING: bash repair failed ==="
               fi
 
               _add_pkgs() {
@@ -1187,6 +1195,7 @@ spec:
                   case "$REQ" in
                     SEARCH\ *)
                       KEYWORD="${REQ#SEARCH }"
+                      ensure_mirror
                       apk update >/dev/null 2>&1
                       apk search "$KEYWORD" > "$TMP" 2>&1
                       mv "$TMP" "$QUEUE/search-result"
@@ -1197,6 +1206,7 @@ spec:
                       ;;
                     INFO\ *)
                       TARGET="${REQ#INFO }"
+                      ensure_mirror
                       apk update >/dev/null 2>&1
                       { apk policy "$TARGET" 2>/dev/null
                         echo ""
@@ -1214,6 +1224,7 @@ spec:
                     INSTALL\ *)
                       PKGS="${REQ#INSTALL }"
                       echo "=== Installing: $PKGS ==="
+                      ensure_mirror
                       apk add --no-cache $PKGS > "$QUEUE/log" 2>&1
                       RC=$?
                       [ $RC -eq 0 ] && _add_pkgs $PKGS
@@ -1221,6 +1232,7 @@ spec:
                       ;;
                     *)
                       echo "=== Installing (legacy): $REQ ==="
+                      ensure_mirror
                       apk add --no-cache $REQ > "$QUEUE/log" 2>&1
                       RC=$?
                       [ $RC -eq 0 ] && _add_pkgs $REQ
