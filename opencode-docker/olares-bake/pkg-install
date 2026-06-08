@@ -1,0 +1,155 @@
+#!/bin/sh
+# pkg-install: thin client that forwards package ops to the pkg-manager sidecar
+# over a file queue. Baked into the image rootfs (/usr/local/bin) so it rides
+# the overlay lower; the chart no longer writes it at runtime.
+Q="/home/opencode/.pkg-queue"
+_LOCKED=0
+_lock() {
+  _lc=0
+  while true; do
+    if mkdir "$Q/.lock" 2>/dev/null; then
+      echo $$ > "$Q/.lock/pid"
+      _LOCKED=1
+      return 0
+    fi
+    _op=$(cat "$Q/.lock/pid" 2>/dev/null)
+    if [ -z "$_op" ] || ! kill -0 "$_op" 2>/dev/null; then
+      rm -rf "$Q/.lock"
+      continue
+    fi
+    _lc=$((_lc + 1))
+    if [ $_lc -ge 20 ]; then
+      echo ">> ERROR: Another pkg-install is running (pid $_op). Try again later."
+      return 1
+    fi
+    sleep 0.5
+  done
+}
+_unlock() {
+  if [ "$_LOCKED" = "1" ]; then
+    rm -rf "$Q/.lock" 2>/dev/null || true
+    _LOCKED=0
+  fi
+}
+trap '_unlock; exit 130' INT TERM
+_send() {
+  if [ ! -d "$Q" ]; then
+    echo ">> ERROR: pkg-manager queue not found. Is the sidecar running?"
+    return 1
+  fi
+  _lock || return 1
+  rm -f "$Q/result" "$Q/log"
+  echo "$1" > "$Q/request"
+  _c=0
+  while [ ! -f "$Q/result" ]; do
+    sleep 0.5
+    _c=$((_c + 1))
+    if [ $_c -ge 600 ]; then
+      echo ">> ERROR: pkg-manager did not respond within 300s"
+      echo ">> The pkg-manager sidecar may be down or busy."
+      _unlock
+      return 1
+    fi
+  done
+  cat "$Q/log" 2>/dev/null
+  EXIT=$(cat "$Q/result")
+  rm -f "$Q/result" "$Q/log"
+  _unlock
+  case "$EXIT" in ''|*[!0-9]*) EXIT=1 ;; esac
+  return "$EXIT"
+}
+_query() {
+  if [ ! -d "$Q" ]; then
+    echo ">> ERROR: pkg-manager queue not found. Is the sidecar running?"
+    return 1
+  fi
+  _lock || return 1
+  rm -f "$Q/search-result"
+  echo "$1" > "$Q/request"
+  _c=0
+  while [ ! -f "$Q/search-result" ]; do
+    sleep 0.5
+    _c=$((_c + 1))
+    if [ $_c -ge 120 ]; then
+      echo ">> ERROR: pkg-manager did not respond within 60s"
+      _unlock
+      return 1
+    fi
+  done
+  cat "$Q/search-result"
+  rm -f "$Q/search-result"
+  _unlock
+}
+_help() {
+  cat << 'EOFHELP'
+pkg-install - Alpine package manager for OpenCode
+
+USAGE
+  pkg-install <package> [package2 ...]    Install packages
+  pkg-install --remove  <package> [...]   Remove packages
+  pkg-install --search  <keyword>         Search available packages
+  pkg-install --info    <package>          Show package details and available versions
+  pkg-install --list                       List all installed packages
+  pkg-install --help                       Show this help message
+
+INSTALL WITH SPECIFIC VERSION
+  pkg-install <package>=<version>
+  Example:  pkg-install nodejs=20.15.1-r0
+  Tip:      use --info <package> to see available versions first
+
+EXAMPLES
+  pkg-install openjdk17-jdk               Install Java 17
+  pkg-install make cmake gcc               Install multiple packages
+  pkg-install nodejs=20.15.1-r0            Install a specific version
+  pkg-install --remove openjdk17-jdk       Remove Java 17
+  pkg-install --search postgres            Search for PostgreSQL-related packages
+  pkg-install --info nodejs                 Show nodejs details and versions
+
+NOTES
+  - Packages are from Alpine Linux repositories (apk).
+  - Installed packages persist across restarts and upgrades.
+  - For language ecosystem packages (persist across restarts AND upgrades):
+      pip install <pkg>            Python (uses ~/.venv, auto-activated)
+      npm install -g <pkg>         Node.js global
+      go install <pkg>@latest      Go (installs to ~/go/bin/)
+      cargo install <pkg>          Rust (installs to ~/.cargo/bin/)
+EOFHELP
+}
+case "$1" in
+  --help|-h|"")
+    _help
+    exit 0
+    ;;
+  --search)
+    shift
+    [ -z "$1" ] && echo "Usage: pkg-install --search <keyword>" && exit 1
+    _query "SEARCH $*"
+    ;;
+  --info)
+    shift
+    [ -z "$1" ] && echo "Usage: pkg-install --info <package>" && exit 1
+    _query "INFO $*"
+    ;;
+  --remove)
+    shift
+    [ -z "$1" ] && echo "Usage: pkg-install --remove <package> [...]" && exit 1
+    echo ">> Removing: $*"
+    _send "REMOVE $*"
+    S=$?; [ $S -eq 0 ] && echo ">> Removed successfully." || echo ">> Removal failed."
+    exit $S
+    ;;
+  --list)
+    _query "LIST"
+    ;;
+  -*)
+    echo "Unknown option: $1"
+    _help
+    exit 1
+    ;;
+  *)
+    echo ">> Installing: $*"
+    _send "INSTALL $*"
+    S=$?; [ $S -eq 0 ] && echo ">> Installed successfully." || echo ">> Installation failed."
+    exit $S
+    ;;
+esac

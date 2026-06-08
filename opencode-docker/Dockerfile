@@ -187,6 +187,19 @@ RUN set -eu; \
     rm -rf "$SKILLS_HOME" /tmp/skills-add.log; \
     echo "Baked Olares skills: $(ls "$DEST" | tr '\n' ' ')"
 
+# ---- Bake the chart's init logic + static assets into the image ------------
+# Moves the Helm chart's init-container scripts (init-setup / init-overlay /
+# init-packages / pkg-manager / start-opencode) and the static content they
+# used to inline (web-preview & system-admin SKILL.md, the OMO default config,
+# the python config writer) out of the chart and into the image. The chart now
+# only execs these (/opt/olares-bake/lib/<x>.sh) and passes the few dynamic
+# values via env. pkg-install goes into the rootfs (rides the overlay lower),
+# so init no longer writes it at runtime.
+COPY olares-bake/lib/    /opt/olares-bake/lib/
+COPY olares-bake/assets/ /opt/olares-bake/assets/
+COPY olares-bake/pkg-install /usr/local/bin/pkg-install
+RUN chmod +x /opt/olares-bake/lib/*.sh /usr/local/bin/pkg-install
+
 # Record what was baked so the chart/init can pin & seed deterministically.
 RUN set -eu; \
     CLI_VER="$(npm ls -g --depth=0 @olares/cli 2>/dev/null | sed -n 's/.*@olares\/cli@//p' | head -1)"; \
