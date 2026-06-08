@@ -23,8 +23,11 @@
 #   Therefore anything that must be visible at runtime under those paths is NOT
 #   consumed directly from this image; the chart's init seeds it from neutral,
 #   non-overlaid staging dirs baked here:
-#       /opt/olares-bake/opencode-cache/   -> seeded into ~/.cache/opencode (OMO)
+#       /opt/olares-bake/opencode-cache/    -> seeded into ~/.cache/opencode (OMO)
+#       /opt/olares-bake/opencode-skills/   -> seeded into ~/.config/opencode/skills (Olares Agent Skills)
 #   and the base rootfs is snapshotted by init into .pkg-root as before.
+#   The olares-cli binary itself lives in the npm global prefix (rootfs), so it
+#   rides the .pkg-root snapshot like vite -- no $HOME seeding needed for it.
 # ------------------------------------------------------------------------------
 
 ARG OPENCODE_VERSION=1.16.0
@@ -109,6 +112,17 @@ RUN opencode --version
 # Global npm tool (was: chart `npm install -g vite`).
 RUN npm install -g --ignore-scripts vite
 
+# ---- Olares CLI (was: user runs `npx @olares/cli@latest install`) -----------
+# The wizard's first step is just `npm install -g @olares/cli`; its postinstall
+# downloads an arch-specific Go binary into the package's vendor/ dir. Both the
+# JS shim and the Go binary land under the npm GLOBAL PREFIX (rootfs), so they
+# persist exactly like vite via the chart's .pkg-root snapshot -- no $HOME seed
+# needed. We MUST do this in the per-arch `final` stage so the postinstall picks
+# the matching binary (linux_amd64 / linux_arm64). Mirror knobs are honoured
+# (OLARES_CLI_DOWNLOAD_MIRROR); `--version` asserts the vendor binary runs.
+RUN npm install -g @olares/cli@latest \
+ && olares-cli --version
+
 # ---- Bake the OMO plugin cache into a NEUTRAL staging dir --------------------
 # opencode's plugin loader installs declared plugins into
 #   $HOME/.cache/opencode/packages/<plugin-spec>/node_modules/
@@ -140,10 +154,44 @@ RUN set -eu; \
     rm -rf "$WARM_HOME" /tmp/omo-warm.log; \
     echo "Baked OMO cache: $(du -sh "$BAKE/opencode-cache/packages/$OMO_SPEC" | cut -f1)"
 
+# ---- Bake the Olares Agent Skills into a NEUTRAL staging dir -----------------
+# The wizard's second step is `npx skills add beclab/Olares -y -g`, which writes
+# to opencode's GLOBAL skills dir = $HOME/.config/opencode/skills. At runtime
+# $HOME=/home/opencode is the appData hostPath that OVERLAYS this image, so we
+# can't bake there directly (it would be hidden) -- same problem as the OMO
+# cache. So we install under a throwaway HOME, scoped to the opencode agent and
+# all skills, then relocate the result into /opt/olares-bake/opencode-skills/.
+# The chart's init seeds it into the real ~/.config/opencode/skills on first
+# boot (see design doc 9A). Asserts non-empty so the build fails loudly if the
+# skills repo clone/selection produced nothing.
+RUN set -eu; \
+    BAKE=/opt/olares-bake; \
+    SKILLS_HOME="$BAKE/skillshome"; \
+    mkdir -p "$SKILLS_HOME"; \
+    HOME="$SKILLS_HOME" npx -y skills add beclab/Olares -a opencode --skill '*' -g -y \
+      >/tmp/skills-add.log 2>&1 || true; \
+    SRC="$SKILLS_HOME/.config/opencode/skills"; \
+    if [ -z "$(ls -A "$SRC" 2>/dev/null || true)" ]; then \
+      echo "FATAL: Olares Agent Skills were not installed into $SRC"; \
+      tail -60 /tmp/skills-add.log || true; \
+      exit 1; \
+    fi; \
+    mkdir -p "$BAKE/opencode-skills"; \
+    cp -a "$SRC/." "$BAKE/opencode-skills/"; \
+    rm -rf "$SKILLS_HOME" /tmp/skills-add.log; \
+    echo "Baked Olares skills: $(ls "$BAKE/opencode-skills" | tr '\n' ' ')"
+
 # Record what was baked so the chart/init can pin & seed deterministically.
-RUN printf 'OPENCODE_VERSION=%s\nOMO_VERSION=%s\nOMO_SPEC=%s\n' \
-      "${OPENCODE_VERSION}" "${OMO_VERSION}" "oh-my-openagent@${OMO_VERSION}" \
-      > /opt/olares-bake/BAKE_MANIFEST
+RUN set -eu; \
+    CLI_VER="$(npm ls -g --depth=0 @olares/cli 2>/dev/null | sed -n 's/.*@olares\/cli@//p' | head -1)"; \
+    SKILLS="$(ls /opt/olares-bake/opencode-skills 2>/dev/null | tr '\n' ',' | sed 's/,$//')"; \
+    { \
+      printf 'OPENCODE_VERSION=%s\n' "${OPENCODE_VERSION}"; \
+      printf 'OMO_VERSION=%s\n' "${OMO_VERSION}"; \
+      printf 'OMO_SPEC=oh-my-openagent@%s\n' "${OMO_VERSION}"; \
+      printf 'OLARES_CLI_VERSION=%s\n' "${CLI_VER:-unknown}"; \
+      printf 'OLARES_SKILLS=%s\n' "${SKILLS:-none}"; \
+    } > /opt/olares-bake/BAKE_MANIFEST
 
 # Keep the official entrypoint so the image is still a drop-in `opencode`.
 ENTRYPOINT ["opencode"]

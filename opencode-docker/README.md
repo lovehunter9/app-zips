@@ -1,9 +1,10 @@
 # opencode-docker — forked & baked OpenCode image for Olares
 
 Bakes everything the chart's init containers used to download at **runtime**
-(apk packages, glibc, glibc opencode binary, global `vite`, the OMO plugin
-cache) into **build time**, so first-boot init becomes a fast local copy with
-zero network. User-facing behavior is unchanged — only "init is faster".
+(apk packages, glibc, glibc opencode binary, global `vite`, the Olares CLI, the
+OMO plugin cache, the Olares Agent Skills) into **build time**, so first-boot
+init becomes a fast local copy with zero network. User-facing behavior is
+unchanged — only "init is faster".
 
 See the full design in `../opencode-docs/OpenCode_预装包内置化与镜像fork_设计文档.md`.
 
@@ -48,9 +49,19 @@ don't have), so this is a **rewrite**, not an extension:
   `opencode-linux-arm64-musl.tar.gz` on arm64.
 - glibc (sgerrand) + `/lib64` linker symlink on x86_64.
 - Global `vite`.
+- **Olares CLI** (`npm install -g @olares/cli@latest`) — the JS shim + the
+  arch-specific Go binary (downloaded into the package's `vendor/` by its
+  postinstall). Both live in the npm global prefix (rootfs), so they ride the
+  `.pkg-root` snapshot like `vite` — **no `$HOME` seeding needed**. This is the
+  `npm install -g @olares/cli` half of `npx @olares/cli@latest install`.
 - **OMO plugin cache** pre-warmed and staged at
   `/opt/olares-bake/opencode-cache/packages/oh-my-openagent@<ver>/` (see below).
-- `/opt/olares-bake/BAKE_MANIFEST` records the pinned versions for the chart.
+- **Olares Agent Skills** installed (`skills add beclab/Olares -a opencode
+  --skill '*'`, the skills half of the wizard) and staged at
+  `/opt/olares-bake/opencode-skills/` — they target `~/.config/opencode/skills`
+  which is overlaid at runtime, so they are staged + seeded like the OMO cache.
+- `/opt/olares-bake/BAKE_MANIFEST` records the pinned versions (opencode / OMO /
+  olares-cli / skills list) for the chart.
 
 ## IMPORTANT: runtime overlay contract (why we stage instead of bake-in-place)
 
@@ -66,13 +77,26 @@ under the neutral, non-overlaid `/opt/olares-bake/`; the chart's `init-packages`
 then seeds them into the right place on first boot:
 
 - base rootfs → snapshotted into `.pkg-root` (as today, but now a local copy
-  instead of a networked install).
+  instead of a networked install). The olares-cli binary rides along here.
 - `/opt/olares-bake/opencode-cache/packages/<spec>` → copied into
   `~/.cache/opencode/packages/<spec>` (one-time, marker-guarded).
+- `/opt/olares-bake/opencode-skills/` → copied into
+  `~/.config/opencode/skills/` (one-time, marker-guarded).
 
-The matching chart changes (init seed logic, version bumps, pinned plugin spec)
-are specified in the design doc §9A and are a **separate step** from building
-this image.
+The matching chart changes (init seed logic for the OMO cache **and** the
+skills, version bumps, pinned plugin spec) are specified in the design doc §9A
+and are a **separate step** from building this image. Until that seed step
+lands, the staged skills are present in the image but not yet visible to
+opencode at runtime (just like the OMO cache).
+
+### Caveat: Olares skill descriptions vs the 1024-char limit
+
+5 of the 6 `beclab/Olares` skills currently have a `description` longer than the
+1024-char limit opencode/zed/codex document. opencode **silently loads** them
+(no error/truncation), but over-long descriptions bloat the agent's tool/skill
+context. Baking the skills in by default ships that to every user. This is a
+skill-authoring issue in `beclab/Olares`, independent of this image; flagged
+here so the trade-off is explicit.
 
 ## OMO pre-warm caveat (arm64 / QEMU)
 
