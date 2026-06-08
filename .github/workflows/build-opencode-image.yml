@@ -1,0 +1,236 @@
+name: Build OpenCode image (baked)
+
+# Manually-triggered, multi-arch build of the forked & baked OpenCode image
+# from opencode-docker/. Run it from the GitHub UI:
+#   Actions -> "Build OpenCode image (baked)" -> Run workflow
+#
+# Strategy: build each architecture on a NATIVE GitHub-hosted runner
+# (amd64 on ubuntu-latest, arm64 on ubuntu-24.04-arm), push each by digest,
+# then merge them into one multi-arch tag. This avoids running the OMO
+# pre-warm step under slow/flaky QEMU emulation.
+#
+# Default target is GHCR (ghcr.io/<owner>/...), which works out-of-the-box with
+# the built-in GITHUB_TOKEN -- no secrets to set up. To push to Docker Hub
+# (e.g. docker.io/beclab/...), choose registry=dockerhub and set the repo
+# secrets DOCKERHUB_USERNAME and DOCKERHUB_TOKEN (a token with push access).
+
+on:
+  workflow_dispatch:
+    inputs:
+      opencode_version:
+        description: "opencode release version (no leading v)"
+        required: true
+        default: "1.16.0"
+      omo_version:
+        description: "OMO default version (oh-my-openagent@<ver>)"
+        required: true
+        default: "4.7.5"
+      glibc_version:
+        description: "sgerrand glibc version (x86_64 only)"
+        required: true
+        default: "2.35-r1"
+      registry:
+        description: "Where to push"
+        required: true
+        type: choice
+        default: ghcr
+        options:
+          - ghcr
+          - dockerhub
+      image_repo:
+        description: "Image repository (without registry host)"
+        required: true
+        default: "anomalyco-opencode"
+      image_tag:
+        description: "Image tag"
+        required: true
+        default: "1.16.0-olares1"
+      dockerhub_namespace:
+        description: "Docker Hub namespace (only used when registry=dockerhub)"
+        required: false
+        default: "beclab"
+      include_arm64:
+        description: "Also build linux/arm64 (native runner)"
+        required: true
+        type: boolean
+        default: true
+      push:
+        description: "Push the image (uncheck to build-only / validate)"
+        required: true
+        type: boolean
+        default: true
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+      image_name: ${{ steps.gen.outputs.image_name }}
+      tag: ${{ steps.gen.outputs.tag }}
+    steps:
+      - name: Compute matrix and image name
+        id: gen
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.registry }}" = "ghcr" ]; then
+            OWNER_LC="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+            IMAGE_NAME="ghcr.io/${OWNER_LC}/${{ inputs.image_repo }}"
+          else
+            IMAGE_NAME="docker.io/${{ inputs.dockerhub_namespace }}/${{ inputs.image_repo }}"
+          fi
+
+          if [ "${{ inputs.include_arm64 }}" = "true" ]; then
+            MATRIX='{"include":[{"platform":"linux/amd64","arch":"amd64","runner":"ubuntu-latest"},{"platform":"linux/arm64","arch":"arm64","runner":"ubuntu-24.04-arm"}]}'
+          else
+            MATRIX='{"include":[{"platform":"linux/amd64","arch":"amd64","runner":"ubuntu-latest"}]}'
+          fi
+
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "image_name=$IMAGE_NAME" >> "$GITHUB_OUTPUT"
+          echo "tag=${{ inputs.image_tag }}" >> "$GITHUB_OUTPUT"
+          echo "Image: ${IMAGE_NAME}:${{ inputs.image_tag }}"
+          echo "Matrix: $MATRIX"
+
+  build:
+    needs: setup
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free up disk space
+        run: |
+          echo "Before:"; df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "${AGENT_TOOLSDIRECTORY:-}" || true
+          sudo docker image prune -af || true
+          echo "After:"; df -h /
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: ${{ inputs.push && inputs.registry == 'ghcr' }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        if: ${{ inputs.push && inputs.registry == 'dockerhub' }}
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        if: ${{ inputs.push }}
+        uses: docker/build-push-action@v6
+        with:
+          context: ./opencode-docker
+          file: ./opencode-docker/Dockerfile
+          platforms: ${{ matrix.platform }}
+          provenance: false
+          build-args: |
+            OPENCODE_VERSION=${{ inputs.opencode_version }}
+            OMO_VERSION=${{ inputs.omo_version }}
+            GLIBC_VERSION=${{ inputs.glibc_version }}
+          outputs: type=image,name=${{ needs.setup.outputs.image_name }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Build only (no push / validate)
+        if: ${{ !inputs.push }}
+        uses: docker/build-push-action@v6
+        with:
+          context: ./opencode-docker
+          file: ./opencode-docker/Dockerfile
+          platforms: ${{ matrix.platform }}
+          provenance: false
+          push: false
+          build-args: |
+            OPENCODE_VERSION=${{ inputs.opencode_version }}
+            OMO_VERSION=${{ inputs.omo_version }}
+            GLIBC_VERSION=${{ inputs.glibc_version }}
+
+      - name: Export digest
+        if: ${{ inputs.push }}
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        if: ${{ inputs.push }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    needs: [setup, build]
+    if: ${{ inputs.push }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: ${{ inputs.registry == 'ghcr' }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        if: ${{ inputs.registry == 'dockerhub' }}
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Create and push manifest list
+        working-directory: /tmp/digests
+        run: |
+          set -euo pipefail
+          IMAGE_NAME='${{ needs.setup.outputs.image_name }}'
+          TAG='${{ needs.setup.outputs.tag }}'
+          docker buildx imagetools create -t "${IMAGE_NAME}:${TAG}" \
+            $(printf "${IMAGE_NAME}@sha256:%s " *)
+
+      - name: Inspect
+        run: |
+          docker buildx imagetools inspect \
+            "${{ needs.setup.outputs.image_name }}:${{ needs.setup.outputs.tag }}"
+
+      - name: Summary
+        run: |
+          {
+            echo "## OpenCode image build"
+            echo ""
+            echo "| field | value |"
+            echo "|---|---|"
+            echo "| image | \`${{ needs.setup.outputs.image_name }}:${{ needs.setup.outputs.tag }}\` |"
+            echo "| opencode | \`${{ inputs.opencode_version }}\` |"
+            echo "| OMO | \`${{ inputs.omo_version }}\` |"
+            echo "| arm64 | \`${{ inputs.include_arm64 }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
