@@ -1,0 +1,72 @@
+# OverlayFS 机制 POC（throwaway）
+# 验证：privileged 容器挂 overlay(lower=镜像/usr, upper=hostPath) → 经 mountPropagation
+# 让 root 写、非 root 读都能看到同一合并视图；upper 在 hostPath → 删 Pod 重建后仍在。
+# 注意：合并点挂在中性路径 /shared/merged（不是 /usr），先验机制；/usr-at-boot 的接法是实现细节。
+apiVersion: v1
+kind: Pod
+metadata:
+  name: overlay-poc
+  namespace: olares-overlay-poc
+spec:
+  restartPolicy: Never
+  volumes:
+    - name: shared
+      hostPath:
+        path: /var/lib/olares-overlay-poc
+        type: DirectoryOrCreate
+  initContainers:
+    - name: mounter
+      image: docker.io/beclab/lovehunter9-anomalyco-opencode:1.16.0-test1
+      securityContext:
+        privileged: true
+        runAsUser: 0
+      command: ["sh", "-c"]
+      args:
+        - |
+          set -ex
+          B=/shared
+          mkdir -p "$B/upper" "$B/work" "$B/merged"
+          mountpoint -q "$B/merged" && umount "$B/merged" || true
+          mount -t overlay overlay \
+            -o lowerdir=/usr,upperdir="$B/upper",workdir="$B/work" "$B/merged"
+          echo "=== MOUNTED ==="; mount | grep "$B/merged" || true
+          echo "=== merged/bin (from lowerdir=/usr) ==="; ls "$B/merged/bin" | head
+      volumeMounts:
+        - name: shared
+          mountPath: /shared
+          mountPropagation: Bidirectional
+  containers:
+    - name: writer            # root：写穿到 upper
+      image: docker.io/beclab/lovehunter9-anomalyco-opencode:1.16.0-test1
+      securityContext:
+        runAsUser: 0
+      command: ["sh", "-c"]
+      args:
+        - |
+          set -x
+          echo "poc-$(date +%s)" > /shared/merged/POC_MARKER
+          # 模拟“安装一个文件”落进 upper
+          mkdir -p /shared/merged/local-test && echo hi > /shared/merged/local-test/hello
+          ls -la /shared/upper            # 确认写穿到了 upper
+          sleep 100000
+      volumeMounts:
+        - name: shared
+          mountPath: /shared
+          mountPropagation: HostToContainer
+    - name: consumer          # 非 root：必须能看到合并视图 + writer 写入
+      image: docker.io/beclab/lovehunter9-anomalyco-opencode:1.16.0-test1
+      securityContext:
+        runAsUser: 1000
+      command: ["sh", "-c"]
+      args:
+        - |
+          set -x
+          sleep 6
+          echo "=== consumer 看 merged/bin ==="; ls /shared/merged/bin | head
+          echo "=== consumer 看 writer 写的 marker ==="; cat /shared/merged/POC_MARKER 2>&1
+          echo "=== consumer 看 local-test ==="; cat /shared/merged/local-test/hello 2>&1
+          sleep 100000
+      volumeMounts:
+        - name: shared
+          mountPath: /shared
+          mountPropagation: HostToContainer
