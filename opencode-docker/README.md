@@ -91,12 +91,14 @@ opencode at runtime (just like the OMO cache).
 
 ### Caveat: Olares skill descriptions vs the 1024-char limit
 
-5 of the 6 `beclab/Olares` skills currently have a `description` longer than the
-1024-char limit opencode/zed/codex document. opencode **silently loads** them
-(no error/truncation), but over-long descriptions bloat the agent's tool/skill
-context. Baking the skills in by default ships that to every user. This is a
-skill-authoring issue in `beclab/Olares`, independent of this image; flagged
-here so the trade-off is explicit.
+Several of the `beclab/Olares` skills (the build installs 7: olares-cluster,
+-dashboard, -files, -market, -settings, -shared, -chart) currently have a
+`description` longer than the 1024-char limit opencode/zed/codex document.
+opencode **silently loads** them (no error/truncation), but over-long
+descriptions bloat the agent's tool/skill context. Baking the skills in by
+default ships that to every user. This is a skill-authoring issue in
+`beclab/Olares`, independent of this image; flagged here so the trade-off is
+explicit.
 
 ## OMO pre-warm caveat (arm64 / QEMU)
 

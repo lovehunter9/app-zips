@@ -155,31 +155,37 @@ RUN set -eu; \
     echo "Baked OMO cache: $(du -sh "$BAKE/opencode-cache/packages/$OMO_SPEC" | cut -f1)"
 
 # ---- Bake the Olares Agent Skills into a NEUTRAL staging dir -----------------
-# The wizard's second step is `npx skills add beclab/Olares -y -g`, which writes
-# to opencode's GLOBAL skills dir = $HOME/.config/opencode/skills. At runtime
-# $HOME=/home/opencode is the appData hostPath that OVERLAYS this image, so we
-# can't bake there directly (it would be hidden) -- same problem as the OMO
-# cache. So we install under a throwaway HOME, scoped to the opencode agent and
-# all skills, then relocate the result into /opt/olares-bake/opencode-skills/.
-# The chart's init seeds it into the real ~/.config/opencode/skills on first
-# boot (see design doc 9A). Asserts non-empty so the build fails loudly if the
-# skills repo clone/selection produced nothing.
+# The wizard's second step is `npx skills add beclab/Olares -y -g`. We scope it
+# to the opencode agent + all skills under a throwaway HOME. NOTE: the exact
+# directory the `skills` tool writes to varies by tool version (older versions
+# used ~/.config/opencode/skills; current ones use ~/.agents/skills), so we do
+# NOT hardcode it -- we collect every installed skill dir by locating its
+# SKILL.md, wherever it landed, and relocate those into the staging dir.
+# At runtime opencode reads GLOBAL skills from ~/.config/opencode/skills/<name>/
+# (this is where the chart already writes its own web-preview/system-admin
+# skills), and /home/opencode is the appData hostPath that OVERLAYS this image,
+# so the chart's init seeds these from staging into that dir on first boot
+# (see design doc 9A). Asserts at least one SKILL.md so the build fails loudly
+# if the skills repo clone/selection produced nothing.
 RUN set -eu; \
     BAKE=/opt/olares-bake; \
     SKILLS_HOME="$BAKE/skillshome"; \
-    mkdir -p "$SKILLS_HOME"; \
+    DEST="$BAKE/opencode-skills"; \
+    mkdir -p "$SKILLS_HOME" "$DEST"; \
     HOME="$SKILLS_HOME" npx -y skills add beclab/Olares -a opencode --skill '*' -g -y \
       >/tmp/skills-add.log 2>&1 || true; \
-    SRC="$SKILLS_HOME/.config/opencode/skills"; \
-    if [ -z "$(ls -A "$SRC" 2>/dev/null || true)" ]; then \
-      echo "FATAL: Olares Agent Skills were not installed into $SRC"; \
-      tail -60 /tmp/skills-add.log || true; \
+    found=0; \
+    for f in $(find "$SKILLS_HOME" -type f -name SKILL.md); do \
+      cp -a "$(dirname "$f")" "$DEST/"; \
+      found=1; \
+    done; \
+    if [ "$found" != 1 ]; then \
+      echo "FATAL: no SKILL.md found after 'skills add' (nothing installed)"; \
+      tail -80 /tmp/skills-add.log || true; \
       exit 1; \
     fi; \
-    mkdir -p "$BAKE/opencode-skills"; \
-    cp -a "$SRC/." "$BAKE/opencode-skills/"; \
     rm -rf "$SKILLS_HOME" /tmp/skills-add.log; \
-    echo "Baked Olares skills: $(ls "$BAKE/opencode-skills" | tr '\n' ' ')"
+    echo "Baked Olares skills: $(ls "$DEST" | tr '\n' ' ')"
 
 # Record what was baked so the chart/init can pin & seed deterministically.
 RUN set -eu; \
