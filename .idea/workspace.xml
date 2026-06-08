@@ -6,10 +6,7 @@
   <component name="ChangeListManager">
     <list default="true" id="e9836655-cb5c-456b-aef7-0ca255338318" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/opencode-docker/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/opencode-docker/README.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/opencode/Chart.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opencode/Chart.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/opencode/OlaresManifest.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opencode/OlaresManifest.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/opencode/templates/opencode.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/opencode/templates/opencode.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/opencode-1.0.44.tgz" beforeDir="false" afterPath="$PROJECT_DIR$/opencode-1.0.44.tgz" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -17,7 +14,7 @@
     <option name="LAST_RESOLUTION" value="IGNORE" />
   </component>
   <component name="EmbeddingIndexingInfo">
-    <option name="cachedIndexableFilesCount" value="2353" />
+    <option name="cachedIndexableFilesCount" value="2379" />
     <option name="fileBasedEmbeddingIndicesEnabled" value="true" />
   </component>
   <component name="FileTemplateManagerImpl">
