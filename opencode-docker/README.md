@@ -63,6 +63,46 @@ don't have), so this is a **rewrite**, not an extension:
 - `/opt/olares-bake/BAKE_MANIFEST` records the pinned versions (opencode / OMO /
   olares-cli / skills list) for the chart.
 
+## Dockerfile walkthrough (stage by stage)
+
+Relationship to upstream: the official image is ~18 lines that `FROM alpine`, add
+`libgcc libstdc++ ripgrep`, set `BUN_RUNTIME_TRANSPILER_CACHE_PATH=0`, **`COPY`
+their own CI-built `dist/` binary**, and `ENTRYPOINT ["opencode"]`. We can't
+extend that (we don't have their artifact), so this is a **self-contained
+rewrite** that keeps the same alpine base, the same base deps, the same BUN knob
+and entrypoint — the only real divergence is fetching the opencode binary from
+the **GitHub release** instead of `COPY`-ing a private artifact. Everything else
+added here is just moving the chart's old runtime installs to build time.
+
+Multi-stage layout (`TARGETARCH` is injected by buildx per platform):
+
+```
+base ──► build-amd64 ─┐
+   └───► build-arm64 ─┴─► final
+```
+
+- **`base`** — alpine + full toolchain. Official base deps (`libgcc libstdc++
+  ripgrep`) plus the exact `BASE_PKGS` the chart's `init-packages` used to
+  `apk add`; removes PEP 668 `EXTERNALLY-MANAGED`; asserts node >= 20.
+  → replaces the chart's networked "Installing system packages" step.
+- **`build-amd64`** (x86_64 only) — embeds the sgerrand key, installs **glibc**
+  + the `/lib64/ld-linux-x86-64.so.2` symlink, downloads the **glibc** opencode
+  binary (`opencode-linux-x64.tar.gz`), sets `LD_LIBRARY_PATH`.
+  → replaces the chart's runtime glibc download + opencode binary swap.
+- **`build-arm64`** (arm64 only) — downloads the **musl** opencode binary
+  (`opencode-linux-arm64-musl.tar.gz`); no glibc, matching upstream.
+- **`final`** (`FROM build-${TARGETARCH}`) — `opencode --version` smoke test;
+  `npm install -g vite`; `npm install -g @olares/cli@latest`; pre-warm + stage
+  the OMO cache; install + stage the Olares skills; write `BAKE_MANIFEST`; keep
+  `ENTRYPOINT ["opencode"]`.
+  → replaces the chart's `npm install -g vite`, the global-npm OMO install, and
+  the `npx @olares/cli@latest install` the user used to run by hand.
+
+Build-time vs runtime split: `base`/`build-*` populate the **rootfs** (`/usr`,
+`/lib`, `/lib64`, …) which the chart snapshots into `.pkg-root`; `final` also
+writes the two **staging dirs** under `/opt/olares-bake/` that the chart seeds
+into `$HOME` (next section explains why).
+
 ## IMPORTANT: runtime overlay contract (why we stage instead of bake-in-place)
 
 At runtime the chart overlays hostPaths on top of this image:
@@ -85,9 +125,10 @@ then seeds them into the right place on first boot:
 
 The matching chart changes (init seed logic for the OMO cache **and** the
 skills, version bumps, pinned plugin spec) are specified in the design doc §9A
-and are a **separate step** from building this image. Until that seed step
-lands, the staged skills are present in the image but not yet visible to
-opencode at runtime (just like the OMO cache).
+and are **already implemented** in `opencode/templates/opencode.yaml`
+(`seed_omo_cache` / `seed_skills`, both called on the cached and fresh init
+paths). Building this image and shipping the chart are still two separate
+artifacts, but the runtime side is in place.
 
 ### Caveat: Olares skill descriptions vs the 1024-char limit
 

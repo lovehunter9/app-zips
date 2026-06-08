@@ -28,26 +28,17 @@ spec:
     spec:
       initContainers:
         - name: init-setup
-          image: "docker.io/beclab/anomalyco-opencode:1.14.19"
+          image: "docker.io/beclab/lovehunter9-anomalyco-opencode:1.16.0-test1"
           command:
             - sh
             - "-c"
             - |
               set -e
-              wget -q -O /dev/null https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/APKINDEX.tar.gz 2>/dev/null &
-              _wpid=$!
-              ( sleep 5 && kill "$_wpid" 2>/dev/null ) &
-              _gpid=$!
-              if ! wait "$_wpid" 2>/dev/null; then
-                echo "=== init-setup: Alpine CDN unreachable or too slow, switching to China mirrors ==="
-                sed -i 's|dl-cdn.alpinelinux.org|mirrors.aliyun.com|g' /etc/apk/repositories
-              fi
-              kill "$_gpid" 2>/dev/null || true
-              wait "$_gpid" 2>/dev/null || true
-              apk add --no-cache python3
+              # python3 is baked into the forked image; no apk / network needed here.
               OC_DOMAIN="{{ $opencodeDomain }}"
               export OLARES_OC_DOMAIN="$OC_DOMAIN"
               export OLARES_ENABLE_OMO="{{ if $enableOMO }}1{{ else }}0{{ end }}"
+              export OLARES_OMO_VERSION="{{ index $env "OPENCODE_OMO_VERSION" | default "4.7.5" }}"
               mkdir -p /home/opencode/workspace \
                        /home/opencode/.opencode \
                        /home/opencode/.config/opencode \
@@ -254,7 +245,11 @@ spec:
                 'GLOBAL_JSON = Path("/home/opencode/.config/opencode/opencode.json")' \
                 'WORKSPACE_JSON = Path("/home/opencode/workspace/opencode.json")' \
                 'OLARES_REF = "/home/opencode/.config/opencode/olares-baseline-instructions.md"' \
-                'PLUGIN_NPM = "oh-my-openagent"' \
+                'OMO_VER = os.environ.get("OLARES_OMO_VERSION", "4.7.5")' \
+                'parts = OMO_VER.split(".")' \
+                'if len(parts) != 3 or not all(x.isdigit() for x in parts):' \
+                '    OMO_VER = "4.7.5"' \
+                'PLUGIN_NPM = f"oh-my-openagent@{OMO_VER}"' \
                 'STALE_PLUGIN_NPM = "oh-my-opencode"' \
                 '' \
                 'LEGACY_S1 = (' \
@@ -321,11 +316,9 @@ spec:
                 '    plugins = []' \
                 'plugins = [p for p in plugins if isinstance(p, str)]' \
                 'plugins = [p for p in plugins if p != STALE_PLUGIN_NPM]' \
+                'plugins = [p for p in plugins if not p.startswith("oh-my-openagent")]' \
                 'if ENABLE_OMO:' \
-                '    plugins = [p for p in plugins if p != PLUGIN_NPM]' \
                 '    plugins.append(PLUGIN_NPM)' \
-                'else:' \
-                '    plugins = [p for p in plugins if p != PLUGIN_NPM]' \
                 'if plugins:' \
                 '    cfg["plugin"] = plugins' \
                 'else:' \
@@ -510,61 +503,26 @@ spec:
             runAsUser: 0
 
         - name: init-packages
-          image: "docker.io/beclab/anomalyco-opencode:1.14.19"
+          image: "docker.io/beclab/lovehunter9-anomalyco-opencode:1.16.0-test1"
           command:
             - sh
             - "-c"
             - |
               PKG="/home/opencode/.pkg-root"
-              OC_VER="1.14.19"
-              GLIBC_VER="2.35-r1"
-              BASE_PKGS="python3 py3-pip git curl wget bash openssh-client nodejs npm go rust cargo iproute2 zip unzip gzip bzip2 xz tar zstd"
-              GLOBAL_NPM_TOOLS="vite"
-              FINGERPRINT="oc=${OC_VER} glibc=${GLIBC_VER} arch=$(uname -m) pkgs=${BASE_PKGS} npm=${GLOBAL_NPM_TOOLS}"
+              BAKE_MANIFEST="/opt/olares-bake/BAKE_MANIFEST"
+              # Marker binds to the baked image (opencode/OMO/cli/skills versions).
+              # A new image -> new manifest -> new hash -> the snapshot is re-seeded.
+              FINGERPRINT="$(cat "$BAKE_MANIFEST" 2>/dev/null) arch=$(uname -m)"
               PKG_HASH=$(printf '%s' "$FINGERPRINT" | sha256sum | cut -c1-16)
               MARKER="$PKG/.installed-${PKG_HASH}"
 
-              OMO_VER="{{ index $env "OPENCODE_OMO_VERSION" | default "3.17.4" }}"
+              OMO_VER="{{ index $env "OPENCODE_OMO_VERSION" | default "4.7.5" }}"
               case "$OMO_VER" in
                 ""|latest|next|beta|*[!0-9.]*)
-                  echo "=== WARNING: invalid OPENCODE_OMO_VERSION '$OMO_VER', falling back to 3.17.4 ==="
-                  OMO_VER="3.17.4"
+                  echo "=== WARNING: invalid OPENCODE_OMO_VERSION '$OMO_VER', falling back to 4.7.5 ==="
+                  OMO_VER="4.7.5"
                   ;;
               esac
-
-              setup_mirrors() {
-                USE_CN_MIRROR=false
-                wget -q -O /dev/null https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/APKINDEX.tar.gz 2>/dev/null &
-                _wpid=$!
-                ( sleep 5 && kill "$_wpid" 2>/dev/null ) &
-                _gpid=$!
-                if wait "$_wpid" 2>/dev/null; then
-                  echo "=== Network: Alpine CDN reachable ==="
-                else
-                  echo "=== Network: Alpine CDN unreachable or too slow, switching to China mirrors ==="
-                  USE_CN_MIRROR=true
-                  sed -i 's|dl-cdn.alpinelinux.org|mirrors.aliyun.com|g' /etc/apk/repositories
-                fi
-                kill "$_gpid" 2>/dev/null || true
-                wait "$_gpid" 2>/dev/null || true
-              }
-
-              github_download() {
-                local url="$1" output="$2"
-                if [ "$USE_CN_MIRROR" = "true" ]; then
-                  for proxy in https://ghproxy.net https://gh-proxy.com https://ghproxy.homeboyc.cn https://ghfast.top; do
-                    echo "=== Trying proxy $proxy for: $url ==="
-                    if curl -fsSL --connect-timeout 15 --speed-limit 10000 --speed-time 30 \
-                         "${proxy}/$url" -o "$output"; then
-                      return 0
-                    fi
-                    rm -f "$output"
-                    echo "=== Proxy $proxy failed ==="
-                  done
-                  echo "=== All proxies failed, falling back to direct ==="
-                fi
-                curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 15 --speed-limit 10000 --speed-time 30 "$url" -o "$output"
-              }
 
               verify_cache() {
                 [ ! -d "$PKG/bin" ] || [ ! -d "$PKG/usr" ] || [ ! -d "$PKG/lib" ] && return 1
@@ -605,9 +563,28 @@ spec:
                 return 0
               }
 
+              ensure_apk_mirror() {
+                # Only used by restore_user_packages (apk add). The base install
+                # is baked, so this never runs on a fresh instance (no user
+                # packages -> restore returns early, zero network). When the user
+                # HAS installed packages, restoring them needs apk/network, so we
+                # mirror the pkg-manager probe to stay usable behind the GFW.
+                wget -q -O /dev/null https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/APKINDEX.tar.gz 2>/dev/null &
+                _wpid=$!
+                ( sleep 5 && kill "$_wpid" 2>/dev/null ) &
+                _gpid=$!
+                if ! wait "$_wpid" 2>/dev/null; then
+                  echo "=== restore: Alpine CDN slow/unreachable, switching to China mirrors ==="
+                  sed -i 's|dl-cdn.alpinelinux.org|mirrors.aliyun.com|g' /etc/apk/repositories
+                fi
+                kill "$_gpid" 2>/dev/null || true
+                wait "$_gpid" 2>/dev/null || true
+              }
+
               restore_user_packages() {
                 UPKGS="/home/opencode/.user-packages"
                 [ ! -s "$UPKGS" ] && return 0
+                ensure_apk_mirror
                 RESTORE=$(cat "$UPKGS" | tr '\n' ' ')
                 echo "=== Restoring user packages: $RESTORE ==="
                 apk info -q 2>/dev/null | sort > /tmp/.pkgs-before
@@ -655,63 +632,73 @@ spec:
               cp /home/opencode/.profile /home/opencode/.bashrc
               chown 1000:1000 /home/opencode/.profile /home/opencode/.bashrc
 
-              olares_run_omo() {
-                OMO_FOUND=false
-                for d in /usr/lib/node_modules/oh-my-opencode \
-                         /usr/local/lib/node_modules/oh-my-opencode \
-                         "$PKG/usr/lib/node_modules/oh-my-opencode" \
-                         "$PKG/usr/local/lib/node_modules/oh-my-opencode"; do
-                  [ -d "$d" ] && [ -f "$d/package.json" ] || continue
-                  INST_VER=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$d/package.json" | head -n1)
-                  if [ "$INST_VER" = "$OMO_VER" ]; then
-                    OMO_FOUND=true
-                    break
-                  else
-                    echo "=== OMO: $d at '${INST_VER:-unknown}', want '$OMO_VER', will reinstall ==="
-                  fi
-                done
-                if [ "$OMO_FOUND" = "true" ]; then
-                  echo "=== OMO: oh-my-opencode@${OMO_VER} already installed, skipping ==="
+              seed_omo_cache() {
+                # opencode's plugin loader reads the OMO plugin from
+                #   ~/.cache/opencode/packages/<spec>/node_modules
+                # which lives under /home/opencode (appData hostPath). The forked
+                # image bakes that cache for the default version into a neutral
+                # staging dir; copy it in once (offline). This replaces the old
+                # global-npm install. If the user pinned a non-baked version via
+                # OPENCODE_OMO_VERSION, there is no staged cache and opencode
+                # fetches it at runtime -- same fallback semantics as before.
+                OMO_SPEC="oh-my-openagent@${OMO_VER}"
+                SRC="/opt/olares-bake/opencode-cache/packages/$OMO_SPEC"
+                DST="/home/opencode/.cache/opencode/packages/$OMO_SPEC"
+                if [ -d "$DST/node_modules" ]; then
+                  echo "=== OMO: cache already present for $OMO_SPEC ==="
+                elif [ -d "$SRC" ]; then
+                  echo "=== OMO: seeding baked cache for $OMO_SPEC ==="
+                  mkdir -p "$(dirname "$DST")"
+                  cp -a "$SRC" "$DST"
+                  chown -R 1000:1000 /home/opencode/.cache
                 else
-                  echo "=== OMO: installing nodejs+npm and oh-my-opencode@${OMO_VER} ==="
-                  apk add --no-cache nodejs npm 2>&1 || { echo "=== WARNING: apk add nodejs npm failed ==="; return; }
-                  if [ "$USE_CN_MIRROR" = "true" ]; then
-                    npm config set registry https://registry.npmmirror.com 2>/dev/null || true
-                  fi
-                  if npm install -g --ignore-scripts "oh-my-opencode@${OMO_VER}" 2>&1; then
-                    OMO_DIR=$(npm root -g 2>/dev/null)/oh-my-opencode
-                    if [ -d "$OMO_DIR" ] && [ -d "$PKG/usr" ]; then
-                      SNAP_TARGET="$PKG$(npm root -g 2>/dev/null)/oh-my-opencode"
-                      mkdir -p "$(dirname "$SNAP_TARGET")"
-                      rm -rf "$SNAP_TARGET"
-                      cp -a "$OMO_DIR" "$SNAP_TARGET" 2>/dev/null && \
-                        echo "=== OMO: patched into snapshot for next restart ==="
-                    fi
-                  else
-                    echo "=== WARNING: npm install oh-my-opencode@${OMO_VER} failed ==="
-                  fi
+                  echo "=== OMO: no baked cache for $OMO_SPEC (env override); opencode will fetch at runtime ==="
                 fi
-                chown -R 1000:1000 /home/opencode/.local 2>/dev/null || true
               }
 
-              setup_mirrors
+              seed_skills() {
+                # The forked image bakes the Olares Agent Skills into a neutral
+                # staging dir. opencode reads global skills from
+                #   ~/.config/opencode/skills/<name>/SKILL.md
+                # which lives under /home/opencode (appData hostPath), so they
+                # cannot be baked into the rootfs snapshot -- they must be seeded
+                # here. The chart-managed web-preview/system-admin skills (written
+                # by init-setup) use different names and are left untouched.
+                # Stamped with $PKG_HASH so a new image refreshes them; no network.
+                SRC="/opt/olares-bake/opencode-skills"
+                [ -d "$SRC" ] || { echo "=== skills: no baked skills in image, skipping ==="; return 0; }
+                DST="/home/opencode/.config/opencode/skills"
+                STAMP="$DST/.olares-baked-stamp"
+                mkdir -p "$DST"
+                if [ -f "$STAMP" ] && [ "$(cat "$STAMP" 2>/dev/null)" = "$PKG_HASH" ]; then
+                  echo "=== skills: baked Olares skills already seeded (${PKG_HASH}) ==="
+                else
+                  echo "=== skills: seeding baked Olares skills ==="
+                  for d in "$SRC"/*/; do
+                    [ -d "$d" ] || continue
+                    name=$(basename "$d")
+                    rm -rf "$DST/$name"
+                    cp -a "$d" "$DST/$name"
+                  done
+                  echo "$PKG_HASH" > "$STAMP"
+                  echo "=== skills: seeded $(ls "$SRC" | tr '\n' ' ')==="
+                fi
+                chown -R 1000:1000 "$DST" 2>/dev/null || true
+              }
 
               if [ -f "$MARKER" ] && verify_cache; then
                 echo "=== Package snapshot cached (${PKG_HASH}) ==="
                 restore_user_packages
-                olares_run_omo
+                seed_omo_cache
+                seed_skills
                 exit 0
               fi
               rm -f "$MARKER"
 
-              echo "=== Installing system packages ==="
-              if ! apk add --no-cache $BASE_PKGS; then
-                echo "=== FATAL: base package installation failed, exiting ==="
-                exit 1
-              fi
-
-              echo "=== Removing PEP 668 EXTERNALLY-MANAGED marker ==="
-              rm -f /usr/lib/python3.*/EXTERNALLY-MANAGED
+              # All base packages, glibc + the glibc opencode binary, vite and the
+              # olares-cli are BAKED into the forked image rootfs. There is nothing
+              # to install over the network here: the snapshot below simply copies
+              # the already-present rootfs into .pkg-root (fast, offline).
 
               echo "=== Creating persistent Python venv ==="
               VENV="/home/opencode/.venv"
@@ -724,38 +711,14 @@ spec:
               addgroup -g 1000 opencode 2>/dev/null || true
               adduser -D -u 1000 -G opencode -h /home/opencode -s /bin/bash opencode 2>/dev/null || true
 
-              ARCH=$(uname -m)
-              if [ "$ARCH" = "x86_64" ]; then
-                echo "=== Installing glibc (x86_64) ==="
-                echo "=== Embedding sgerrand RSA public key ==="
-                echo "LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KTUlJQklqQU5CZ2txaGtpRzl3MEJBUUVGQUFPQ0FROEFNSUlCQ2dLQ0FRRUFwWjJ1MUtKS1V1L2ZXNEEyNXk5bQp5NzBBR0VhL0ozV2k1aWJOVkdObjFnVDFyMFZmZ2VXZDBwVXliUzRVbWNIZGlOenhKUGdvV1FoVjJTU1cxSll1CnRPcUtaRjVRU042WDkzN1BUVXBOQmpVdkx0VFExdmUxZnAzOXVmL2xFWFBwRnBPUEw4OExLbkRCZ2JoN3drQ3AKbTJLekxWR0NoZjgzTVMwU2hMNkc5RVFJQVV4TG05OVZwZ1Jqd3FUUS9LZnpHdHBrZTF3cXdzNGF1MEFiNHFQWQpLWHZNTFNQTFVwN2NmdWxXdmhtWlNlZ3I1QWRoTnc1S05pelBxQ0pUOFpyR3ZnSHlwWHlpRnZ2QUg1WVJ0U3NjClp2bzlHSTJlMk1hWnlvOS9sdmIrTGJMRUpaS0VRY2txUmo0UDI2Z21BU3JaRVBTdHdjK3lxeTFTaEhMQTBqNm0KMVFJREFRQUIKLS0tLS1FTkQgUFVCTElDIEtFWS0tLS0tCg==" | base64 -d > /etc/apk/keys/sgerrand.rsa.pub
-                github_download "https://github.com/sgerrand/alpine-pkg-glibc/releases/download/${GLIBC_VER}/glibc-${GLIBC_VER}.apk" /tmp/glibc.apk
-                echo "=== Removing libc6-compat/gcompat before glibc install ==="
-                apk del libc6-compat gcompat 2>&1 || true
-                if apk add --no-cache --force-overwrite /tmp/glibc.apk libstdc++ 2>&1; then
-                  mkdir -p /lib64
-                  ln -sf /usr/glibc-compat/lib/ld-linux-x86-64.so.2 /lib64/ld-linux-x86-64.so.2
-                  echo "=== Replacing opencode binary with glibc build ==="
-                  cp /usr/local/bin/opencode /tmp/opencode.musl.bak 2>/dev/null || true
-                  if github_download "https://github.com/anomalyco/opencode/releases/download/v${OC_VER}/opencode-linux-x64.tar.gz" /tmp/opencode-glibc.tar.gz && \
-                    tar -xzf /tmp/opencode-glibc.tar.gz -C /usr/local/bin; then
-                    chmod +x /usr/local/bin/opencode
-                  else
-                    echo "=== WARNING: glibc binary download failed, restoring musl binary ==="
-                    cp /tmp/opencode.musl.bak /usr/local/bin/opencode 2>/dev/null || true
-                    chmod +x /usr/local/bin/opencode
-                  fi
-                  rm -f /tmp/opencode-glibc.tar.gz /tmp/opencode.musl.bak
-                else
-                  echo "=== WARNING: glibc installation failed, using musl binary ==="
-                fi
-              else
-                echo "=== Arch $ARCH: using original musl binary ==="
+              # bash is baked (glibc is installed at build time, so there is no
+              # runtime glibc cascade-removal to repair). Only self-heal if the
+              # baked bash is somehow not runnable -- no network on the happy path.
+              if ! /usr/bin/bash -c 'true' 2>/dev/null; then
+                echo "=== bash not runnable, reinstalling ==="
+                apk del bash 2>/dev/null || true
+                apk add --no-cache bash 2>&1 || echo "=== WARNING: bash reinstall failed in init, pkg-manager will fix ==="
               fi
-
-              echo "=== Force-reinstalling bash (fix glibc cascade removal) ==="
-              apk del bash 2>/dev/null || true
-              apk add --no-cache bash 2>&1 || echo "=== WARNING: bash reinstall failed in init, pkg-manager will fix ==="
 
               echo "=== Creating pkg-install wrapper ==="
               cat > /usr/local/bin/pkg-install << 'EOFWRAPPER'
@@ -914,15 +877,7 @@ spec:
               EOFWRAPPER
               chmod +x /usr/local/bin/pkg-install
 
-              echo "=== Installing global npm tools: $GLOBAL_NPM_TOOLS ==="
-              if [ "$USE_CN_MIRROR" = "true" ]; then
-                npm config set registry https://registry.npmmirror.com 2>/dev/null || true
-              fi
-              if npm install -g --ignore-scripts $GLOBAL_NPM_TOOLS 2>&1; then
-                echo "=== Global npm tools installed at: $(command -v vite 2>/dev/null || echo 'vite NOT in PATH') ==="
-              else
-                echo "=== WARNING: npm install -g $GLOBAL_NPM_TOOLS failed ==="
-              fi
+              # vite is baked globally into the image; nothing to install here.
 
               echo "=== Snapshotting filesystem to $PKG ==="
               rm -rf "$PKG"
@@ -954,11 +909,15 @@ spec:
 
               restore_user_packages
 
-              # Install OMO (plugin layer) AFTER base snapshot is sealed.
-              # olares_run_omo saves OMO into $PKG via its own cp, independent of
-              # the base snapshot's "cp -a /usr" sweep. Keeps plugin/base decoupled
-              # and makes OMO persistence robust even if base-layer sweeps miss it.
-              olares_run_omo
+              # Seed the baked OMO plugin cache into ~/.cache (appData overlay) so
+              # opencode loads the pinned version offline. Replaces the old
+              # global-npm OMO install; runs after the base snapshot is sealed.
+              seed_omo_cache
+
+              # Seed the baked Olares Agent Skills into ~/.config/opencode/skills
+              # (appData overlay; cannot ride the rootfs snapshot). Coexists with
+              # the chart-managed web-preview/system-admin skills.
+              seed_skills
           volumeMounts:
             - name: opencode-home
               mountPath: /home/opencode
@@ -976,7 +935,7 @@ spec:
 
       containers:
         - name: opencode
-          image: "docker.io/beclab/anomalyco-opencode:1.14.19"
+          image: "docker.io/beclab/lovehunter9-anomalyco-opencode:1.16.0-test1"
           command:
             - sh
             - "-c"
@@ -1100,7 +1059,7 @@ spec:
               mountPath: /opt/bitnami/openresty/nginx/conf/server_blocks/nginx.conf
               subPath: nginx.conf
         - name: pkg-manager
-          image: "docker.io/beclab/anomalyco-opencode:1.14.19"
+          image: "docker.io/beclab/lovehunter9-anomalyco-opencode:1.16.0-test1"
           securityContext:
             runAsUser: 0
           command:
