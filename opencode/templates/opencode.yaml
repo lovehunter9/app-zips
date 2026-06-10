@@ -2,7 +2,7 @@
 {{- $opencodeDomain := index $opencodeDomainENV "_0" -}}
 {{- $env := .Values.olaresEnv | default dict -}}
 {{- $enableOMO := ne (index $env "OPENCODE_OMO" | default "false") "false" }}
-{{- $image := "docker.io/beclab/lovehunter9-anomalyco-opencode:1.17.0-test4" }}
+{{- $image := "docker.io/beclab/lovehunter9-anomalyco-opencode:1.17.0-test1" }}
 
 ---
 apiVersion: apps/v1

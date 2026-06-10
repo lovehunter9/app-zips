@@ -39,10 +39,11 @@ migrate_from_pkgroot() {
   # users' installed packages (e.g. ffmpeg) would otherwise vanish on upgrade.
   #
   # We import them WITHOUT touching the network: read the OLD snapshot's apk DB
-  # locally, diff against THIS image's base package set, and copy the files of
-  # the extra (= user-installed) packages straight into the overlay upper dir.
-  # init-overlay (runs after this) then mounts the upper, so the files appear in
-  # the merged /usr etc. Runs once (marker), and never aborts init on error.
+  # locally, diff against THIS image's base package set, copy the files of the
+  # extra (= user-installed) packages straight into the overlay upper dir, AND
+  # register them in apk's installed DB so behavior is identical (pkg-install
+  # --list shows them, --remove works). init-overlay (runs after this) then
+  # mounts the upper. Runs once (marker), and never aborts init on error.
   OLDROOT="/home/opencode/.pkg-root"
   UPPER="$PKG/upper"
   MIG_MARKER="$PKG/.migrated-pkgroot"
@@ -74,10 +75,30 @@ migrate_from_pkgroot() {
     done
     n=$((n + 1))
   done < /tmp/mig.list
+  # Register the imported packages in apk's installed DB so they behave exactly
+  # like before. Seed the upper DB from THIS image's base DB (correct versions
+  # for the new lower), then append the imported packages' records extracted
+  # verbatim from the legacy snapshot DB. Written to a temp first so a bad parse
+  # can never leave a corrupt DB.
+  if [ -s /tmp/mig.list ]; then
+    cp -a /lib/apk/db/installed /tmp/merged.db 2>/dev/null || true
+    awk '
+      FNR==NR { want[$0]=1; next }
+      { rec = rec $0 "\n" }
+      /^P:/  { pname = substr($0, 3) }
+      /^$/   { if (pname != "" && (pname in want)) printf "%s", rec; rec=""; pname="" }
+      END    { if (pname != "" && (pname in want)) printf "%s", rec }
+    ' /tmp/mig.list "$OLDROOT/lib/apk/db/installed" >> /tmp/merged.db 2>/dev/null || true
+    if [ -s /tmp/merged.db ]; then
+      mkdir -p "$UPPER/lib/apk/db"
+      cp /tmp/merged.db "$UPPER/lib/apk/db/installed"
+    fi
+    rm -f /tmp/merged.db
+  fi
   rm -f /tmp/base.list /tmp/old.list /tmp/mig.list
   mkdir -p "$PKG"
   touch "$MIG_MARKER"
-  echo "=== migrate: imported $n package(s) from .pkg-root into overlay upper (offline) ==="
+  echo "=== migrate: imported $n package(s) (files + apk DB) from .pkg-root into overlay upper (offline) ==="
 }
 
 seed_etc() {
