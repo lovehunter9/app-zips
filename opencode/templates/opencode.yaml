@@ -2,7 +2,7 @@
 {{- $opencodeDomain := index $opencodeDomainENV "_0" -}}
 {{- $env := .Values.olaresEnv | default dict -}}
 {{- $enableOMO := ne (index $env "OPENCODE_OMO" | default "false") "false" }}
-{{- $image := "docker.io/beclab/lovehunter9-anomalyco-opencode:1.16.0-test3" }}
+{{- $image := "docker.io/beclab/lovehunter9-anomalyco-opencode:1.17.0-test4" }}
 
 ---
 apiVersion: apps/v1
@@ -49,7 +49,7 @@ spec:
             - name: OLARES_ENABLE_OMO
               value: "{{ if $enableOMO }}1{{ else }}0{{ end }}"
             - name: OLARES_OMO_VERSION
-              value: "{{ index $env "OPENCODE_OMO_VERSION" | default "4.7.5" }}"
+              value: "{{ index $env "OPENCODE_OMO_VERSION" | default "4.8.1" }}"
           volumeMounts:
             - name: opencode-home
               mountPath: /home/opencode

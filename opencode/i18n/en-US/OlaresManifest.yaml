@@ -18,6 +18,16 @@ spec:
     - Configure your LLM provider and API keys in the Web UI.
     - Your code workspace is mounted at /home/opencode/workspace (linked to your Home/Code directory).
   upgradeDescription: |
+    Upgrade OpenCode version to 1.17.0
+
+    What's Changed (v1.17.0):
+    - Faster file search across large projects with the new fff-backed search tools.
+    - Added Cohere North and Claude Fable reasoning model support.
+    - More reliable MCP: clearer connection status, correct catalog pagination, and respected capabilities.
+    - Sessions can recover once from provider context-overflow errors instead of failing immediately.
+
+    Full release notes: https://github.com/anomalyco/opencode/releases/tag/v1.17.0
+
     Upgrade OpenCode version to 1.16.0
 
     What's Changed (v1.16.0):

@@ -23,13 +23,62 @@ PKG="/home/opencode/.pkg-overlay"
 # gates no network and triggers no reinstall.
 APP_HASH=$(sha256sum /opt/olares-bake/BAKE_MANIFEST 2>/dev/null | cut -c1-16)
 
-OMO_VER="${OLARES_OMO_VERSION:-4.7.5}"
+OMO_VER="${OLARES_OMO_VERSION:-4.8.1}"
 case "$OMO_VER" in
   ""|latest|next|beta|*[!0-9.]*)
-    echo "=== WARNING: invalid OPENCODE_OMO_VERSION '$OMO_VER', falling back to 4.7.5 ==="
-    OMO_VER="4.7.5"
+    echo "=== WARNING: invalid OPENCODE_OMO_VERSION '$OMO_VER', falling back to 4.8.1 ==="
+    OMO_VER="4.8.1"
     ;;
 esac
+
+migrate_from_pkgroot() {
+  # ONE-TIME, FULLY OFFLINE migration for users upgrading from the legacy
+  # `.pkg-root` design (the released 1.0.x chart bind-mounted a full
+  # appData/.pkg-root snapshot over /usr /lib ... and restored user packages
+  # with `apk add`). The new design uses the OverlayFS upper instead, so those
+  # users' installed packages (e.g. ffmpeg) would otherwise vanish on upgrade.
+  #
+  # We import them WITHOUT touching the network: read the OLD snapshot's apk DB
+  # locally, diff against THIS image's base package set, and copy the files of
+  # the extra (= user-installed) packages straight into the overlay upper dir.
+  # init-overlay (runs after this) then mounts the upper, so the files appear in
+  # the merged /usr etc. Runs once (marker), and never aborts init on error.
+  OLDROOT="/home/opencode/.pkg-root"
+  UPPER="$PKG/upper"
+  MIG_MARKER="$PKG/.migrated-pkgroot"
+  [ -f "$MIG_MARKER" ] && return 0
+  [ -f "$OLDROOT/lib/apk/db/installed" ] || return 0
+  echo "=== migrate: legacy .pkg-root detected; importing user packages into overlay upper (offline, no network) ==="
+  apk info 2>/dev/null | sort -u > /tmp/base.list
+  apk --root "$OLDROOT" info 2>/dev/null | sort -u > /tmp/old.list
+  if [ ! -s /tmp/base.list ] || [ ! -s /tmp/old.list ]; then
+    echo "=== migrate: could not read apk package lists; skipping (no change) ==="
+    rm -f /tmp/base.list /tmp/old.list
+    return 0
+  fi
+  # packages in the old snapshot that are NOT part of this image's base set
+  # (= user-installed packages plus their unique dependencies)
+  grep -vxF -f /tmp/base.list /tmp/old.list > /tmp/mig.list 2>/dev/null || true
+  n=0
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    apk --root "$OLDROOT" info -L "$p" 2>/dev/null | while IFS= read -r f; do
+      # skip the "<pkg> contains:" header and anything outside the overlay dirs
+      case "$f" in
+        usr/*|lib/*|lib64/*|bin/*|sbin/*) ;;
+        *) continue ;;
+      esac
+      [ -e "$OLDROOT/$f" ] || continue
+      mkdir -p "$UPPER/$(dirname "$f")"
+      cp -a "$OLDROOT/$f" "$UPPER/$f" 2>/dev/null || true
+    done
+    n=$((n + 1))
+  done < /tmp/mig.list
+  rm -f /tmp/base.list /tmp/old.list /tmp/mig.list
+  mkdir -p "$PKG"
+  touch "$MIG_MARKER"
+  echo "=== migrate: imported $n package(s) from .pkg-root into overlay upper (offline) ==="
+}
 
 seed_etc() {
   # /etc is the image's here (not overlay-bound). Copy the tiny base bits (KB)
@@ -102,6 +151,10 @@ seed_skills() {
   fi
   chown -R 1000:1000 "$DST" 2>/dev/null || true
 }
+
+# One-time offline import of user packages from a legacy .pkg-root snapshot
+# (must run before init-overlay mounts the upper; writes the upper dir directly).
+migrate_from_pkgroot
 
 echo "=== Setting up home directory (runs every start) ==="
 mkdir -p /home/opencode/.npm-global/bin /home/opencode/.npm-global/lib

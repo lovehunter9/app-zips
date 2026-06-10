@@ -30,8 +30,8 @@
 #   rides the .pkg-root snapshot like vite -- no $HOME seeding needed for it.
 # ------------------------------------------------------------------------------
 
-ARG OPENCODE_VERSION=1.16.0
-ARG OMO_VERSION=4.7.5
+ARG OPENCODE_VERSION=1.17.0
+ARG OMO_VERSION=4.8.1
 ARG GLIBC_VERSION=2.35-r1
 # Pinned Alpine MINOR (vs the rolling `alpine` tag). The chart NEVER resets the
 # OverlayFS upper, so the user's installed packages persist across upgrades with
