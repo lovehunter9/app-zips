@@ -2,7 +2,7 @@
 {{- $opencodeDomain := index $opencodeDomainENV "_0" -}}
 {{- $env := .Values.olaresEnv | default dict -}}
 {{- $enableOMO := ne (index $env "OPENCODE_OMO" | default "false") "false" }}
-{{- $image := "docker.io/beclab/lovehunter9-anomalyco-opencode:1.16.0.0" }}
+{{- $image := "docker.io/beclab/lovehunter9-anomalyco-opencode:1.16.0-test3" }}
 
 ---
 apiVersion: apps/v1
@@ -29,10 +29,20 @@ spec:
     spec:
       initContainers:
         # All init logic is baked into the image at /opt/olares-bake/lib; the
-        # chart only execs it and passes the few dynamic values via env.
-        - name: init-setup
+        # chart only execs it and passes the few dynamic values via env. Both
+        # init steps below are STRICTLY OFFLINE (no network on new install /
+        # restart / upgrade): everything is baked into the image, user packages
+        # persist in the OverlayFS upper and are never reinstalled.
+        #
+        # init-home: lay down the $HOME-side config + seeds (opencode.json,
+        # skills, OMO cache, /etc bits, venv). Runs init-setup then init-packages
+        # (merged into one container -- neither needs the overlay mounts).
+        - name: init-home
           image: "{{ $image }}"
-          command: ["sh", "-c", "exec /opt/olares-bake/lib/init-setup.sh"]
+          command:
+            - "sh"
+            - "-c"
+            - "/opt/olares-bake/lib/init-setup.sh && exec /opt/olares-bake/lib/init-packages.sh"
           env:
             - name: OLARES_OC_DOMAIN
               value: "{{ $opencodeDomain }}"
@@ -40,12 +50,18 @@ spec:
               value: "{{ if $enableOMO }}1{{ else }}0{{ end }}"
             - name: OLARES_OMO_VERSION
               value: "{{ index $env "OPENCODE_OMO_VERSION" | default "4.7.5" }}"
-          resources: {}
           volumeMounts:
             - name: opencode-home
               mountPath: /home/opencode
             - name: opencode-workspace
               mountPath: /home/opencode/workspace
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
           terminationMessagePath: /dev/termination-log
           terminationMessagePolicy: File
           imagePullPolicy: IfNotPresent
@@ -56,8 +72,9 @@ spec:
           # Privileged: mounts an OverlayFS so the baked image rootfs (/usr /bin
           # /sbin /lib /lib64) is the read-only lower layer (ZERO copy) and only
           # user-installed package deltas live in a small persistent upper layer.
-          # Allowed by the cluster OPA policy because this is a trusted (beclab/)
-          # image. Replaces the old multi-hundred-MB `cp -a` snapshot entirely.
+          # The upper is NEVER reset, so user packages persist across upgrades
+          # with zero reinstall / zero network. Allowed by the cluster OPA policy
+          # because this is a trusted (beclab/) image.
           image: "{{ $image }}"
           command: ["sh", "-c", "exec /opt/olares-bake/lib/init-overlay.sh"]
           resources:
@@ -75,44 +92,6 @@ spec:
           securityContext:
             runAsUser: 0
             privileged: true
-
-        - name: init-packages
-          image: "{{ $image }}"
-          command: ["sh", "-c", "exec /opt/olares-bake/lib/init-packages.sh"]
-          env:
-            - name: OLARES_OMO_VERSION
-              value: "{{ index $env "OPENCODE_OMO_VERSION" | default "4.7.5" }}"
-          volumeMounts:
-            - name: opencode-home
-              mountPath: /home/opencode
-            - name: opencode-workspace
-              mountPath: /home/opencode/workspace
-            # Overlay merges (mounted by init-overlay): apk add writes straight
-            # into the persistent upper layer here.
-            - name: pkg-bin
-              mountPath: /bin
-              mountPropagation: HostToContainer
-            - name: pkg-sbin
-              mountPath: /sbin
-              mountPropagation: HostToContainer
-            - name: pkg-usr
-              mountPath: /usr
-              mountPropagation: HostToContainer
-            - name: pkg-lib
-              mountPath: /lib
-              mountPropagation: HostToContainer
-            - name: pkg-lib64
-              mountPath: /lib64
-              mountPropagation: HostToContainer
-          resources:
-            requests:
-              cpu: 100m
-              memory: 256Mi
-            limits:
-              cpu: "2"
-              memory: 2Gi
-          securityContext:
-            runAsUser: 0
 
       containers:
         - name: opencode

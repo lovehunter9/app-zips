@@ -33,23 +33,31 @@
 ARG OPENCODE_VERSION=1.16.0
 ARG OMO_VERSION=4.7.5
 ARG GLIBC_VERSION=2.35-r1
+# Pinned Alpine MINOR (vs the rolling `alpine` tag). The chart NEVER resets the
+# OverlayFS upper, so the user's installed packages persist across upgrades with
+# zero reinstall; pinning the minor keeps the base libs they link against
+# ABI-stable while the upper is kept. Bump this only deliberately (and rarely).
+# NOTE: pkg-manager.sh hardcodes the v3.23 mirror path for use-time installs;
+# keep it in sync if this is bumped.
+ARG ALPINE_TAG=3.23
+# Single source of truth for the base apk package set (also keeps the package
+# list out of the long RUN line below).
+ARG BASE_PKGS="libgcc libstdc++ ripgrep python3 py3-pip git curl wget bash openssh-client nodejs npm go rust cargo iproute2 zip unzip gzip bzip2 xz tar zstd"
 
 # ==============================================================================
 # base: official base deps + our full toolchain (was: chart init-packages apk)
 # ==============================================================================
-FROM alpine AS base
+FROM alpine:${ALPINE_TAG} AS base
 
 # Match official image: disable bun's runtime transpiler cache in containers.
 ARG BUN_RUNTIME_TRANSPILER_CACHE_PATH=0
 ENV BUN_RUNTIME_TRANSPILER_CACHE_PATH=${BUN_RUNTIME_TRANSPILER_CACHE_PATH}
 
-# libgcc/libstdc++/ripgrep = official base deps.
-# The rest = the exact BASE_PKGS the chart's init-packages used to `apk add`.
-RUN apk add --no-cache \
-      libgcc libstdc++ ripgrep \
-      python3 py3-pip git curl wget bash openssh-client \
-      nodejs npm go rust cargo iproute2 \
-      zip unzip gzip bzip2 xz tar zstd
+# libgcc/libstdc++/ripgrep = official base deps; the rest = the exact base set
+# the chart's init-packages used to `apk add` at runtime. List lives in the ARG
+# above as a single source of truth.
+ARG BASE_PKGS
+RUN apk add --no-cache $BASE_PKGS
 
 # PEP 668: let pip / venv work (was: chart `rm -f .../EXTERNALLY-MANAGED`).
 RUN rm -f /usr/lib/python3.*/EXTERNALLY-MANAGED

@@ -11,6 +11,16 @@ touch "$UPKGS"
 
 rm -f /lib/apk/db/lock 2>/dev/null || true
 
+# Persistent apk cache on the appData hostPath (shared with init-packages'
+# restore). Downloaded .apk files are kept here so re-installing a package at the
+# SAME version (e.g. remove + re-add, a retry, or restore after a deliberate base
+# change) is served from local disk -- no re-download. apk auto-uses the cache
+# when /etc/apk/cache is a (sym)link to a directory.
+APK_CACHE="/home/opencode/.apk-cache"
+mkdir -p "$APK_CACHE"
+rm -rf /etc/apk/cache 2>/dev/null || true
+ln -sfn "$APK_CACHE" /etc/apk/cache 2>/dev/null || true
+
 # Lazy, run-once mirror selection: only touches the network the first time the
 # user actually triggers a package op. A plain restart with no package activity
 # now stays fully offline.
@@ -48,7 +58,7 @@ if ! bash -c 'true' 2>/dev/null; then
   ensure_mirror
   apk update 2>&1 || true
   apk del bash 2>/dev/null || true
-  apk add --no-cache bash 2>&1 || echo "=== WARNING: bash repair failed ==="
+  apk add bash 2>&1 || echo "=== WARNING: bash repair failed ==="
 fi
 
 _add_pkgs() {
@@ -104,7 +114,7 @@ while true; do
         PKGS="${REQ#INSTALL }"
         echo "=== Installing: $PKGS ==="
         ensure_mirror
-        apk add --no-cache $PKGS > "$QUEUE/log" 2>&1
+        apk add $PKGS > "$QUEUE/log" 2>&1
         RC=$?
         [ $RC -eq 0 ] && _add_pkgs $PKGS
         echo $RC > "$QUEUE/result"
@@ -112,7 +122,7 @@ while true; do
       *)
         echo "=== Installing (legacy): $REQ ==="
         ensure_mirror
-        apk add --no-cache $REQ > "$QUEUE/log" 2>&1
+        apk add $REQ > "$QUEUE/log" 2>&1
         RC=$?
         [ $RC -eq 0 ] && _add_pkgs $REQ
         echo $RC > "$QUEUE/result"

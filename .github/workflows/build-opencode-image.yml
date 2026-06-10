@@ -44,7 +44,7 @@ on:
       image_tag:
         description: "Image tag"
         required: true
-        default: "1.16.0-olares1"
+        default: "1.16.0-test3"
       dockerhub_namespace:
         description: "Docker Hub namespace (only used when registry=dockerhub)"
         required: false
