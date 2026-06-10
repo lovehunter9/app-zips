@@ -7,7 +7,7 @@
 #   PLATFORMS=linux/amd64 ./build.sh   # single arch (native, fastest to test)
 #
 # Env knobs:
-#   IMAGE      full image ref      (default beclab/anomalyco-opencode:1.16.0-olares1)
+#   IMAGE      full image ref      (default docker.io/beclab/lovehunter9-anomalyco-opencode:1.17.0.0)
 #   PLATFORMS  comma-sep platforms (default linux/amd64,linux/arm64)
 #   PUSH       1 => --push, else --output type=image (no push)
 #   OPENCODE_VERSION / OMO_VERSION / GLIBC_VERSION  override build args
@@ -15,10 +15,10 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-IMAGE="${IMAGE:-beclab/anomalyco-opencode:1.16.0-olares1}"
+IMAGE="${IMAGE:-docker.io/beclab/lovehunter9-anomalyco-opencode:1.17.0.0}"
 PLATFORMS="${PLATFORMS:-linux/amd64,linux/arm64}"
-OPENCODE_VERSION="${OPENCODE_VERSION:-1.16.0}"
-OMO_VERSION="${OMO_VERSION:-4.7.5}"
+OPENCODE_VERSION="${OPENCODE_VERSION:-1.17.0}"
+OMO_VERSION="${OMO_VERSION:-4.8.1}"
 GLIBC_VERSION="${GLIBC_VERSION:-2.35-r1}"
 
 # A buildx builder that supports multi-arch (QEMU-backed). Create once.

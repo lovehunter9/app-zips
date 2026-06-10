@@ -8,10 +8,10 @@ BASELINE_MD = Path("/home/opencode/.config/opencode/olares-baseline-instructions
 GLOBAL_JSON = Path("/home/opencode/.config/opencode/opencode.json")
 WORKSPACE_JSON = Path("/home/opencode/workspace/opencode.json")
 OLARES_REF = "/home/opencode/.config/opencode/olares-baseline-instructions.md"
-OMO_VER = os.environ.get("OLARES_OMO_VERSION", "4.7.5")
+OMO_VER = os.environ.get("OLARES_OMO_VERSION", "4.8.1")
 parts = OMO_VER.split(".")
 if len(parts) != 3 or not all(x.isdigit() for x in parts):
-    OMO_VER = "4.7.5"
+    OMO_VER = "4.8.1"
 PLUGIN_NPM = f"oh-my-openagent@{OMO_VER}"
 STALE_PLUGIN_NPM = "oh-my-opencode"
 

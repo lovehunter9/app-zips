@@ -15,19 +15,24 @@
 #
 # Multi-arch build (amd64 + arm64):
 #   docker buildx build --platform linux/amd64,linux/arm64 \
-#     -t beclab/anomalyco-opencode:1.16.0-olares1 --push opencode-docker/
+#     -t docker.io/beclab/lovehunter9-anomalyco-opencode:1.17.0.0 --push opencode-docker/
 #
-# IMPORTANT runtime contract (unchanged from today):
-#   - /home/opencode  is a hostPath (appData) that OVERLAYS this image at runtime.
-#   - /usr /lib /bin … are overlaid by the .pkg-root hostPath snapshot.
-#   Therefore anything that must be visible at runtime under those paths is NOT
-#   consumed directly from this image; the chart's init seeds it from neutral,
-#   non-overlaid staging dirs baked here:
+# IMPORTANT runtime contract:
+#   - /home/opencode is a hostPath (appData) that OVERLAYS this image at runtime,
+#     so anything that must live under $HOME is NOT consumed directly from this
+#     image; the chart's init seeds it from neutral, non-overlaid staging dirs
+#     baked here:
 #       /opt/olares-bake/opencode-cache/    -> seeded into ~/.cache/opencode (OMO)
 #       /opt/olares-bake/opencode-skills/   -> seeded into ~/.config/opencode/skills (Olares Agent Skills)
-#   and the base rootfs is snapshotted by init into .pkg-root as before.
-#   The olares-cli binary itself lives in the npm global prefix (rootfs), so it
-#   rides the .pkg-root snapshot like vite -- no $HOME seeding needed for it.
+#   - /usr /lib /bin /sbin /lib64 are served at runtime via an OverlayFS whose
+#     read-only LOWER layer is THIS image's rootfs (zero copy) and whose small
+#     persistent UPPER layer (on the appData hostPath) holds only user-installed
+#     package deltas; the upper is never reset, so user packages persist across
+#     upgrades with zero reinstall. Anything baked into the rootfs here (vite,
+#     the olares-cli binary in the npm global prefix, bash, glibc, opencode)
+#     therefore shows through the overlay lower automatically -- no $HOME seeding
+#     and no snapshot copy needed. (A one-time, offline init migration imports any
+#     packages a user installed under the legacy .pkg-root design into the upper.)
 # ------------------------------------------------------------------------------
 
 ARG OPENCODE_VERSION=1.17.0

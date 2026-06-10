@@ -12,8 +12,8 @@ See the full design in `../opencode-docs/OpenCode_预装包内置化与镜像for
 
 | Component | Version |
 |---|---|
-| opencode | **v1.16.0** (x86_64 = glibc build; arm64 = musl build) |
-| OMO default | **oh-my-openagent@4.7.5** |
+| opencode | **v1.17.0** (x86_64 = glibc build; arm64 = musl build) |
+| OMO default | **oh-my-openagent@4.8.1** |
 | glibc (sgerrand, x86_64 only) | 2.35-r1 |
 
 Override at build time via `--build-arg OPENCODE_VERSION=... OMO_VERSION=... GLIBC_VERSION=...`.
@@ -25,7 +25,7 @@ Override at build time via `--build-arg OPENCODE_VERSION=... OMO_VERSION=... GLI
 ./build.sh
 
 # both arches, push to registry
-IMAGE=beclab/anomalyco-opencode:1.16.0-olares1 PUSH=1 ./build.sh
+IMAGE=docker.io/beclab/lovehunter9-anomalyco-opencode:1.17.0.0 PUSH=1 ./build.sh
 
 # single arch (native, fastest for a smoke test)
 PLATFORMS=linux/amd64 ./build.sh

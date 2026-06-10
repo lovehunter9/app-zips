@@ -44,7 +44,7 @@ on:
       image_tag:
         description: "Image tag"
         required: true
-        default: "1.17.0-test1"
+        default: "1.17.0.0"
       dockerhub_namespace:
         description: "Docker Hub namespace (only used when registry=dockerhub)"
         required: false
