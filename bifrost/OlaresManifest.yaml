@@ -5,7 +5,7 @@ metadata:
   description: The Fastest Enterprise AI Gateway
   icon: https://app.cdn.olares.com/appstore/bifrost/icon.png
   appid: bifrost
-  version: '1.0.7'
+  version: '1.0.8'
   title: Bifrost
   categories:
   - Utilities_v112
@@ -16,7 +16,7 @@ permission:
   userData:
   - Home
 spec:
-  versionName: '1.4.10'
+  versionName: '1.5.10'
   promoteImage:
   - https://app.cdn.olares.com/appstore/bifrost/1.webp
   - https://app.cdn.olares.com/appstore/bifrost/2.webp
@@ -62,6 +62,13 @@ entrances:
     openMethod: window
     port: 8080
     title: Bifrost
+  - authLevel: internal
+    host: bifrostingress
+    icon: https://app.cdn.olares.com/appstore/bifrost/icon.png
+    name: bifrostterminal
+    openMethod: window
+    port: 8081
+    title: Bifrost Terminal
 middleware:
   redis:
     namespace: bifrost

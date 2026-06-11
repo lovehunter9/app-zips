@@ -44,6 +44,36 @@ data:
       }
     }
 
+    # Terminal entrance (:8081) -> the standard beclab terminal component,
+    # which execs into the bifrost container (see templates/terminal.yaml).
+    server {
+      listen 8081;
+      access_log /opt/bitnami/openresty/nginx/logs/access.log;
+      error_log /opt/bitnami/openresty/nginx/logs/error.log;
+
+      client_max_body_size 10m;
+
+      proxy_connect_timeout                          30s;
+      proxy_send_timeout                             300s;
+      proxy_read_timeout                             300s;
+      proxy_set_header      Host                      $host;
+      proxy_set_header      X-Forwarded-Host          $http_host;
+      proxy_set_header      X-Real-IP                 $remote_addr;
+      proxy_set_header      X-Forwarded-For           $proxy_add_x_forwarded_for;
+
+      proxy_http_version 1.1;
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection "upgrade";
+
+      location / {
+          resolver coredns.kube-system.svc.cluster.local valid=10s;
+          proxy_pass http://terminal.{{ .Release.Namespace }}:80;
+          proxy_connect_timeout 60s;
+          proxy_read_timeout 300s;
+          proxy_send_timeout 300s;
+      }
+    }
+
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -80,6 +110,8 @@ spec:
           image: "docker.io/beclab/aboveos-bitnami-openresty:1.25.3-2"
           ports:
             - containerPort: 8080
+              protocol: TCP
+            - containerPort: 8081
               protocol: TCP
           env:
             - name: OPENRESTY_CONF_FILE
@@ -136,3 +168,7 @@ spec:
       protocol: TCP
       port: 8080
       targetPort: 8080
+    - name: terminal
+      protocol: TCP
+      port: 8081
+      targetPort: 8081

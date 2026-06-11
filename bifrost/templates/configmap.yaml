@@ -4,6 +4,13 @@ metadata:
   name: bifrost-config
   namespace: {{ .Release.Namespace }}
 data:
+  # SEED template only. The init container copies this to the writable, persistent
+  # /app/data/config.json ONCE (first install) and never overwrites user edits
+  # afterwards, so users can edit providers / per-key model allow-lists in the
+  # Files app. config_store stays enabled -> Web UI remains available and the file
+  # only bootstraps the (Postgres) config store when the DB is empty.
+  # Secrets (DB / Redis passwords) are referenced via env.* so the once-seeded file
+  # stays valid even if a credential rotates (env is re-rendered every deploy).
   config.json: |
     {
       "$schema": "https://www.getbifrost.ai/schema",
@@ -18,7 +25,7 @@ data:
           "host": "{{ .Values.postgres.host }}",
           "port": "{{ .Values.postgres.port }}",
           "user": "{{ .Values.postgres.username }}",
-          "password": "{{ .Values.postgres.password }}",
+          "password": "env.BIFROST_PG_PASSWORD",
           "db_name": "{{ .Values.postgres.databases.bifrostdb }}",
           "ssl_mode": "disable",
           "max_idle_conns": 5,
@@ -32,7 +39,7 @@ data:
           "host": "{{ .Values.postgres.host }}",
           "port": "{{ .Values.postgres.port }}",
           "user": "{{ .Values.postgres.username }}",
-          "password": "{{ .Values.postgres.password }}",
+          "password": "env.BIFROST_PG_PASSWORD",
           "db_name": "{{ .Values.postgres.databases.bifrostdb }}",
           "ssl_mode": "disable",
           "max_idle_conns": 5,
@@ -45,7 +52,7 @@ data:
         "config": {
           "addr": "{{ .Values.redis.host }}:{{ .Values.redis.port }}",
           "username": "",
-          "password": "{{ .Values.redis.password }}",
+          "password": "env.BIFROST_REDIS_PASSWORD",
           "db": 0,
           "pool_size": 10,
           "max_active_conns": 10,
@@ -67,3 +74,7 @@ metadata:
 data:
   OPENAI_API_KEY: ""
   # ANTHROPIC_API_KEY: ""
+  # Injected so the persisted config.json can reference secrets via env.* (re-rendered
+  # every deploy -> survives credential rotation without rewriting the user's file).
+  BIFROST_PG_PASSWORD: "{{ .Values.postgres.password }}"
+  BIFROST_REDIS_PASSWORD: "{{ .Values.redis.password }}"

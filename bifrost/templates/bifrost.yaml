@@ -18,6 +18,7 @@ spec:
     metadata:
       labels:
         io.kompose.service: bifrost
+        bytetrade.io/terminal: bifrost
     spec:
       securityContext:
         runAsUser: 1000
@@ -31,13 +32,24 @@ spec:
             - '-c'
           args:
             - |
-              mkdir -p /app/data/logs
+              mkdir -p /app/data/logs /app/data/.cli-home
+              # Seed config.json ONCE (first install). Never overwrite afterwards, so
+              # user edits in the Files app survive restart/upgrade. config_store stays
+              # enabled -> the file only bootstraps the Postgres store when the DB is empty.
+              if [ ! -f /app/data/config.json ]; then
+                cp /seed/config.json /app/data/config.json
+                echo "seeded /app/data/config.json from template"
+              else
+                echo "config.json already present; leaving user edits untouched"
+              fi
               chown -R 1000:1000 /app/data
               chmod -R 755 /app/data
           resources: { }
           volumeMounts:
             - name: bifrost-data
               mountPath: /app/data
+            - name: bifrost-config
+              mountPath: /seed
           terminationMessagePath: /dev/termination-log
           terminationMessagePolicy: File
           imagePullPolicy: IfNotPresent
@@ -45,7 +57,7 @@ spec:
             runAsUser: 0
       containers:
         - name: bifrost
-          image: docker.io/beclab/maximhq-bifrost:v1.4.10
+          image: docker.io/beclab/maximhq-bifrost:v1.5.10
           envFrom:
             - configMapRef:
                 name: bifrost-env
@@ -80,25 +92,37 @@ spec:
           volumeMounts:
             - name: bifrost-data
               mountPath: /app/data
-            - name: bifrost-config
-              mountPath: /app/data/config.json
-              readOnly: true
-              subPath: config.json
+        # Idle sidecar with node + @maximhq/bifrost-cli pre-installed. The in-app
+        # Terminal (templates/terminal.yaml) execs into THIS container so users can
+        # run `bifrost` to launch coding agents through the gateway. HOME lives on
+        # the appData volume so ~/.bifrost (CLI config) persists; /app/data is shared
+        # so the same terminal can also edit config.json.
+        - name: cli
+          image: docker.io/beclab/lovehunter9-bifrost-cli:0.0.1-test1
+          command: ["tail", "-f", "/dev/null"]
+          env:
+            - name: HOME
+              value: /app/data/.cli-home
+            - name: BIFROST_BASE_URL
+              value: http://localhost:{{ .Values.port | default 3000 }}
+          workingDir: /app/data/.cli-home
+          resources:
+            requests:
+              cpu: 10m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 1Gi
+          volumeMounts:
+            - name: bifrost-data
+              mountPath: /app/data
 
       restartPolicy: Always
       volumes:
         - name: bifrost-data
           hostPath:
             type: DirectoryOrCreate
-                {{- if .Values.sysVersion }}
-                  {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
-            path: '{{ .Values.userspace.appCache }}'
-                  {{- else }}
-            path: '{{ .Values.userspace.appCache }}/bifrost'
-                  {{- end }}
-                {{- else }}
-            path: '{{ .Values.userspace.appCache }}/bifrost'
-                {{- end }}
+            path: '{{ .Values.userspace.appData }}'
         - name: bifrost-config
           configMap:
             name: bifrost-config
