@@ -32,24 +32,19 @@ spec:
             - '-c'
           args:
             - |
+              # config.json is a chart-managed, read-only ConfigMap mounted into the
+              # bifrost container (re-rendered every deploy) -> NOT seeded here, so the
+              # store declarations always follow the chart. We only ensure the writable
+              # appData subdirs exist and are owned by the runtime user. The SQLite
+              # config store (/app/data/config.db) and the CLI home (.cli-home) live on
+              # this persistent appData volume and survive restart/upgrade/reinstall.
               mkdir -p /app/data/logs /app/data/.cli-home
-              # Seed config.json ONCE (first install). Never overwrite afterwards, so
-              # user edits in the Files app survive restart/upgrade. config_store stays
-              # enabled -> the file only bootstraps the Postgres store when the DB is empty.
-              if [ ! -f /app/data/config.json ]; then
-                cp /seed/config.json /app/data/config.json
-                echo "seeded /app/data/config.json from template"
-              else
-                echo "config.json already present; leaving user edits untouched"
-              fi
               chown -R 1000:1000 /app/data
               chmod -R 755 /app/data
           resources: { }
           volumeMounts:
             - name: bifrost-data
               mountPath: /app/data
-            - name: bifrost-config
-              mountPath: /seed
           terminationMessagePath: /dev/termination-log
           terminationMessagePolicy: File
           imagePullPolicy: IfNotPresent
@@ -57,7 +52,7 @@ spec:
             runAsUser: 0
       containers:
         - name: bifrost
-          image: docker.io/beclab/maximhq-bifrost:v1.5.10
+          image: docker.io/beclab/maximhq-bifrost:v1.5.11
           envFrom:
             - configMapRef:
                 name: bifrost-env
@@ -92,11 +87,19 @@ spec:
           volumeMounts:
             - name: bifrost-data
               mountPath: /app/data
+            # Chart-managed, read-only config.json (store wiring only). Mounted over
+            # /app/data/config.json so it always reflects the chart and shadows any
+            # stale file left on appData by older builds. User config (providers /
+            # keys / governance) lives in the SQLite config store at
+            # /app/data/config.db, which persists on the appData volume.
+            - name: bifrost-config
+              mountPath: /app/data/config.json
+              subPath: config.json
+              readOnly: true
         # Idle sidecar with node + @maximhq/bifrost-cli pre-installed. The in-app
         # Terminal (templates/terminal.yaml) execs into THIS container so users can
         # run `bifrost` to launch coding agents through the gateway. HOME lives on
-        # the appData volume so ~/.bifrost (CLI config) persists; /app/data is shared
-        # so the same terminal can also edit config.json.
+        # the appData volume so ~/.bifrost (CLI config) persists across restarts.
         - name: cli
           image: docker.io/beclab/lovehunter9-bifrost-cli:0.0.1-test1
           command: ["tail", "-f", "/dev/null"]

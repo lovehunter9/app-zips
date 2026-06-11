@@ -2,7 +2,7 @@
 
 > 状态：调研 + 方案阶段（未改代码）
 > 当前线上：chart 1.0.7 / appVersion 1.4.10（镜像 `docker.io/beclab/maximhq-bifrost:v1.4.10`）
-> 本次目标：① 借机把网关升级到最新稳定版 **v1.5.10**；② 落地产品经理的「file 式配置 + UI 也在 + 加 Terminal/CLI」路子；③ 厘清用户数据持久化。
+> 本次目标：① 借机把网关升级到最新稳定版 **v1.5.11**；② 落地产品经理的「file 式配置 + UI 也在 + 加 Terminal/CLI」路子；③ 厘清用户数据持久化。
 > 初稿：2026-06-05 ／ 重大更新：2026-06-11
 
 ---
@@ -88,11 +88,20 @@ failed to initialize routes: failed to initialize governance handler: config sto
 
 ## 3. 用户数据持久化分析（本次新增重点）
 
-### 3.1 现状：什么持久、什么不持久
+### 3.0 ⚠️ 实测结论（2026-06-11，决定性）：中间件 Postgres 重装会被清空
+在 demo0002 上实测:UI 配一个 provider(ollama)→ API 确认在库 → **保留数据卸载 + 重装同版本** → `GET /api/providers` 返回 `{"providers":[],"total":0}`。
+
+即:**Olares 在"保留数据卸载→重装"时会把该 app 的中间件 Postgres 库内容清空重建**(citus 服务器/库名/端点都在、连得上,但数据没保住)。只有 `/app/data`(appData)里的文件才真正"保留数据"。
+
+> 推论:**只靠中间件 PSQL,UI 配置无法扛过重装**;Bifrost 又从不把 UI 改动回写 config.json,所以"PSQL + 持久化 config.json"也救不了纯 UI 配置。**唯一能让 UI 配置重装留住的办法 = config_store 用 SQLite,文件落 `/app/data/config.db`(appData)。**
+
+**已采用的最终分工**:`config_store` = SQLite@`/app/data/config.db`(重装保留);`logs_store` = 保留 Postgres(日志可丢);`vector_store` = 保留 Redis(缓存)。
+
+### 3.1 历史现状（改动前，供对照）
 
 | 数据 | 存在哪 | 重启 | 升级 | 备注 |
 |---|---|---|---|---|
-| provider / virtual key / 治理规则 | **Postgres**（Olares 中间件，持久 + 备份） | ✅ 不丢 | ✅ 不丢（同一中间件实例） | 真正的「用户配置」都在这 |
+| provider / virtual key / 治理规则 | ~~Postgres~~ → **SQLite @ /app/data/config.db（appData）** | ✅ 不丢 | ✅ 不丢 | ⚠️见 3.0 实测：放 Postgres 重装会丢，已改 SQLite@appData |
 | 请求/响应日志 | **Postgres**（logs_store） | ✅ | ✅ | |
 | 语义缓存 | **Redis** | ✅(取决于 redis 持久化) | 一般可重建 | 缓存性质 |
 | API key 明文 | **Postgres**（因为**未设 encryption_key**） | ✅ | ✅ | ⚠️ 明文存储，安全隐患 |
@@ -138,12 +147,12 @@ failed to initialize routes: failed to initialize governance handler: config sto
 
 ## 5. 方案（评审用）
 
-### 方案一（推荐）：bootstrap 变体 + config.json 搬到可写持久盘 + 升级到 v1.5.10
-- 保持 `config_store=postgres enabled:true`（UI 在、不崩）。
+### 方案一（推荐）：bootstrap 变体 + config.json 搬到可写持久盘 + 升级到 v1.5.11
+- ~~保持 `config_store=postgres`~~ → **改 `config_store=sqlite`，文件 `/app/data/config.db`**（见 3.0 实测：PG 重装会丢）。UI 仍可用、不崩。
 - config.json 改可写持久挂载（appData，init 首次写模板、不覆盖用户编辑），用户可在 Files 应用编辑 providers + 每个 key 的 **`models` 白名单**（解决「看不到有哪些模型」）。
 - 数据盘 `/app/data` 从 appCache 挪到 appData。
 - `encryption_key`：新装从持久 secret 注入；存量明文状态默认不动（单列议题）。
-- 升级镜像到 `v1.5.10`（处理第 7 节破坏性变更）。
+- 升级镜像到 `v1.5.11`（处理第 7 节破坏性变更）。
 - 迁移承诺：只承诺 B→A 无缝；A→B 明确告知不无缝。
 
 ### 方案二（已落地）：方案一 + 内嵌 Terminal + bifrost-cli node sidecar
@@ -166,25 +175,26 @@ failed to initialize routes: failed to initialize governance handler: config sto
 
 ---
 
-## 7. 升级到 v1.5.10 的破坏性变更（必须处理）
+## 7. 升级到 v1.5.11 的破坏性变更（必须处理）
 v1.5.0 起的治理语义变更（对存量配置可能**静默改变行为**）：
 - `allowed_models: []` 或省略 = **拒绝所有**（deny-by-default）。以前空 = 允许所有。→ 存量 VK 若依赖「空 = 全放」，升级后**全被拒**。必须给每个 provider_config 显式 `["*"]` 或列模型。
 - provider key 的 `models: []` / 无 → 需补 `["*"]`。
 - `allowed_keys` 字段重命名为 **`key_ids`**（空/省略现在 = 拒绝所有 key）。
 - `provider_configs: []` 的 VK = 阻断所有流量。
 - list 里不能混用 `"*"` 与具体值、不能有重复项，否则 HTTP 400。
-- **v1.5.10 修复**：对目录无法枚举模型的 provider（vLLM/Ollama/SGL/自定义），`["*"]` 现在能正确放行（而非误拒）——所以选 v1.5.10 而不是更早的 v1.5.x。
+- 上述 `["*"]` 误拒修复在 v1.5.10 已合入，v1.5.11 沿用。
+- **v1.5.11 增量(纯 bugfix，无破坏性)**：VK 预算配额 / reload(rotate) API 现在会先 hydrate governance 数据(模型配置+预算)再返回，预算信息不再缺失/陈旧——对我们重 governance 的配置是正向的。这是从 v1.5.10 升 v1.5.11 的唯一区别。
 
 升级动作清单：升级前盘点现有 VK/provider 配置，补齐 `["*"]` / `key_ids`，再升级镜像。
 
 ---
 
 ## 8. 评审前建议先验证的 spike
-1. **可写挂载下 bootstrap 行为**：v1.5.10 下，config.json 改可写挂载后，是否真「只读不回写」、改文件某实体能否按哈希覆盖 DB。
+1. **可写挂载下 bootstrap 行为**：v1.5.11 下，config.json 改可写挂载后，是否真「只读不回写」、改文件某实体能否按哈希覆盖 DB。
 2. **encryption_key 注入与持久**：从持久 secret 注入 key，重启/升级后 UI 存的 key 仍可解密；以及存量明文→加密的 migration 是否必要。
 3. **A→B 导出可行性**：REST API 能否把当前 DB 配置导出成合法 config.json；key 是明文还是 `env.` 引用。
 4. **CLI 入口形态**：终端跑 `@maximhq/bifrost-cli` 连本应用网关的可行性与产品形态。
-5. **升级回归**：1.4.10→1.5.10，存量 Postgres 配置在 deny-by-default 下的实际表现。
+5. **升级回归**：1.4.10→1.5.11，存量 Postgres 配置在 deny-by-default 下的实际表现。
 
 ---
 
@@ -197,4 +207,4 @@ v1.5.0 起的治理语义变更（对存量配置可能**静默改变行为**）
 - 官方 CLI（@maximhq/bifrost-cli）：https://docs.getbifrost.ai/quickstart/cli/getting-started
 - 崩溃 Issue：https://github.com/maximhq/bifrost/issues/1912 ／ https://github.com/maximhq/bifrost/issues/3298
 - v1.2 引入 configstore（含迁移）：https://github.com/maximhq/bifrost/discussions/385
-- Releases（最新 v1.5.10）：https://github.com/maximhq/bifrost/releases
+- Releases（最新 v1.5.11）：https://github.com/maximhq/bifrost/releases
