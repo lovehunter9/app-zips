@@ -80,16 +80,22 @@ data:
     if [ -z "${BIFROST_CLI_STARTED:-}" ]; then
       export BIFROST_CLI_STARTED=1
       export PATH="/usr/local/bin:$PATH"
-      # Wait until the web terminal has reported its REAL size to the PTY before drawing
-      # the TUI, otherwise bifrost's Bubble Tea UI paints at the default 80x24 and then
-      # repaints on the frontend's late resize, leaving a stale bottom line.
-      # Crucially this must NOT slow down / disturb later-opened tabs (which already
-      # work): tmux hands those a wide size immediately. Only the FIRST tab starts at the
-      # 80x24 default and grows a few hundred ms later. So we don't wait a blind floor —
-      # we wait for the size to actually be WIDE (cols > 80, i.e. grown past the default)
-      # and stable. Already-wide tabs pass in ~0.3s; the first tab waits exactly until it
-      # widens. Hard cap so a genuinely narrow (<=80 col) terminal never hangs.
-      _i=0; _stable=0; _prev=""; _max=60
+      # Wait until the terminal size has truly SETTLED before drawing the TUI. Two
+      # failure modes we must avoid at once, and they pull in opposite directions:
+      #   * "stale bottom line": bifrost starts, THEN a resize arrives -> Bubble Tea
+      #     repaints and leaves garbage on the last row (a bifrost redraw bug we cannot
+      #     fix). Avoidable only by starting AFTER all resizes are done.
+      #   * "stuck small": bifrost starts at 80x24 and no later resize ever comes -> it
+      #     stays cramped forever.
+      # The only state that satisfies both is "size is final and no more resizes are
+      # coming". We can't be told that, so we infer it: require the size to be WIDE
+      # (cols > 80, i.e. grown past the 80x24 default) AND held UNCHANGED for ~1s. When a
+      # new tab is created, tmux + the web terminal do a couple of resize cycles in the
+      # first few hundred ms; a short stability window (the previous 0.3s) launched in
+      # the middle of them. ~1s of no-change waits those cycles out. Slower by design
+      # (~1s/tab) but stable; the already-good first tab is only ~0.7s slower, not broken.
+      # Hard cap so a genuinely narrow (<=80 col) terminal never hangs.
+      _i=0; _stable=0; _prev=""; _need=10; _max=100
       while [ "$_i" -lt "$_max" ]; do
         _sz=$(stty size 2>/dev/null)
         # shellcheck disable=SC2086
@@ -105,10 +111,10 @@ data:
           _stable=0
         fi
         _prev="$_sz"
-        [ "$_stable" -ge 3 ] && break
+        [ "$_stable" -ge "$_need" ] && break
         _i=$((_i + 1)); sleep 0.1
       done
-      unset _i _stable _prev _sz _max _rows _cols _ok
+      unset _i _stable _prev _sz _need _max _rows _cols _ok
       clear
       bifrost
     fi
