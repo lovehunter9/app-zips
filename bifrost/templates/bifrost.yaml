@@ -38,7 +38,14 @@ spec:
               # appData subdirs exist and are owned by the runtime user. The SQLite
               # config store (/app/data/config.db) and the CLI home (.cli-home) live on
               # this persistent appData volume and survive restart/upgrade/reinstall.
-              mkdir -p /app/data/logs /app/data/.cli-home
+              mkdir -p /app/data/logs /app/data/.cli-home/.bifrost
+              # Seed the Bifrost CLI config ONCE so the in-app Terminal's CLI skips the
+              # first-run "Base URL" prompt and points straight at the in-pod gateway
+              # (localhost:{{ .Values.port | default 8080 }}). Seed-once / never
+              # overwrite, so the user's later TUI tweaks (harness/model) persist.
+              if [ ! -f /app/data/.cli-home/.bifrost/config.json ]; then
+                echo '{"base_url":"http://localhost:{{ .Values.port | default 8080 }}"}' > /app/data/.cli-home/.bifrost/config.json
+              fi
               chown -R 1000:1000 /app/data
               chmod -R 755 /app/data
           resources: { }
