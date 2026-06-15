@@ -10,7 +10,7 @@
 #
 # Multi-arch build (amd64 + arm64):
 #   docker buildx build --platform linux/amd64,linux/arm64 \
-#     -t docker.io/beclab/lovehunter9-bifrost-cli:0.0.1-test2 --push bifrost-cli-docker/
+#     -t docker.io/beclab/lovehunter9-bifrost-cli:0.0.1-test3 --push bifrost-cli-docker/
 # ------------------------------------------------------------------------------
 ARG NODE_VERSION=22
 ARG BIFROST_CLI_VERSION=latest
@@ -54,6 +54,17 @@ RUN npm install -g \
 # layer + non-fatal so a name/version change here can never break the 4 above.
 RUN npm install -g @qwen-code/qwen-code \
   || echo "WARN: qwen-code not pre-installed; install on demand"
+
+# Entry "shell" for the in-app Terminal: launch the Bifrost CLI on entry, and when
+# the user exits the CLI drop them into an interactive bash (running as the user).
+# The Terminal component points --shell at this (like opencode uses --shell=opencode).
+RUN printf '%s\n' \
+      '#!/bin/bash' \
+      '# Auto-launch Bifrost CLI on terminal entry; fall back to bash on exit.' \
+      'bifrost' \
+      'exec bash' \
+    > /usr/local/bin/bifrost-shell \
+ && chmod 0755 /usr/local/bin/bifrost-shell
 
 # The chart runs the pod as uid/gid 1000 and sets HOME onto the appData volume,
 # so ~/.bifrost (CLI config) persists. node:alpine already ships a uid 1000 user.

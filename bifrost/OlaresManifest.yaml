@@ -5,7 +5,7 @@ metadata:
   description: The Fastest Enterprise AI Gateway
   icon: https://app.cdn.olares.com/appstore/bifrost/icon.png
   appid: bifrost
-  version: '1.0.8'
+  version: '1.0.9'
   title: Bifrost
   categories:
   - Utilities_v112
@@ -16,7 +16,7 @@ permission:
   userData:
   - Home
 spec:
-  versionName: '1.5.11'
+  versionName: '1.5.13'
   promoteImage:
   - https://app.cdn.olares.com/appstore/bifrost/1.webp
   - https://app.cdn.olares.com/appstore/bifrost/2.webp

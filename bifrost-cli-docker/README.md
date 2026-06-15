@@ -17,20 +17,25 @@ Opencode through the Bifrost gateway.
   `codex` (`@openai/codex`), `gemini` (`@google/gemini-cli`), `opencode`
   (`opencode-ai`), `qwen` (`@qwen-code/qwen-code`).
 - `bash`, `git`, `curl`, `ca-certificates`.
+- `bifrost-shell` — entry wrapper used by the in-app Terminal: it launches `bifrost`
+  on entry and `exec bash` on exit. The Terminal component points `--shell` at it
+  (mirroring how OpenCode uses `--shell=opencode`).
 
 ## Usage in the Terminal
-Inside the in-app Terminal (which lands in this container):
+The in-app Terminal lands in this container and auto-launches the Bifrost CLI
+(via `bifrost-shell`). When you quit the CLI you drop into an interactive bash,
+where you can also run an agent directly:
 
 ```bash
-bifrost            # interactive launcher; base URL = http://localhost:8080
-claude / codex / gemini / opencode / qwen   # run an agent directly
+bifrost            # auto-started on entry; base URL = http://localhost:8080
+claude / codex / gemini / opencode / qwen   # run an agent directly (from bash)
 ```
 
 ## Build (multi-arch)
 
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -t docker.io/beclab/lovehunter9-bifrost-cli:0.0.1-test2 --push bifrost-cli-docker/
+  -t docker.io/beclab/lovehunter9-bifrost-cli:0.0.1-test3 --push bifrost-cli-docker/
 ```
 
 Build args: `NODE_VERSION` (default `22`), `BIFROST_CLI_VERSION` (default `latest`).
