@@ -123,6 +123,13 @@ spec:
           volumeMounts:
             - name: bifrost-data
               mountPath: /app/data
+            # Primary: the Terminal opens an interactive non-login bash, which sources
+            # ~/.bashrc (HOME=/app/data/.cli-home) -> auto-launches the Bifrost CLI.
+            - name: bifrost-config
+              mountPath: /app/data/.cli-home/.bashrc
+              subPath: cli-profile
+              readOnly: true
+            # Fallback for POSIX sh ($ENV); harmless when the shell is bash.
             - name: bifrost-config
               mountPath: /etc/bifrost/cli-profile
               subPath: cli-profile

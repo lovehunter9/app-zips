@@ -66,21 +66,21 @@ data:
       }
     }
 
-  # Sourced by the in-app Terminal's interactive shell on entry (the cli container
-  # sets env ENV -> this file, the same mechanism opencode uses with $ENV/.profile).
-  # The terminal component's --shell is only a tab label, so THIS is what actually
-  # auto-runs the Bifrost CLI: launch `bifrost` on entry, and when the user exits it
-  # drop them into an interactive bash. Guarded so nested/sub-shells don't relaunch.
+  # Auto-launch the Bifrost CLI when the in-app Terminal opens. The terminal runs an
+  # interactive NON-login bash (verified: $0=bash, no $ENV support), so this file is
+  # mounted as the cli container's ~/.bashrc (/app/data/.cli-home/.bashrc). bash
+  # sources it on entry -> runs `bifrost`; when the user quits the CLI they fall back
+  # to this same bash. Guarded so nested shells don't relaunch. (Also mounted at
+  # $ENV=/etc/bifrost/cli-profile as a POSIX-sh fallback; harmless if unused.)
   cli-profile: |
-    export PATH="/usr/local/bin:$PATH"
     case "$-" in
       *i*) ;;
       *) return 2>/dev/null ;;
     esac
     if [ -z "${BIFROST_CLI_STARTED:-}" ]; then
       export BIFROST_CLI_STARTED=1
+      export PATH="/usr/local/bin:$PATH"
       bifrost
-      exec bash
     fi
 
 ---
