@@ -1,26 +1,7 @@
-olaresManifest.version: '0.11.0'
-olaresManifest.type: app
 metadata:
-  name: bifrost
-  description: The Fastest Enterprise AI Gateway
-  icon: https://app.cdn.olares.com/appstore/bifrost/icon.png
-  appid: bifrost
-  version: '1.0.8'
   title: Bifrost
-  categories:
-  - Utilities_v112
-  - Utilities
-permission:
-  appData: true
-  appCache: true
-  userData:
-  - Home
+  description: The Fastest Enterprise AI Gateway
 spec:
-  versionName: '1.5.13'
-  promoteImage:
-  - https://app.cdn.olares.com/appstore/bifrost/1.webp
-  - https://app.cdn.olares.com/appstore/bifrost/2.webp
-  - https://app.cdn.olares.com/appstore/bifrost/3.webp
   fullDescription: |
     Bifrost is a high-performance AI gateway that unifies access to 15+ providers (OpenAI, Anthropic, AWS Bedrock, Google Vertex, and more) through a single OpenAI-compatible API. Deploy in seconds with zero configuration and get automatic failover, load balancing, semantic caching, and enterprise-grade features.
 
@@ -31,7 +12,6 @@ spec:
     - Multimodal Support: Unified support for text, images, audio, and streaming, all behind a common interface.
     - Enterprise Control: Budget management, SSO integration, fine-grained access control, and end-to-end observability.
     - Zero-Code Migration: One-click replacement of existing OpenAI/Anthropic/GenAI APIs, with zero-code integration for popular AI SDKs.
-
   upgradeDescription: |
     Upgrade Bifrost version to 1.5.13
 
@@ -45,43 +25,3 @@ spec:
     - Fixes: virtual-key inference no longer returns 401 when dashboard password auth is enabled; plus fixes for Gemini tool responses, OpenRouter cache_control preservation, and Postgres logstore filters/pagination.
 
     Full release notes: https://docs.getbifrost.ai/changelogs/v1.5.13
-  developer: MAXIM TEAM
-  website: https://www.getmaxim.ai/
-  submitter: Olares
-  locale:
-  - en-US
-  - zh-CN
-  # Sized for the two remaining deployments after dropping Terminal + CLI sidecar:
-  # bifrost (gateway) and bifrostingress (openresty proxy).
-  # required ≈ sum of requests; limited ≥ sum of limits.
-  #   requests: cpu 0.26 (250m+10m), mem 320Mi  (256+64)
-  #   limits:   cpu 1.1  (1000m+100m), mem 1280Mi (1Gi+256Mi)
-  # Disk: appData holds the SQLite config store (config.db) + logs store (logs.db);
-  # logs.db grows with request volume, so leave headroom on the appData volume.
-  requiredMemory: 512Mi
-  limitedMemory: 1536Mi
-  requiredDisk: 256Mi
-  limitedDisk: 2Gi
-  requiredCpu: 0.3
-  limitedCpu: 1.2
-  doc: https://docs.getbifrost.ai/
-  supportArch:
-  - amd64
-  - arm64
-options:
-  apiTimeout: 0
-  dependencies:
-  - name: olares
-    type: system
-    version: '>=1.12.3-0'
-entrances:
-  - authLevel: internal
-    host: bifrostingress
-    icon: https://app.cdn.olares.com/appstore/bifrost/icon.png
-    name: bifrost
-    openMethod: window
-    port: 8080
-    title: Bifrost
-middleware:
-  redis:
-    namespace: bifrost

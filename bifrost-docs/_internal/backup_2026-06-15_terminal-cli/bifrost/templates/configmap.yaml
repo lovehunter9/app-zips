@@ -72,6 +72,8 @@ data:
   # ANTHROPIC_API_KEY: ""
   # Injected so the persisted config.json can reference secrets via env.* (re-rendered
   # every deploy -> survives credential rotation without rewriting the user's file).
-  # Only vector_store (Redis) needs this now; config_store/logs_store are SQLite and
-  # the Postgres middleware has been removed.
+  # vector_store (Redis) still uses this. PG password is kept only because the postgres
+  # middleware is still provisioned; config_store/logs_store are now SQLite and no
+  # longer reference it.
+  BIFROST_PG_PASSWORD: "{{ .Values.postgres.password }}"
   BIFROST_REDIS_PASSWORD: "{{ .Values.redis.password }}"

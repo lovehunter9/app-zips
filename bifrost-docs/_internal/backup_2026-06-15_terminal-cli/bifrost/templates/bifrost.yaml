@@ -18,6 +18,7 @@ spec:
     metadata:
       labels:
         io.kompose.service: bifrost
+        bytetrade.io/terminal: bifrost
     spec:
       securityContext:
         runAsUser: 1000
@@ -31,7 +32,7 @@ spec:
             - '-c'
           args:
             - |
-              mkdir -p /app/data/logs
+              mkdir -p /app/data/logs /app/data/.cli-home/.bifrost
               # Seed the gateway config.json ONCE from the chart default, then leave it
               # alone -> the file lives on the writable appData volume and is USER-
               # EDITABLE (no read-only mount). Never overwrite, so user edits persist.
@@ -40,6 +41,13 @@ spec:
               # chart's wiring, delete /app/data/config.json and redeploy.
               if [ ! -f /app/data/config.json ]; then
                 cp /etc/bifrost-default/config.json /app/data/config.json
+              fi
+              # Seed the Bifrost CLI config ONCE so the in-app Terminal's CLI skips the
+              # first-run "Base URL" prompt and points straight at the in-pod gateway
+              # (localhost:{{ .Values.port | default 8080 }}). Seed-once / never
+              # overwrite, so the user's later TUI tweaks (harness/model) persist.
+              if [ ! -f /app/data/.cli-home/.bifrost/config.json ]; then
+                echo '{"base_url":"http://localhost:{{ .Values.port | default 8080 }}"}' > /app/data/.cli-home/.bifrost/config.json
               fi
               chown -R 1000:1000 /app/data
               chmod -R 755 /app/data
@@ -93,6 +101,33 @@ spec:
           volumeMounts:
             # config.json is seeded once onto this volume by the init container and is
             # user-editable (no read-only mount); the gateway reads it from app-dir.
+            - name: bifrost-data
+              mountPath: /app/data
+        # Idle sidecar with node + @maximhq/bifrost-cli pre-installed. The in-app
+        # Terminal (templates/terminal.yaml) execs into THIS container and opens bash;
+        # users run `bifrost` themselves to launch coding agents through the gateway.
+        # HOME lives on the appData volume so ~/.bifrost (CLI config) persists across
+        # restarts (the base_url is seeded once by the init container).
+        - name: cli
+          image: docker.io/beclab/lovehunter9-bifrost-cli:0.10.5.0
+          command: ["tail", "-f", "/dev/null"]
+          env:
+            - name: HOME
+              value: /app/data/.cli-home
+            - name: BIFROST_BASE_URL
+              value: http://localhost:{{ .Values.port | default 3000 }}
+          workingDir: /app/data/.cli-home
+          resources:
+            requests:
+              cpu: 10m
+              memory: 128Mi
+            limits:
+              # Headroom for a heavy interactive coding agent (opencode/gemini are
+              # large node apps that can approach ~1Gi in a single session); 1.5Gi
+              # avoids OOM-killing the user's agent mid-run.
+              cpu: 500m
+              memory: 1.5Gi
+          volumeMounts:
             - name: bifrost-data
               mountPath: /app/data
 
