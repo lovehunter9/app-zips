@@ -81,30 +81,34 @@ data:
       export BIFROST_CLI_STARTED=1
       export PATH="/usr/local/bin:$PATH"
       # Wait until the web terminal has reported its REAL size to the PTY before drawing
-      # the TUI. The frontend's resize (SIGWINCH) often arrives a few hundred ms AFTER
-      # the shell starts: the PTY first sits at a default/small size that is itself
-      # "stable", so a naive "unchanged twice" check fires too early -> bifrost paints at
-      # the small size, then the resize lands and it repaints, leaving a stale bottom
-      # line. Fix: (1) always wait a minimum floor so the resize can land, THEN (2)
-      # require the size to hold steady for a short window, capped by a hard timeout.
-      _i=0; _stable=0; _prev=""
-      _floor=8   # >= 0.8s before we trust the size (lets a late resize land)
-      _need=3    # then ~0.3s of unchanged, non-zero size
-      _max=45    # 4.5s hard cap so we never hang
+      # the TUI, otherwise bifrost's Bubble Tea UI paints at the default 80x24 and then
+      # repaints on the frontend's late resize, leaving a stale bottom line.
+      # Crucially this must NOT slow down / disturb later-opened tabs (which already
+      # work): tmux hands those a wide size immediately. Only the FIRST tab starts at the
+      # 80x24 default and grows a few hundred ms later. So we don't wait a blind floor —
+      # we wait for the size to actually be WIDE (cols > 80, i.e. grown past the default)
+      # and stable. Already-wide tabs pass in ~0.3s; the first tab waits exactly until it
+      # widens. Hard cap so a genuinely narrow (<=80 col) terminal never hangs.
+      _i=0; _stable=0; _prev=""; _max=60
       while [ "$_i" -lt "$_max" ]; do
         _sz=$(stty size 2>/dev/null)
-        if [ -n "$_sz" ] && [ "$_sz" != "0 0" ] && [ "$_sz" = "$_prev" ]; then
+        # shellcheck disable=SC2086
+        set -- $_sz
+        _rows="${1:-0}"; _cols="${2:-0}"
+        case "$_rows$_cols" in
+          ''|*[!0-9]*) _ok=0 ;;
+          *) if [ "$_rows" -ge 1 ] && [ "$_cols" -gt 80 ]; then _ok=1; else _ok=0; fi ;;
+        esac
+        if [ "$_ok" = 1 ] && [ "$_sz" = "$_prev" ]; then
           _stable=$((_stable + 1))
         else
           _stable=0
         fi
         _prev="$_sz"
-        if [ "$_i" -ge "$_floor" ] && [ "$_stable" -ge "$_need" ]; then
-          break
-        fi
+        [ "$_stable" -ge 3 ] && break
         _i=$((_i + 1)); sleep 0.1
       done
-      unset _i _stable _prev _sz _floor _need _max
+      unset _i _stable _prev _sz _max _rows _cols _ok
       clear
       bifrost
     fi
