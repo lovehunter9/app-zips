@@ -108,7 +108,7 @@ spec:
         # run `bifrost` to launch coding agents through the gateway. HOME lives on
         # the appData volume so ~/.bifrost (CLI config) persists across restarts.
         - name: cli
-          image: docker.io/beclab/lovehunter9-bifrost-cli:0.0.1-test3
+          image: docker.io/beclab/lovehunter9-bifrost-cli:0.0.1-test4
           command: ["tail", "-f", "/dev/null"]
           env:
             - name: HOME

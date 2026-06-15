@@ -10,7 +10,7 @@
 #
 # Multi-arch build (amd64 + arm64):
 #   docker buildx build --platform linux/amd64,linux/arm64 \
-#     -t docker.io/beclab/lovehunter9-bifrost-cli:0.0.1-test3 --push bifrost-cli-docker/
+#     -t docker.io/beclab/lovehunter9-bifrost-cli:0.0.1-test4 --push bifrost-cli-docker/
 # ------------------------------------------------------------------------------
 ARG NODE_VERSION=22
 ARG BIFROST_CLI_VERSION=latest
@@ -55,16 +55,34 @@ RUN npm install -g \
 RUN npm install -g @qwen-code/qwen-code \
   || echo "WARN: qwen-code not pre-installed; install on demand"
 
-# Entry "shell" for the in-app Terminal: launch the Bifrost CLI on entry, and when
-# the user exits the CLI drop them into an interactive bash (running as the user).
-# The Terminal component points --shell at this (like opencode uses --shell=opencode).
-RUN printf '%s\n' \
-      '#!/bin/bash' \
-      '# Auto-launch Bifrost CLI on terminal entry; fall back to bash on exit.' \
-      'bifrost' \
-      'exec bash' \
-    > /usr/local/bin/bifrost-shell \
- && chmod 0755 /usr/local/bin/bifrost-shell
+# Speed up the Bifrost CLI's harness version probe. The chooser runs `<bin>
+# --version` with a short (~1s) timeout; gemini (~2.4s) and opencode (~1.0s) are
+# slow to boot and get labelled "timeout" (cosmetic — the harness still works).
+# Wrap just those two: intercept --version/-v to echo a version captured HERE at
+# build time (instant), and exec the real binary for everything else so launching
+# the agent is completely unaffected. (claude/codex are ~0.1s, left untouched.)
+# NOTE: the Terminal auto-launches the CLI via the chart's ~/.bashrc, not a shell
+# wrapper, so no bifrost-shell is baked here.
+RUN set -eu; \
+    mkdir -p /usr/local/share/bifrost-cli; \
+    for h in gemini opencode; do \
+      real="$(command -v "$h" || true)"; \
+      [ -n "$real" ] || { echo "WARN: $h not found; skip version-cache wrapper"; continue; }; \
+      dir="$(dirname "$real")"; \
+      mv "$real" "$dir/$h.real"; \
+      "$dir/$h.real" --version 2>/dev/null | head -n1 > "/usr/local/share/bifrost-cli/$h.version" || true; \
+      { \
+        echo '#!/bin/sh'; \
+        echo "real=\"$dir/$h.real\""; \
+        echo "cache=\"/usr/local/share/bifrost-cli/$h.version\""; \
+        echo 'case "$1" in'; \
+        echo '  --version|-v) v="$(cat "$cache" 2>/dev/null)"; [ -n "$v" ] && { echo "$v"; exit 0; } ;;'; \
+        echo 'esac'; \
+        echo 'exec "$real" "$@"'; \
+      } > "$dir/$h"; \
+      chmod 0755 "$dir/$h"; \
+      echo "wrapped $h -> cached version [$(cat /usr/local/share/bifrost-cli/$h.version 2>/dev/null)]"; \
+    done
 
 # The chart runs the pod as uid/gid 1000 and sets HOME onto the appData volume,
 # so ~/.bifrost (CLI config) persists. node:alpine already ships a uid 1000 user.
