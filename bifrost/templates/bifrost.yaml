@@ -122,8 +122,11 @@ spec:
               cpu: 10m
               memory: 128Mi
             limits:
+              # Headroom for a heavy interactive coding agent (opencode/gemini are
+              # large node apps that can approach ~1Gi in a single session); 1.5Gi
+              # avoids OOM-killing the user's agent mid-run.
               cpu: 500m
-              memory: 1Gi
+              memory: 1.5Gi
           volumeMounts:
             - name: bifrost-data
               mountPath: /app/data

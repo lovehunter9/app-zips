@@ -51,12 +51,19 @@ spec:
   locale:
   - en-US
   - zh-CN
-  requiredMemory: 512Mi
-  limitedMemory: 1.5Gi
-  requiredDisk: 256Mi
-  limitedDisk: 1Gi
-  requiredCpu: 0.5
-  limitedCpu: 1.5
+  # Sized for ALL app containers across the three deployments — bifrost (gateway +
+  # cli sidecar), bifrostingress (openresty proxy), terminal (nginx + terminal).
+  # required ≈ sum of requests; limited ≥ sum of limits.
+  #   requests: cpu 0.28 (250m+10m+10m+5m+5m), mem 648Mi  (256+128+64+100+100)
+  #   limits:   cpu 1.7  (1000m+500m+100m+50m+50m), mem 3172Mi (1Gi+1.5Gi+256Mi+100Mi+256Mi)
+  # Disk: SQLite config store (config.db) + the CLI HOME on appData (agent caches /
+  # sessions / git worktrees), so give the appData volume generous headroom.
+  requiredMemory: 768Mi
+  limitedMemory: 4Gi
+  requiredDisk: 512Mi
+  limitedDisk: 5Gi
+  requiredCpu: 0.4
+  limitedCpu: 2
   doc: https://docs.getbifrost.ai/
   supportArch:
   - amd64
