@@ -10,7 +10,7 @@
 #
 # Multi-arch build (amd64 + arm64):
 #   docker buildx build --platform linux/amd64,linux/arm64 \
-#     -t docker.io/beclab/lovehunter9-bifrost-cli:0.0.1-test4 --push bifrost-cli-docker/
+#     -t docker.io/beclab/lovehunter9-bifrost-cli:0.10.5.0 --push bifrost-cli-docker/
 # ------------------------------------------------------------------------------
 ARG NODE_VERSION=22
 ARG BIFROST_CLI_VERSION=latest
