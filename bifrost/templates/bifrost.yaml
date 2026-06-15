@@ -89,7 +89,7 @@ spec:
               cpu: 1000m
               memory: 1Gi
           ports:
-            - containerPort: 8000
+            - containerPort: 8080
               name: http
           volumeMounts:
             - name: bifrost-data
