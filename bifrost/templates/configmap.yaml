@@ -80,19 +80,31 @@ data:
     if [ -z "${BIFROST_CLI_STARTED:-}" ]; then
       export BIFROST_CLI_STARTED=1
       export PATH="/usr/local/bin:$PATH"
-      # Wait until the web terminal has reported a real, STABLE size to the PTY before
-      # starting the TUI. A fixed sleep is flaky (sometimes the SIGWINCH lands in time,
-      # sometimes not -> bifrost's Bubble Tea UI inits at ~80x24 and renders cramped /
-      # with the logo clipped). Poll stty size until it's non-zero and unchanged twice.
-      _i=0; _prev=""
-      while [ "$_i" -lt 30 ]; do
+      # Wait until the web terminal has reported its REAL size to the PTY before drawing
+      # the TUI. The frontend's resize (SIGWINCH) often arrives a few hundred ms AFTER
+      # the shell starts: the PTY first sits at a default/small size that is itself
+      # "stable", so a naive "unchanged twice" check fires too early -> bifrost paints at
+      # the small size, then the resize lands and it repaints, leaving a stale bottom
+      # line. Fix: (1) always wait a minimum floor so the resize can land, THEN (2)
+      # require the size to hold steady for a short window, capped by a hard timeout.
+      _i=0; _stable=0; _prev=""
+      _floor=8   # >= 0.8s before we trust the size (lets a late resize land)
+      _need=3    # then ~0.3s of unchanged, non-zero size
+      _max=45    # 4.5s hard cap so we never hang
+      while [ "$_i" -lt "$_max" ]; do
         _sz=$(stty size 2>/dev/null)
         if [ -n "$_sz" ] && [ "$_sz" != "0 0" ] && [ "$_sz" = "$_prev" ]; then
+          _stable=$((_stable + 1))
+        else
+          _stable=0
+        fi
+        _prev="$_sz"
+        if [ "$_i" -ge "$_floor" ] && [ "$_stable" -ge "$_need" ]; then
           break
         fi
-        _prev="$_sz"; _i=$((_i+1)); sleep 0.1
+        _i=$((_i + 1)); sleep 0.1
       done
-      unset _i _prev _sz
+      unset _i _stable _prev _sz _floor _need _max
       clear
       bifrost
     fi
