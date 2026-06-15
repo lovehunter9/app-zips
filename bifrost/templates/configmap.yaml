@@ -9,19 +9,18 @@ data:
   # volume and is USER-EDITABLE (no read-only mount). Bifrost reads it as its app-dir
   # config.json.
   #
-  # Persistence model (verified on-platform): a "keep data" uninstall+reinstall
-  # preserves BOTH appData AND the app's middleware Postgres, so UI-configured
-  # providers/keys/governance (stored in the Postgres config_store with config_store
-  # enabled) survive a reinstall. config_store therefore stays on Postgres (matches
-  # our "prefer PSQL" direction and shares the gateway DB with logs_store). The earlier
-  # provider loss was the config.json content-hash overwrite, fixed by keeping
-  # `providers` EMPTY here (UI/API-added entries are always preserved across reload).
+  # Persistence model (RE-verified on-platform, 2026-06-15): an uninstall+reinstall —
+  # even "keep data" — WIPES the app's middleware Postgres. Both UI-configured
+  # providers/keys (config_store) AND request/response logs (logs_store) were lost
+  # when those stores lived on Postgres. Only the appData volume (/app/data) survives.
+  # => BOTH stores are SQLite ON appData: config.db + logs.db. These files persist
+  # across restart / upgrade / keep-data reinstall. vector_store stays on Redis (it is
+  # only a semantic-cache; losing it on reinstall is harmless).
   #
-  # Users MAY edit /app/data/config.json directly (Mode 2 / file-based). Per the
+  # Users MAY edit /app/data/config.json directly (Mode 2 / file-based). Per Bifrost's
   # content-hash rule, editing an entity in the file overwrites the DB copy of that
-  # same entity on reload; entries added only via the UI are preserved. The env.*
-  # password refs are injected at runtime (bifrost-env), so they survive credential
-  # rotation even though the file is seed-once.
+  # same entity on reload; entries added only via the UI are preserved. Keep
+  # `providers` EMPTY in this seed so UI/API-added providers are never clobbered.
   config.json: |
     {
       "$schema": "https://www.getbifrost.ai/schema",
@@ -31,30 +30,16 @@ data:
       },
       "config_store": {
         "enabled": true,
-        "type": "postgres",
+        "type": "sqlite",
         "config": {
-          "host": "{{ .Values.postgres.host }}",
-          "port": "{{ .Values.postgres.port }}",
-          "user": "{{ .Values.postgres.username }}",
-          "password": "env.BIFROST_PG_PASSWORD",
-          "db_name": "{{ .Values.postgres.databases.bifrostdb }}",
-          "ssl_mode": "disable",
-          "max_idle_conns": 5,
-          "max_open_conns": 50
+          "path": "/app/data/config.db"
         }
       },
       "logs_store": {
         "enabled": true,
-        "type": "postgres",
+        "type": "sqlite",
         "config": {
-          "host": "{{ .Values.postgres.host }}",
-          "port": "{{ .Values.postgres.port }}",
-          "user": "{{ .Values.postgres.username }}",
-          "password": "env.BIFROST_PG_PASSWORD",
-          "db_name": "{{ .Values.postgres.databases.bifrostdb }}",
-          "ssl_mode": "disable",
-          "max_idle_conns": 5,
-          "max_open_conns": 50
+          "path": "/app/data/logs.db"
         }
       },
       "vector_store": {
@@ -87,5 +72,8 @@ data:
   # ANTHROPIC_API_KEY: ""
   # Injected so the persisted config.json can reference secrets via env.* (re-rendered
   # every deploy -> survives credential rotation without rewriting the user's file).
+  # vector_store (Redis) still uses this. PG password is kept only because the postgres
+  # middleware is still provisioned; config_store/logs_store are now SQLite and no
+  # longer reference it.
   BIFROST_PG_PASSWORD: "{{ .Values.postgres.password }}"
   BIFROST_REDIS_PASSWORD: "{{ .Values.redis.password }}"

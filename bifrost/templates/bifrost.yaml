@@ -36,9 +36,9 @@ spec:
               # Seed the gateway config.json ONCE from the chart default, then leave it
               # alone -> the file lives on the writable appData volume and is USER-
               # EDITABLE (no read-only mount). Never overwrite, so user edits persist.
-              # (config_store is Postgres; providers stay empty in the seed.) If you
-              # ever need to re-pull the chart's wiring, delete /app/data/config.json
-              # and redeploy.
+              # (config_store + logs_store are SQLite on appData -> config.db / logs.db;
+              # providers stay empty in the seed.) If you ever need to re-pull the
+              # chart's wiring, delete /app/data/config.json and redeploy.
               if [ ! -f /app/data/config.json ]; then
                 cp /etc/bifrost-default/config.json /app/data/config.json
               fi
