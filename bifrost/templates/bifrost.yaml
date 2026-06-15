@@ -108,6 +108,10 @@ spec:
               value: /app/data/.cli-home
             - name: BIFROST_BASE_URL
               value: http://localhost:{{ .Values.port | default 3000 }}
+            # POSIX sh sources $ENV on interactive entry -> auto-launches the Bifrost
+            # CLI when the in-app Terminal opens (see bifrost-config: cli-profile).
+            - name: ENV
+              value: /etc/bifrost/cli-profile
           workingDir: /app/data/.cli-home
           resources:
             requests:
@@ -119,6 +123,10 @@ spec:
           volumeMounts:
             - name: bifrost-data
               mountPath: /app/data
+            - name: bifrost-config
+              mountPath: /etc/bifrost/cli-profile
+              subPath: cli-profile
+              readOnly: true
 
       restartPolicy: Always
       volumes:
