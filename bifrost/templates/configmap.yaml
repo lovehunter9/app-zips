@@ -80,6 +80,11 @@ data:
     if [ -z "${BIFROST_CLI_STARTED:-}" ]; then
       export BIFROST_CLI_STARTED=1
       export PATH="/usr/local/bin:$PATH"
+      # Let the web terminal report its real size to the PTY before the TUI starts,
+      # otherwise bifrost's Bubble Tea UI initializes at a tiny default (~80x24) and
+      # renders cramped / with the logo clipped. Brief settle + clear -> clean layout.
+      sleep 1
+      clear
       bifrost
     fi
 
