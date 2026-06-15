@@ -104,9 +104,10 @@ spec:
               subPath: config.json
               readOnly: true
         # Idle sidecar with node + @maximhq/bifrost-cli pre-installed. The in-app
-        # Terminal (templates/terminal.yaml) execs into THIS container so users can
-        # run `bifrost` to launch coding agents through the gateway. HOME lives on
-        # the appData volume so ~/.bifrost (CLI config) persists across restarts.
+        # Terminal (templates/terminal.yaml) execs into THIS container and opens bash;
+        # users run `bifrost` themselves to launch coding agents through the gateway.
+        # HOME lives on the appData volume so ~/.bifrost (CLI config) persists across
+        # restarts (the base_url is seeded once by the init container).
         - name: cli
           image: docker.io/beclab/lovehunter9-bifrost-cli:0.10.5.0
           command: ["tail", "-f", "/dev/null"]
@@ -115,10 +116,6 @@ spec:
               value: /app/data/.cli-home
             - name: BIFROST_BASE_URL
               value: http://localhost:{{ .Values.port | default 3000 }}
-            # POSIX sh sources $ENV on interactive entry -> auto-launches the Bifrost
-            # CLI when the in-app Terminal opens (see bifrost-config: cli-profile).
-            - name: ENV
-              value: /etc/bifrost/cli-profile
           workingDir: /app/data/.cli-home
           resources:
             requests:
@@ -130,17 +127,6 @@ spec:
           volumeMounts:
             - name: bifrost-data
               mountPath: /app/data
-            # Primary: the Terminal opens an interactive non-login bash, which sources
-            # ~/.bashrc (HOME=/app/data/.cli-home) -> auto-launches the Bifrost CLI.
-            - name: bifrost-config
-              mountPath: /app/data/.cli-home/.bashrc
-              subPath: cli-profile
-              readOnly: true
-            # Fallback for POSIX sh ($ENV); harmless when the shell is bash.
-            - name: bifrost-config
-              mountPath: /etc/bifrost/cli-profile
-              subPath: cli-profile
-              readOnly: true
 
       restartPolicy: Always
       volumes:

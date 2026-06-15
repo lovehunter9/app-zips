@@ -66,59 +66,6 @@ data:
       }
     }
 
-  # Auto-launch the Bifrost CLI when the in-app Terminal opens. The terminal runs an
-  # interactive NON-login bash (verified: $0=bash, no $ENV support), so this file is
-  # mounted as the cli container's ~/.bashrc (/app/data/.cli-home/.bashrc). bash
-  # sources it on entry -> runs `bifrost`; when the user quits the CLI they fall back
-  # to this same bash. Guarded so nested shells don't relaunch. (Also mounted at
-  # $ENV=/etc/bifrost/cli-profile as a POSIX-sh fallback; harmless if unused.)
-  cli-profile: |
-    case "$-" in
-      *i*) ;;
-      *) return 2>/dev/null ;;
-    esac
-    if [ -z "${BIFROST_CLI_STARTED:-}" ]; then
-      export BIFROST_CLI_STARTED=1
-      export PATH="/usr/local/bin:$PATH"
-      # Wait until the terminal size has truly SETTLED before drawing the TUI. Two
-      # failure modes we must avoid at once, and they pull in opposite directions:
-      #   * "stale bottom line": bifrost starts, THEN a resize arrives -> Bubble Tea
-      #     repaints and leaves garbage on the last row (a bifrost redraw bug we cannot
-      #     fix). Avoidable only by starting AFTER all resizes are done.
-      #   * "stuck small": bifrost starts at 80x24 and no later resize ever comes -> it
-      #     stays cramped forever.
-      # The only state that satisfies both is "size is final and no more resizes are
-      # coming". We can't be told that, so we infer it: require the size to be WIDE
-      # (cols > 80, i.e. grown past the 80x24 default) AND held UNCHANGED for ~1s. When a
-      # new tab is created, tmux + the web terminal do a couple of resize cycles in the
-      # first few hundred ms; a short stability window (the previous 0.3s) launched in
-      # the middle of them. ~1s of no-change waits those cycles out. Slower by design
-      # (~1s/tab) but stable; the already-good first tab is only ~0.7s slower, not broken.
-      # Hard cap so a genuinely narrow (<=80 col) terminal never hangs.
-      _i=0; _stable=0; _prev=""; _need=10; _max=100
-      while [ "$_i" -lt "$_max" ]; do
-        _sz=$(stty size 2>/dev/null)
-        # shellcheck disable=SC2086
-        set -- $_sz
-        _rows="${1:-0}"; _cols="${2:-0}"
-        case "$_rows$_cols" in
-          ''|*[!0-9]*) _ok=0 ;;
-          *) if [ "$_rows" -ge 1 ] && [ "$_cols" -gt 80 ]; then _ok=1; else _ok=0; fi ;;
-        esac
-        if [ "$_ok" = 1 ] && [ "$_sz" = "$_prev" ]; then
-          _stable=$((_stable + 1))
-        else
-          _stable=0
-        fi
-        _prev="$_sz"
-        [ "$_stable" -ge "$_need" ] && break
-        _i=$((_i + 1)); sleep 0.1
-      done
-      unset _i _stable _prev _sz _need _max _rows _cols _ok
-      clear
-      bifrost
-    fi
-
 ---
 apiVersion: v1
 kind: ConfigMap

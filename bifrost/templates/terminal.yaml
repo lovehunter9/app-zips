@@ -103,9 +103,9 @@ spec:
             - --namespace={{ .Release.Namespace }}
             - --pod=bytetrade.io/terminal=bifrost
             - --container=cli
-            # --shell is only the tab label here; the CLI auto-launch is driven by the
-            # cli container's $ENV -> bifrost-config:cli-profile (see configmap.yaml).
-            - --shell=bifrost-cli
+            # The Terminal opens bash in the cli sidecar; users run `bifrost` themselves
+            # to launch the CLI. (--shell is just the tab label / entry command.)
+            - --shell=bash
             - --v=3
           securityContext:
             privileged: false
