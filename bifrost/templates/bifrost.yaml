@@ -32,9 +32,12 @@ spec:
           args:
             - |
               mkdir -p /app/data/logs
-              # Seed the gateway config.json ONCE from the chart default if absent. The
-              # file then lives on the writable appData volume; the next init step
-              # (config-wiring) keeps the infra/store blocks in sync with the chart.
+              # Seed the gateway config.json ONCE from the chart default if absent, then
+              # leave it alone -> the file lives on the writable appData volume and is
+              # USER-EDITABLE (no read-only mount). Upgrades from old releases are safe:
+              # those shipped config.json as a read-only ConfigMap mount (never written
+              # to appData), so on upgrade the file is absent here and gets seeded fresh
+              # with the current SQLite wiring.
               if [ ! -f /app/data/config.json ]; then
                 cp /etc/bifrost-default/config.json /app/data/config.json
               fi
@@ -53,49 +56,6 @@ spec:
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsUser: 0
-        # Surgically reconcile ONLY the chart-owned infra/store wiring on every deploy,
-        # so an upgrade can change backends (e.g. an old Postgres config_store ->
-        # SQLite) WITHOUT clobbering the user's own content. config_store / logs_store /
-        # vector_store are force-set from the chart default (the ConfigMap is the single
-        # source of truth); `providers`, `client`, and any other user edits are kept.
-        # Runs as the runtime user (1000) so the file stays user-owned and editable.
-        - name: config-wiring
-          image: "docker.io/beclab/harveyff-utils-jq:v0.0.1"
-          imagePullPolicy: IfNotPresent
-          command:
-            - sh
-            - '-c'
-          args:
-            - |
-              set -e
-              DEF=/etc/bifrost-default/config.json
-              CFG=/app/data/config.json
-              TMP=/app/data/.config.json.tmp
-              # If the user broke the JSON, fall back to the chart default rather than
-              # bricking startup.
-              if ! jq empty "$CFG" >/dev/null 2>&1; then
-                echo "config.json is not valid JSON; restoring chart default."
-                cp "$DEF" "$CFG"
-              fi
-              # Pull the canonical store blocks from the chart default and force them in.
-              jq \
-                --argjson cs "$(jq -c '.config_store' "$DEF")" \
-                --argjson ls "$(jq -c '.logs_store' "$DEF")" \
-                --argjson vs "$(jq -c '.vector_store' "$DEF")" \
-                '.config_store=$cs | .logs_store=$ls | .vector_store=$vs' \
-                "$CFG" > "$TMP"
-              mv "$TMP" "$CFG"
-              echo "----- reconciled store wiring in config.json -----"
-              jq '{config_store,logs_store,vector_store}' "$CFG"
-          resources: { }
-          volumeMounts:
-            - name: bifrost-data
-              mountPath: /app/data
-            - name: bifrost-config
-              mountPath: /etc/bifrost-default
-              readOnly: true
-          terminationMessagePath: /dev/termination-log
-          terminationMessagePolicy: File
       containers:
         - name: bifrost
           image: docker.io/beclab/maximhq-bifrost:v1.5.13

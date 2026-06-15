@@ -17,18 +17,12 @@ data:
   # across restart / upgrade / keep-data reinstall. vector_store stays on Redis (it is
   # only a semantic-cache; losing it on reinstall is harmless).
   #
-  # Ownership model (see the config-wiring init container in bifrost.yaml):
-  #   - INFRA / STORE WIRING (config_store, logs_store, vector_store): CHART-OWNED.
-  #     This ConfigMap is the single source of truth; those three blocks are
-  #     force-reconciled into /app/data/config.json on EVERY deploy via jq. That is
-  #     what lets an upgrade switch backends (e.g. an old Postgres config_store ->
-  #     SQLite) without bricking. Editing these in the file is pointless — they get
-  #     overwritten. Keep `providers` EMPTY here so nothing user-owned is shipped.
-  #   - EVERYTHING ELSE (providers, keys, client settings, custom additions):
-  #     USER-OWNED. The init step never touches it, so /app/data/config.json stays
-  #     editable (Mode 2 / file-based) and persists. Per Bifrost's content-hash rule,
-  #     editing an entity in the file overwrites the DB copy of that entity on reload;
-  #     entries added only via the UI are preserved.
+  # Users MAY edit /app/data/config.json directly (Mode 2 / file-based). It is seeded
+  # ONCE from this default by the init container and then never touched, so user edits
+  # persist. Keep `providers` EMPTY here so UI/API-added providers are never clobbered.
+  # Upgrade note: old releases mounted config.json read-only from this ConfigMap (it
+  # was never written to appData), so upgrading users get a fresh SQLite-wired seed;
+  # there is no stale Postgres config.json to migrate.
   config.json: |
     {
       "$schema": "https://www.getbifrost.ai/schema",
