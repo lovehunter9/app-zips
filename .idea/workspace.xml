@@ -5,7 +5,17 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="e9836655-cb5c-456b-aef7-0ca255338318" name="Changes" comment="">
+      <change afterPath="$PROJECT_DIR$/llmgatewayv3/Chart.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/llmgatewayv3/OlaresManifest.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/llmgatewayv3/i18n/en-US/OlaresManifest.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/llmgatewayv3/i18n/zh-CN/OlaresManifest.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/llmgatewayv3/owners" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/llmgatewayv3/templates/configmap.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/llmgatewayv3/templates/llmgateway.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/llmgatewayv3/templates/provider.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/llmgatewayv3/values.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/bifrost-docs/_internal/WORK_LOG_2026-06-15.md" beforeDir="false" afterPath="$PROJECT_DIR$/bifrost-docs/_internal/WORK_LOG_2026-06-15.md" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -13,7 +23,7 @@
     <option name="LAST_RESOLUTION" value="IGNORE" />
   </component>
   <component name="EmbeddingIndexingInfo">
-    <option name="cachedIndexableFilesCount" value="2379" />
+    <option name="cachedIndexableFilesCount" value="2402" />
     <option name="fileBasedEmbeddingIndicesEnabled" value="true" />
   </component>
   <component name="FileTemplateManagerImpl">
@@ -79,8 +89,8 @@
   <component name="SharedIndexes">
     <attachedChunks>
       <set>
-        <option value="bundled-js-predefined-d6986cc7102b-c7e53b3be11b-JavaScript-PY-253.28294.336" />
-        <option value="bundled-python-sdk-0978a7220b69-9867c7d4c0a4-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-253.28294.336" />
+        <option value="bundled-gosdk-72a9cf600ed8-448e06e64ec5-org.jetbrains.plugins.go.sharedIndexes.bundled-GO-253.28294.337" />
+        <option value="bundled-js-predefined-d6986cc7102b-c7e53b3be11b-JavaScript-GO-253.28294.337" />
       </set>
     </attachedChunks>
   </component>
@@ -488,6 +498,9 @@
       <workItem from="1780026451365" duration="563000" />
       <workItem from="1780889879647" duration="563000" />
       <workItem from="1781062960289" duration="569000" />
+      <workItem from="1781149574955" duration="562000" />
+      <workItem from="1781494973862" duration="567000" />
+      <workItem from="1781581629949" duration="577000" />
     </task>
     <servers />
   </component>
