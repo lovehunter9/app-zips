@@ -1,0 +1,6 @@
+apiVersion: v2
+appVersion: "1.0.0"
+description: "[DEV scratch name — rename to audiomodelbasev3 once stable] Generic audio-model base; llm-init downloads the model, a clone-selected engine container serves it. Model + engine + mode supplied at install via env."
+name: audiolabwv3
+type: application
+version: 1.0.0

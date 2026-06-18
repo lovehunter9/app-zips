@@ -1,0 +1,252 @@
+{{- /* Generic audio engine. The image is clone-selected via ENGINE_IMAGE, so the
+       same chart serves any audio mode (STT/VAD/Diarize/TTS/...). An init
+       container blocks on llm-init /readyz (model downloaded into the shared HF
+       cache), then the engine starts with its native entrypoint and reads the
+       cached model via HF_HUB_CACHE. The engine provides the OpenAI-compatible
+       audio surface (e.g. /v1/audio/transcriptions) — llm-init does not. */ -}}
+{{- $oe := .Values.olaresEnv | default dict -}}
+{{- $modelName := $oe.MODEL_NAME | default "" -}}
+{{- $modelSource := $oe.MODEL_SOURCE | default "" -}}
+{{- /* `mode` is the SINGLE model classifier shared across chart / gateway / market
+       (no separate "capability" axis). Engine + gateway routing both key off it. */ -}}
+{{- $modelMode := $oe.MODEL_MODE | default "stt" -}}
+{{- /* container-name-safe mode (no underscores) for naming + gpu-inject. */ -}}
+{{- $modeName := $modelMode | replace "_" "-" -}}
+{{- /* Engine container name = audio-<mode>-<model>, so the Olares Containers panel and
+       `kubectl get pod -o ...` show mode+model at a glance (the pod name is the
+       random Release.Name and can't carry this). Model is sanitized to a DNS label and
+       the whole name is capped at the 63-char k8s container-name limit. */ -}}
+{{- $modelSan := regexReplaceAll "[^a-z0-9]+" (lower $modelName) "-" | trimAll "-" -}}
+{{- $cname := printf "audio-%s-%s" $modeName $modelSan | trunc 63 | trimSuffix "-" -}}
+{{- /* mode -> engine (image/port/health) is a BLACK BOX picked by us, not by
+       the user. The clone form only asks model + mode; the engine is derived
+       here. ENGINE_IMAGE / ENGINE_PORT / ENGINE_HEALTH_PATH stay as OPTIONAL post-
+       install overrides (empty = use the mapped value). All images are converted
+       (beclab/, no latest). */ -}}
+{{- /* Only stt/vad/diar are WIRED for 1.12.7. Other modes are reserved in the
+       MODEL_MODE enum; selecting one points at an obviously-unbuilt placeholder
+       image (voice-engine-<mode>:notbuilt) so it's clear the engine isn't ready yet.
+       An entry may carry "cmd": that mode REUSES the image but overrides the
+       container command to run an injected wrapper script (templates/wrappers.yaml),
+       so we don't build a new image. vad reuses the whisper image (it bundles Silero
+       VAD + an audio decoder) and runs /wrappers/vad.py.
+       diar: the mapped image is the AMD64-only CUDA pyannote_fastapi (mirrored to
+       beclab); we override its API with /wrappers/diar.py and run on GPU. BACKLOG:
+       ARM64 (DGX Spark/GB10) + GPU needs a multi-arch image — the CPU-only multi-arch
+       ../voice-engine-pyannote (Dockerfile+build.sh) is the starting point; on arm64
+       set ENGINE_IMAGE override to that until a multi-arch GPU build exists. */ -}}
+{{- $engines := dict
+      "stt"  (dict "image" "docker.io/beclab/fedirz-faster-whisper-server:0.6.0-rc.3-cuda" "port" "8000" "health" "/health")
+      "vad"  (dict "image" "docker.io/beclab/fedirz-faster-whisper-server:0.6.0-rc.3-cuda" "port" "8000" "health" "/healthz" "cmd" "exec $(command -v python3 || command -v python) /wrappers/vad.py")
+      "diar" (dict "image" "docker.io/beclab/maximsachs-pyannote_fastapi:4.0.4" "port" "8000" "health" "/healthz" "cmd" "exec $(command -v python3 || command -v python) /wrappers/diar.py") -}}
+{{- $sel := index $engines $modelMode -}}
+{{- if not $sel -}}
+{{- $sel = dict "image" (printf "docker.io/beclab/voice-engine-%s:notbuilt" $modelMode) "port" "8000" "health" "/healthz" -}}
+{{- end -}}
+{{- $engineImage := $oe.ENGINE_IMAGE | default (index $sel "image") -}}
+{{- $enginePort := int ($oe.ENGINE_PORT | default (index $sel "port")) -}}
+{{- $healthPath := $oe.ENGINE_HEALTH_PATH | default (index $sel "health") -}}
+{{- $engineCmd := index $sel "cmd" | default "" -}}
+{{- $engineArgs := $oe.ENGINE_ARGS | default "" -}}
+{{- $hfEndpoint := $oe.HF_ENDPOINT | default "" -}}
+{{- $hfToken := $oe.HF_TOKEN | default "" -}}
+{{- $cpuRequest := trim ($oe.AUDIO_CPU_REQUEST | default "500m") -}}
+{{- $memRequest := trim ($oe.AUDIO_MEMORY_REQUEST | default "2Gi") -}}
+{{- $cpuLimit := trim ($oe.AUDIO_CPU_LIMIT | default "6") -}}
+{{- $memLimit := trim ($oe.AUDIO_MEMORY_LIMIT | default "18Gi") -}}
+{{- /* GPU is OPTIONAL: requested only when AUDIO_REQUIRED_GPU_MEMORY is a real
+       value (not "" / "0"). CPU-only capabilities (e.g. VAD) set it to "0" and get
+       no gpumem + no gpu-inject. nvidia.com/gpumem needs a BARE MiB int; gb10 unified
+       memory reuses it as pod memory ("<MiB>Mi"). Accepts 8Gi / 8192 / 8192Mi. */ -}}
+{{- $gpuRaw := trim ($oe.AUDIO_REQUIRED_GPU_MEMORY | default "") -}}
+{{- $wantGpu := and (ne $gpuRaw "") (ne $gpuRaw "0") -}}
+{{- $gpuMiB := "" -}}
+{{- $gpuType := .Values.gpu | default "" -}}
+{{- if not $gpuType -}}
+{{- if .Values.GPU -}}{{- $gpuType = .Values.GPU.Type | default "nvidia" -}}{{- else -}}{{- $gpuType = "nvidia" -}}{{- end -}}
+{{- end -}}
+{{- $unifiedMem := and $wantGpu (eq $gpuType "nvidia-gb10") -}}
+{{- if $wantGpu -}}
+{{- $gpuMiB = include "llmbase.gpuMiB" $gpuRaw -}}
+{{- if $unifiedMem -}}
+{{- $memRequest = printf "%sMi" $gpuMiB -}}
+{{- $memLimit = printf "%sMi" $gpuMiB -}}
+{{- end -}}
+{{- end -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  # Primary workload: named after the release (== appid audiolabwv3) for v3
+  # allowMultipleInstall. Label/selector stays io.kompose.service: audio-engine.
+  name: '{{ .Release.Name }}'
+  namespace: '{{ .Release.Namespace }}'
+  labels:
+    io.kompose.service: audio-engine
+    # Directly distinguish instances by mode/model in `kubectl get -L ...`.
+    audio.mode: "{{ $modelMode }}"
+  annotations:
+    audio.bytetrade.io/model: "{{ $modelName }}"
+{{- if $wantGpu }}
+    applications.app.bytetrade.io/gpu-inject: "{{ $cname }}"
+{{- end }}
+spec:
+  replicas: {{ .Values.workloads.audiolabwv3.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: audio-engine
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: audio-engine
+        audio.mode: "{{ $modelMode }}"
+    spec:
+      restartPolicy: Always
+      volumes:
+        - name: hf-cache
+          hostPath:
+            path: "{{ .Values.userspace.appCommon }}/huggingface"
+            type: DirectoryOrCreate
+        - name: data
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/data"
+            type: DirectoryOrCreate
+        # Wrapper scripts for capabilities that reuse an image via command override.
+        - name: wrappers
+          configMap:
+            name: audio-wrappers
+      initContainers:
+        # Block until llm-init has finished downloading the model (engine-agnostic;
+        # works for any ENGINE_IMAGE since it only depends on llm-init /readyz).
+        - name: wait-models
+          image: docker.io/beclab/aboveos-busybox:1.37.0
+          command:
+            - /bin/sh
+            - -c
+            - |
+              READYZ="http://download-svc.{{ .Release.Namespace }}.svc.cluster.local:8090/readyz"
+              echo "[wait] waiting for llm-init downloader ($READYZ)..."
+              until wget -q -O /dev/null "$READYZ" 2>/dev/null; do
+                echo "[wait] models not ready yet..."
+                sleep 10
+              done
+              echo "[wait] models ready; starting engine."
+      containers:
+        # Name embeds capability+model so the Containers panel shows both at a glance
+        # (e.g. audio-stt-systran-faster-whisper-large-v3). exec uses: -c {{ $cname }}.
+        - name: {{ $cname }}
+          image: "{{ $engineImage }}"
+          imagePullPolicy: IfNotPresent
+{{- if $engineCmd }}
+          # Capability reuses this image but runs an injected wrapper instead of the
+          # image's native entrypoint (see templates/wrappers.yaml).
+          command: ["/bin/sh", "-c", "{{ $engineCmd }}"]
+{{- end }}
+{{- if $engineArgs }}
+          args:
+{{- range (splitList " " (trim $engineArgs)) }}
+            - "{{ . }}"
+{{- end }}
+{{- end }}
+          env:
+            - name: MODEL_NAME
+              value: "{{ $modelName }}"
+            - name: MODEL_SOURCE
+              value: "{{ $modelSource }}"
+            - name: MODEL_MODE
+              value: "{{ $modelMode }}"
+            - name: WRAPPER_PORT
+              value: "{{ $enginePort }}"
+            - name: LOG_LEVEL
+              value: "{{ $oe.LOG_LEVEL | default "info" }}"
+            # Read the model from the shared HF cache populated by llm-init.
+            - name: HF_HOME
+              value: /cache/hf
+            - name: HF_HUB_CACHE
+              value: /cache/hf/hub
+            - name: HUGGINGFACE_HUB_CACHE
+              value: /cache/hf/hub
+{{- if $hfEndpoint }}
+            - name: HF_ENDPOINT
+              value: "{{ $hfEndpoint }}"
+{{- end }}
+{{- if $hfToken }}
+            - name: HF_TOKEN
+              value: "{{ $hfToken }}"
+{{- end }}
+            - name: TZ
+              value: Etc/UTC
+            - name: PUID
+              value: "1000"
+            - name: PGID
+              value: "1000"
+          ports:
+            - name: http
+              containerPort: {{ $enginePort }}
+          readinessProbe:
+            httpGet:
+              path: "{{ $healthPath }}"
+              port: {{ $enginePort }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /cache/hf/hub
+            - name: data
+              mountPath: /tmp
+            - name: wrappers
+              mountPath: /wrappers
+              readOnly: true
+          resources:
+            requests:
+              cpu: "{{ $cpuRequest }}"
+              memory: "{{ $memRequest }}"
+{{- if and $wantGpu (not $unifiedMem) }}
+              nvidia.com/gpumem: {{ $gpuMiB }}
+{{- end }}
+            limits:
+              cpu: "{{ $cpuLimit }}"
+              memory: "{{ $memLimit }}"
+{{- if and $wantGpu (not $unifiedMem) }}
+              nvidia.com/gpumem: {{ $gpuMiB }}
+{{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: audio-engine
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: audio-engine
+spec:
+  selector:
+    io.kompose.service: audio-engine
+  ports:
+    - name: http
+      port: {{ $enginePort }}
+      targetPort: {{ $enginePort }}
+  type: ClusterIP
+---
+# Internal entrance backend: the engine's OpenAI audio surface. The gateway
+# (or any OpenAI client) reaches it at http://sharedentrances-api.<ns>:80 or
+# directly at http://audio-engine.<ns>:{{ $enginePort }}.
+apiVersion: v1
+kind: Service
+metadata:
+  name: sharedentrances-api
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: audio-engine
+spec:
+  selector:
+    io.kompose.service: audio-engine
+  ports:
+    - name: api
+      port: 80
+      targetPort: {{ $enginePort }}
+  type: ClusterIP

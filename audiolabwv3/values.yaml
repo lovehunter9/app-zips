@@ -1,0 +1,9 @@
+# Per-workload replica counts (keys match Deployment metadata.name and
+# workloadReplicas in OlaresManifest).
+#   audiolabwv3 — engine Deployment (== appid / Release.Name) [DEV name]
+#   llminit     — llm-init download-only Deployment
+workloads:
+  audiolabwv3:
+    replicaCount: 1
+  llminit:
+    replicaCount: 1
