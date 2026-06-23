@@ -1,0 +1,137 @@
+{{- /* llm-init in DOWNLOAD-ONLY mode (ENGINE_KIND="") — pure HF downloader.
+       Pulls MODEL_SOURCE into the shared cross-app HF cache (App Common,
+       /cache/hf/hub), writes the readiness sentinel, and serves progress +
+       /readyz on :8090. The engine (engine.yaml) gates on this /readyz.
+       llm-init is used UNMODIFIED — no audio engine kind is required here. */ -}}
+{{- $oe := .Values.olaresEnv | default dict -}}
+{{- $modelSource := $oe.MODEL_SOURCE | default "" -}}
+{{- $modelName := $oe.MODEL_NAME | default "" -}}
+{{- $logLevel := $oe.LOG_LEVEL | default "debug" -}}
+{{- $hfEndpoint := $oe.HF_ENDPOINT | default "" -}}
+{{- $hfToken := $oe.HF_TOKEN | default "" -}}
+{{- $runStateHostPath := printf "%s/llm-init-run/%s" .Values.userspace.appCache .Release.Name -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  # Static name — the engine Deployment uses {{ .Release.Name }} for allowMultipleInstall.
+  name: llminit
+  namespace: '{{ .Release.Namespace }}'
+  labels:
+    io.kompose.service: llm-init
+spec:
+  replicas: {{ .Values.workloads.llminit.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: llm-init
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: llm-init
+    spec:
+      restartPolicy: Always
+      volumes:
+        - name: hf-cache
+          hostPath:
+            path: "{{ .Values.userspace.appCommon }}/huggingface"
+            type: DirectoryOrCreate
+        - name: run-state
+          hostPath:
+            path: "{{ $runStateHostPath }}"
+            type: DirectoryOrCreate
+      initContainers:
+        - name: init-chown
+          image: docker.io/beclab/aboveos-busybox:1.37.0
+          command:
+            - sh
+            - -c
+            - "chown 1000:1000 /cache/hf/hub /run/llm-init || true"
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /cache/hf/hub
+            - name: run-state
+              mountPath: /run/llm-init
+          securityContext:
+            runAsUser: 0
+      containers:
+        - name: llm-init
+          image: docker.io/beclab/llm-init:v1.2.4
+          imagePullPolicy: IfNotPresent
+          env:
+            # Empty ENGINE_KIND = download-only mode (no engine proxying).
+            - name: ENGINE_KIND
+              value: ""
+            # Placeholders (llm-init v1.2.4 still requires them in download-only
+            # mode); the repo to fetch comes from MODEL_SOURCE.
+            - name: MODEL_NAME
+              value: "{{ $modelName }}"
+            - name: MODEL_MODE
+              value: "chat"
+            - name: MODEL_SOURCE
+              value: "{{ $modelSource }}"
+{{- if $hfEndpoint }}
+            - name: HF_ENDPOINT
+              value: "{{ $hfEndpoint }}"
+{{- end }}
+{{- if $hfToken }}
+            - name: HF_TOKEN
+              value: "{{ $hfToken }}"
+{{- end }}
+            - name: MAX_CONCURRENT_DOWNLOADS
+              value: "1"
+            - name: RUN_DIR
+              value: /run/llm-init
+            - name: PORT
+              value: "8090"
+            - name: LOG_LEVEL
+              value: "{{ $logLevel }}"
+            - name: LOG_FORMAT
+              value: json
+          ports:
+            - name: http
+              containerPort: 8090
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: 8090
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /livez
+              port: 8090
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /cache/hf/hub
+            - name: run-state
+              mountPath: /run/llm-init
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 4Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: download-svc
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: llm-init
+spec:
+  selector:
+    io.kompose.service: llm-init
+  ports:
+    - name: http
+      port: 8090
+      targetPort: 8090
+  type: ClusterIP

@@ -1,0 +1,21 @@
+# audiolabxv3 — two-service audio base (STT/whisper engine as scaffold).
+# llm-init downloads MODEL_SOURCE into shared HF cache; audio-engine serves it.
+# Refine after `chart from-compose` — see audiolabwv3 for the target shape.
+services:
+  llm-init:
+    image: docker.io/beclab/llm-init:v1.2.4
+    ports:
+      - "8090:8090"
+    environment:
+      ENGINE_KIND: ""
+      PORT: "8090"
+    labels:
+      io.kompose.service: llm-init
+
+  audio-engine:
+    image: docker.io/beclab/fedirz-faster-whisper-server:0.6.0-rc.3-cuda
+    ports:
+      - "8000:8000"
+    labels:
+      io.kompose.service: audio-engine
+      olares.service.type: Entrance

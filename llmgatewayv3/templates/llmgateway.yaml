@@ -61,8 +61,8 @@ spec:
           ports:
             - containerPort: 80
         - name: llm-gateway-backend
-          image: docker.io/beclab/llm-gateway-backend:v2.0.3
-          imagePullPolicy: IfNotPresent
+          image: docker.io/lovehunter9/llm-gateway-backend:v2.0.6-test1
+          imagePullPolicy: Always
           env:
             - name: PGID
               value: "1000"

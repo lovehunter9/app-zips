@@ -61,12 +61,12 @@ kubectl get deploy -A -l io.kompose.service=audio-engine \
 每段自带 `NS`/`DEPLOY` 与自动取容器名 `$CN`(容器名随能力+模型变),改掉头两行的 NS/DEPLOY 即可直接跑。
 `NS`=实例命名空间(`<release>-shared`),`DEPLOY`=实例名(`<release>`)。用 `kubectl get deploy -A -l io.kompose.service=audio-engine -L audio.mode` 查当前值。
 
-> 当前实例(每次重新 clone 会变,仅供本轮参考):
+> 当前实例(每次重新 clone 会变,仅供本轮参考;2026-06-22):
 > | 能力 | NS | DEPLOY |
 > |---|---|---|
-> | STT | `audiolabwv31be0a8-shared` | `audiolabwv31be0a8` |
-> | VAD | `audiolabwv3ef4e70-shared` | `audiolabwv3ef4e70` |
-> | Diarize | `audiolabwv31f768b-shared` | `audiolabwv31f768b` |
+> | STT | `audiolabwv304708e-shared` | `audiolabwv304708e` |
+> | VAD | `audiolabwv32d0079-shared` | `audiolabwv32d0079` |
+> | Diarize | `audiolabwv3e65afc-shared` | `audiolabwv3e65afc` |
 
 ### 验 STT → `/v1/audio/transcriptions`
 ```bash

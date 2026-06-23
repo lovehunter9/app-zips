@@ -2,7 +2,7 @@ olaresManifest.version: "0.12.0"
 olaresManifest.type: app
 apiVersion: 'v3'
 # NOTE: DEV scratch name `audiolabwv3`. Rename back to the formal
-# `audiomodelbasev3` (metadata.name / appid / sharedEntrances.name /
+# `audiomodelbasev3` (metadata.name / appid / entrances.name /
 # workloadReplicas key / Chart.yaml name / values workloads key) once stable.
 metadata:
   name: audiolabwv3
@@ -13,19 +13,24 @@ metadata:
   version: '1.0.0'
   categories:
     - AI
-sharedEntrances:
-  - name: audiolabwv3
-    host: sharedentrances-api
-    port: 0
-    title: Audio Model API
-    invisible: true
-    authLevel: internal
-    icon: https://app.cdn.olares.com/appstore/whisperwebui/icon.png
+# Two entrances, each gets its own public URL `https://<id>.<user>.olares.com`:
+#   audiolabapi    -> sharedentrances-api:80 -> engine:<port>; this is the
+#                     OpenAI-compatible model endpoint the LLM Gateway uses as
+#                     base_url (append /v1). Mirrors the llamacppbase pattern
+#                     (a real `entrances` item, NOT a sharedEntrances stub).
+#   audiolabclient -> llm-init download dashboard (progress UI).
 entrances:
+  - name: audiolabapi
+    port: 8000
+    host: audio-engine
+    title: Audio Model API
+    icon: https://app.cdn.olares.com/appstore/whisperwebui/icon.png
+    openMethod: window
+    authLevel: internal
   - name: audiolabclient
     port: 8090
     host: download-svc
-    title: Audio Lab
+    title: Audio Lab (download)
     icon: https://app.cdn.olares.com/appstore/whisperwebui/icon.png
     openMethod: window
     authLevel: internal
