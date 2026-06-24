@@ -23,22 +23,39 @@
        here. ENGINE_IMAGE / ENGINE_PORT / ENGINE_HEALTH_PATH stay as OPTIONAL post-
        install overrides (empty = use the mapped value). All images are converted
        (beclab/, no latest). */ -}}
-{{- /* Only stt/vad/diar are WIRED for 1.12.7. Other modes are reserved in the
+{{- /* Only stt/vad/diar/translate/embed/enhance are WIRED. Other modes are reserved in the
        MODEL_MODE enum; selecting one points at an obviously-unbuilt placeholder
        image (voice-engine-<mode>:notbuilt) so it's clear the engine isn't ready yet.
        An entry may carry "cmd": that mode REUSES the image but overrides the
        container command to run an injected wrapper script (templates/wrappers.yaml),
        so we don't build a new image. vad reuses the whisper image (it bundles Silero
        VAD + an audio decoder) and runs /wrappers/vad.py.
+       translate (text->text MT, the boss's "translate" = e.g. NLLB) ALSO reuses the
+       whisper image with NO new image: that image already ships ctranslate2 + the HF
+       tokenizers lib, and an NLLB CTranslate2 repo carries tokenizer.json (so NO
+       sentencepiece is needed). /wrappers/translate.py runs NLLB on CPU. NOTE: whisper's
+       stt mode already natively serves /v1/audio/translations (speech->English) — that
+       belongs to the stt model's own surface; this `translate` mode is the dedicated
+       text-MT class (arbitrary-direction text->text).
        diar: the mapped image is the AMD64-only CUDA pyannote_fastapi (mirrored to
        beclab); we override its API with /wrappers/diar.py and run on GPU. BACKLOG:
        ARM64 (DGX Spark/GB10) + GPU needs a multi-arch image — the CPU-only multi-arch
        ../voice-engine-pyannote (Dockerfile+build.sh) is the starting point; on arm64
-       set ENGINE_IMAGE override to that until a multi-arch GPU build exists. */ -}}
+       set ENGINE_IMAGE override to that until a multi-arch GPU build exists.
+       embed (speaker/audio x-vector) ALSO reuses the SAME pyannote image with NO new
+       image: pyannote.audio's Model+Inference(window="whole") turns a clip into one
+       fixed-length vector. /wrappers/embed.py runs it; light enough for CPU (GPU=0).
+       enhance (denoise/speech enhancement) ALSO reuses the SAME pyannote image with NO
+       new image: it ships torch, and SpeechBrain is pip-installed on first load (same
+       on-demand pattern as embed's omegaconf). /wrappers/enhance.py runs a SpeechBrain
+       SpectralMaskEnhancement model (e.g. mtl-mimic-voicebank) at 16k mono; CPU-ok. */ -}}
 {{- $engines := dict
       "stt"  (dict "image" "docker.io/beclab/fedirz-faster-whisper-server:0.6.0-rc.3-cuda" "port" "8000" "health" "/health")
       "vad"  (dict "image" "docker.io/beclab/fedirz-faster-whisper-server:0.6.0-rc.3-cuda" "port" "8000" "health" "/healthz" "cmd" "exec $(command -v python3 || command -v python) /wrappers/vad.py")
-      "diar" (dict "image" "docker.io/beclab/maximsachs-pyannote_fastapi:4.0.4" "port" "8000" "health" "/healthz" "cmd" "exec $(command -v python3 || command -v python) /wrappers/diar.py") -}}
+      "diar" (dict "image" "docker.io/beclab/maximsachs-pyannote_fastapi:4.0.4" "port" "8000" "health" "/healthz" "cmd" "exec $(command -v python3 || command -v python) /wrappers/diar.py")
+      "translate" (dict "image" "docker.io/beclab/fedirz-faster-whisper-server:0.6.0-rc.3-cuda" "port" "8000" "health" "/healthz" "cmd" "exec $(command -v python3 || command -v python) /wrappers/translate.py")
+      "embed" (dict "image" "docker.io/beclab/maximsachs-pyannote_fastapi:4.0.4" "port" "8000" "health" "/healthz" "cmd" "exec $(command -v python3 || command -v python) /wrappers/embed.py")
+      "enhance" (dict "image" "docker.io/beclab/maximsachs-pyannote_fastapi:4.0.4" "port" "8000" "health" "/healthz" "cmd" "exec $(command -v python3 || command -v python) /wrappers/enhance.py") -}}
 {{- $sel := index $engines $modelMode -}}
 {{- if not $sel -}}
 {{- $sel = dict "image" (printf "docker.io/beclab/voice-engine-%s:notbuilt" $modelMode) "port" "8000" "health" "/healthz" -}}

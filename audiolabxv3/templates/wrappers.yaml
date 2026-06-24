@@ -221,3 +221,380 @@ data:
 
     if __name__ == "__main__":
         uvicorn.run(app, host="0.0.0.0", port=PORT, log_level=LOG_LEVEL)
+  translate.py: |
+    # Text->text machine translation (NLLB) reusing the whisper image's bundled
+    # ctranslate2 + HF tokenizers (NO new image, NO sentencepiece: an NLLB CTranslate2
+    # repo ships tokenizer.json which the tokenizers lib reads directly). Model is the
+    # llm-init-downloaded CT2 repo (e.g. entai2965/nllb-200-distilled-600M-ctranslate2),
+    # read from the shared HF cache. Exposes: GET /healthz, GET /readyz, GET /v1/models,
+    # POST /v1/translate {text, target, source?} with FLORES-200 codes.
+    import os, threading, logging
+    from typing import Optional
+    from fastapi import FastAPI, HTTPException
+    from pydantic import BaseModel
+    import uvicorn
+
+    LOG_LEVEL = os.environ.get("LOG_LEVEL", "info").lower()
+    logging.basicConfig(level=getattr(logging, LOG_LEVEL.upper(), logging.INFO))
+    log = logging.getLogger("audio-translate")
+
+    MODEL_NAME = os.environ.get("MODEL_NAME", "nllb-200-distilled-600M")
+    _src = os.environ.get("MODEL_SOURCE", "")
+    MODEL_REPO = _src[5:] if _src.startswith("hf://") else (_src or MODEL_NAME)
+    PORT = int(os.environ.get("WRAPPER_PORT", "8000"))
+    DEVICE = os.environ.get("CT2_DEVICE", "cpu")
+    DEFAULT_SRC = os.environ.get("DEFAULT_SOURCE_LANG", "eng_Latn")
+
+    app = FastAPI(title="audio-translate (NLLB via ctranslate2)")
+    _state = {"ready": False, "error": None, "translator": None, "tok": None, "device": DEVICE}
+
+    def _locate():
+        # Resolve the CT2 model dir from the shared HF cache populated by llm-init.
+        from huggingface_hub import snapshot_download
+        return snapshot_download(MODEL_REPO, local_files_only=True,
+                                 cache_dir=os.environ.get("HF_HUB_CACHE"))
+
+    def _load():
+        try:
+            import ctranslate2
+            from tokenizers import Tokenizer
+            d = _locate()
+            tok = Tokenizer.from_file(os.path.join(d, "tokenizer.json"))
+            tr = ctranslate2.Translator(d, device=DEVICE)
+            _state.update(translator=tr, tok=tok, ready=True)
+            log.info("nllb ct2 loaded from %s on %s", d, DEVICE)
+        except Exception as e:
+            _state["error"] = str(e)
+            log.exception("load failed: %s", e)
+
+    @app.on_event("startup")
+    def _startup():
+        threading.Thread(target=_load, daemon=True).start()
+
+    @app.get("/healthz")
+    def healthz():
+        if _state["ready"]:
+            return {"status": "ok", "device": _state["device"]}
+        raise HTTPException(status_code=503, detail=_state["error"] or "loading model")
+
+    @app.get("/readyz")
+    def readyz():
+        return healthz()
+
+    @app.get("/v1/models")
+    def models():
+        return {"object": "list", "data": [{"id": MODEL_NAME, "object": "model", "mode": "translate"}]}
+
+    class Req(BaseModel):
+        text: str
+        target: str                 # FLORES-200 code, e.g. zho_Hans
+        source: Optional[str] = None  # FLORES-200 code; default DEFAULT_SOURCE_LANG
+
+    @app.post("/v1/translate")
+    def translate(req: Req):
+        if not _state["ready"]:
+            raise HTTPException(status_code=503, detail=_state["error"] or "model not ready")
+        if not req.text.strip():
+            return {"model": MODEL_NAME, "mode": "translate", "translation": ""}
+        src = req.source or DEFAULT_SRC
+        tgt = req.target
+        tok = _state["tok"]; tr = _state["translator"]
+        # NLLB encoder input = [src_lang] + subwords + </s>; decoder target_prefix = [tgt_lang].
+        enc = tok.encode(req.text, add_special_tokens=False)
+        source = [src] + enc.tokens + ["</s>"]
+        try:
+            res = tr.translate_batch([source], target_prefix=[[tgt]], beam_size=4,
+                                     max_input_length=1024, max_decoding_length=1024)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail="translation failed: %s" % e)
+        hyp = res[0].hypotheses[0]
+        out = [t for t in hyp if t not in (tgt, "</s>", "<pad>", "<s>")]
+        ids = [tok.token_to_id(t) for t in out]
+        ids = [i for i in ids if i is not None]
+        translation = tok.decode(ids)
+        return {"model": MODEL_NAME, "mode": "translate", "source": src, "target": tgt,
+                "translation": translation}
+
+    if __name__ == "__main__":
+        uvicorn.run(app, host="0.0.0.0", port=PORT, log_level=LOG_LEVEL)
+  embed.py: |
+    # Speaker/audio embedding via pyannote, reusing the pyannote_fastapi image's torch +
+    # pyannote.audio (NO new image). The llm-init-downloaded embedding model (e.g.
+    # pyannote/embedding -> 512-d x-vector) is read from the shared HF cache; gated repos
+    # use the auto-injected HF_TOKEN, same as diar. Exposes: GET /healthz, GET /readyz,
+    # GET /v1/models, POST /v1/audio/embeddings (multipart file -> one whole-file vector).
+    import os, tempfile, threading, logging
+    from fastapi import FastAPI, UploadFile, File, HTTPException
+    import uvicorn
+
+    LOG_LEVEL = os.environ.get("LOG_LEVEL", "info").lower()
+    logging.basicConfig(level=getattr(logging, LOG_LEVEL.upper(), logging.INFO))
+    log = logging.getLogger("audio-embed")
+
+    MODEL_NAME = os.environ.get("MODEL_NAME", "pyannote-embedding")
+    _src = os.environ.get("MODEL_SOURCE", "")
+    MODEL_REPO = _src[5:] if _src.startswith("hf://") else (_src or MODEL_NAME)
+    PORT = int(os.environ.get("WRAPPER_PORT", "8000"))
+    HF_TOKEN = os.environ.get("HF_TOKEN") or None
+
+    app = FastAPI(title="audio-embedding (pyannote)")
+    _state = {"ready": False, "error": None, "inference": None, "device": "cpu", "dim": None}
+
+    def _decode(path):
+        # Decode to a (channels, time) float32 tensor + sample_rate, feeding pyannote an
+        # in-memory waveform to bypass its torchcodec AudioDecoder path (broken in image).
+        import torch
+        try:
+            import soundfile as sf
+            data, sr = sf.read(path, dtype="float32", always_2d=True)  # (time, channels)
+            return torch.from_numpy(data.T.copy()), int(sr)
+        except Exception:
+            pass
+        try:
+            import torchaudio
+            wav, sr = torchaudio.load(path)  # (channels, time)
+            return wav.float(), int(sr)
+        except Exception:
+            pass
+        import wave, numpy as np
+        with wave.open(path, "rb") as wf:
+            sr, ch, sw = wf.getframerate(), wf.getnchannels(), wf.getsampwidth()
+            raw = wf.readframes(wf.getnframes())
+        dt = {1: np.uint8, 2: np.int16, 4: np.int32}[sw]
+        a = np.frombuffer(raw, dtype=dt).astype(np.float32)
+        if sw == 2:
+            a /= 32768.0
+        elif sw == 4:
+            a /= 2147483648.0
+        else:
+            a = (a - 128.0) / 128.0
+        a = a.reshape(-1, ch).T
+        return torch.from_numpy(a.copy()), int(sr)
+
+    def _load():
+        try:
+            # pyannote/embedding's checkpoint pickles an omegaconf config object, so
+            # torch.load() needs the omegaconf module. This pyannote image ships
+            # pyannote.audio but NOT omegaconf (diar's Pipeline path doesn't hit it).
+            # Best-effort pip-install at first load — no new image; node-cached after.
+            try:
+                import omegaconf  # noqa: F401
+            except ImportError:
+                import subprocess, sys
+                log.info("omegaconf missing; pip-installing for pyannote checkpoint...")
+                subprocess.run([sys.executable, "-m", "pip", "install", "-q", "omegaconf"], check=False)
+            import torch
+            from pyannote.audio import Model, Inference
+            # pyannote.audio 4 uses token=; older used use_auth_token=.
+            try:
+                model = Model.from_pretrained(MODEL_REPO, token=HF_TOKEN)
+            except TypeError:
+                model = Model.from_pretrained(MODEL_REPO, use_auth_token=HF_TOKEN)
+            dev = "cuda" if torch.cuda.is_available() else "cpu"
+            # window="whole" -> a single fixed-length vector for the entire clip.
+            try:
+                inf = Inference(model, window="whole", device=torch.device(dev))
+            except TypeError:
+                model.to(torch.device(dev))
+                inf = Inference(model, window="whole")
+            _state.update(inference=inf, device=dev, ready=True)
+            log.info("pyannote embedding %s loaded on %s", MODEL_REPO, dev)
+        except Exception as e:
+            _state["error"] = str(e)
+            log.exception("embedding load failed: %s", e)
+
+    @app.on_event("startup")
+    def _startup():
+        threading.Thread(target=_load, daemon=True).start()
+
+    @app.get("/healthz")
+    def healthz():
+        if _state["ready"]:
+            return {"status": "ok", "device": _state["device"]}
+        raise HTTPException(status_code=503, detail=_state["error"] or "loading model")
+
+    @app.get("/readyz")
+    def readyz():
+        return healthz()
+
+    @app.get("/v1/models")
+    def models():
+        return {"object": "list", "data": [{"id": MODEL_NAME, "object": "model", "mode": "embed"}]}
+
+    @app.post("/v1/audio/embeddings")
+    async def embeddings(file: UploadFile = File(...)):
+        if not _state["ready"]:
+            raise HTTPException(status_code=503, detail=_state["error"] or "model not ready")
+        data = await file.read()
+        suffix = os.path.splitext(file.filename or "a.wav")[1] or ".wav"
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
+            f.write(data)
+            path = f.name
+        try:
+            import numpy as np
+            waveform, sr = _decode(path)
+            emb = _state["inference"]({"waveform": waveform, "sample_rate": sr})
+            vec = np.asarray(emb, dtype="float32").reshape(-1)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail="embedding failed: %s" % e)
+        finally:
+            try:
+                os.unlink(path)
+            except Exception:
+                pass
+        _state["dim"] = int(vec.shape[0])
+        return {"model": MODEL_NAME, "mode": "embed", "device": _state["device"],
+                "dim": int(vec.shape[0]), "embedding": vec.tolist()}
+
+    if __name__ == "__main__":
+        uvicorn.run(app, host="0.0.0.0", port=PORT, log_level=LOG_LEVEL)
+  enhance.py: |
+    # Speech enhancement / denoise reusing the pyannote_fastapi image's torch (NO new
+    # image). The llm-init-downloaded SpeechBrain model (e.g.
+    # speechbrain/mtl-mimic-voicebank -> SpectralMaskEnhancement) is read from the shared
+    # HF cache. SpeechBrain isn't in this image, so it's best-effort pip-installed on first
+    # load (same pattern as embed's omegaconf; node-cached after). Audio in -> 16k mono
+    # enhanced WAV out. Exposes: GET /healthz, GET /readyz, GET /v1/models,
+    # POST /v1/audio/enhance (multipart file -> audio/wav body).
+    import io, os, tempfile, threading, logging
+    from fastapi import FastAPI, UploadFile, File, HTTPException
+    from fastapi.responses import Response
+    import uvicorn
+
+    LOG_LEVEL = os.environ.get("LOG_LEVEL", "info").lower()
+    logging.basicConfig(level=getattr(logging, LOG_LEVEL.upper(), logging.INFO))
+    log = logging.getLogger("audio-enhance")
+
+    MODEL_NAME = os.environ.get("MODEL_NAME", "mtl-mimic-voicebank")
+    _src = os.environ.get("MODEL_SOURCE", "")
+    MODEL_REPO = _src[5:] if _src.startswith("hf://") else (_src or MODEL_NAME)
+    PORT = int(os.environ.get("WRAPPER_PORT", "8000"))
+    HF_TOKEN = os.environ.get("HF_TOKEN") or None
+    SR = 16000  # SpeechBrain enhancement models operate at 16 kHz mono.
+
+    app = FastAPI(title="audio-enhance (speechbrain)")
+    _state = {"ready": False, "error": None, "model": None, "kind": None, "device": "cpu"}
+
+    def _decode(path):
+        # Decode to a mono float32 16k torch tensor, doing our own resample so we never
+        # touch the image's broken torchcodec AudioDecoder path (see diar/embed).
+        import torch
+        try:
+            import soundfile as sf
+            data, sr = sf.read(path, dtype="float32", always_2d=True)  # (time, channels)
+            wav = torch.from_numpy(data.T.copy())  # (channels, time)
+        except Exception:
+            import torchaudio
+            wav, sr = torchaudio.load(path)  # (channels, time)
+            wav = wav.float()
+        if wav.shape[0] > 1:
+            wav = wav.mean(dim=0, keepdim=True)  # downmix to mono
+        if int(sr) != SR:
+            import torchaudio
+            wav = torchaudio.functional.resample(wav, int(sr), SR)
+        return wav  # (1, time) @ 16k
+
+    def _load():
+        try:
+            # SpeechBrain is not bundled in the pyannote image; pip-install on first load.
+            try:
+                import speechbrain  # noqa: F401
+            except ImportError:
+                import subprocess, sys
+                log.info("speechbrain missing; pip-installing (no new image)...")
+                subprocess.run([sys.executable, "-m", "pip", "install", "-q", "speechbrain"], check=False)
+            import torch
+            from huggingface_hub import snapshot_download
+            src = snapshot_download(MODEL_REPO, local_files_only=True,
+                                    cache_dir=os.environ.get("HF_HUB_CACHE"), token=HF_TOKEN)
+            # speechbrain needs a "<type>:<index>" device string ("cuda" alone errors).
+            dev = "cuda:0" if torch.cuda.is_available() else "cpu"
+            # Different enhancement repos need different inference classes (their
+            # hyperparams.yaml decides): mtl-mimic-voicebank -> WaveformEnhancement,
+            # metricgan/*-voicebank -> SpectralMaskEnhancement, sepformer-*-enhancement ->
+            # SepformerSeparation. Auto-detect by trying from_hparams in order; the wrong
+            # class raises "Need hparams['...']". module path moved in speechbrain 1.x
+            # (inference) vs 0.5.x (pretrained).
+            try:
+                from speechbrain.inference.enhancement import WaveformEnhancement, SpectralMaskEnhancement
+                from speechbrain.inference.separation import SepformerSeparation
+            except ImportError:
+                from speechbrain.pretrained import (
+                    WaveformEnhancement, SpectralMaskEnhancement, SepformerSeparation)
+            candidates = [("waveform", WaveformEnhancement),
+                          ("spectralmask", SpectralMaskEnhancement),
+                          ("sepformer", SepformerSeparation)]
+            last = None
+            for kind, cls in candidates:
+                try:
+                    savedir = os.path.join(tempfile.gettempdir(), "sb-enhance-%s" % kind)
+                    model = cls.from_hparams(source=src, savedir=savedir, run_opts={"device": dev})
+                    _state.update(model=model, kind=kind, device=dev, ready=True)
+                    log.info("speechbrain %s loaded as '%s' on %s", MODEL_REPO, kind, dev)
+                    return
+                except Exception as e:
+                    last = e
+                    log.info("model is not a %s class (%s)", kind, e)
+            raise last or RuntimeError("no compatible speechbrain enhancement class")
+        except Exception as e:
+            _state["error"] = str(e)
+            log.exception("enhance load failed: %s", e)
+
+    @app.on_event("startup")
+    def _startup():
+        threading.Thread(target=_load, daemon=True).start()
+
+    @app.get("/healthz")
+    def healthz():
+        if _state["ready"]:
+            return {"status": "ok", "device": _state["device"]}
+        raise HTTPException(status_code=503, detail=_state["error"] or "loading model")
+
+    @app.get("/readyz")
+    def readyz():
+        return healthz()
+
+    @app.get("/v1/models")
+    def models():
+        return {"object": "list", "data": [{"id": MODEL_NAME, "object": "model", "mode": "enhance"}]}
+
+    @app.post("/v1/audio/enhance")
+    async def enhance(file: UploadFile = File(...)):
+        if not _state["ready"]:
+            raise HTTPException(status_code=503, detail=_state["error"] or "model not ready")
+        data = await file.read()
+        suffix = os.path.splitext(file.filename or "a.wav")[1] or ".wav"
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
+            f.write(data)
+            path = f.name
+        try:
+            import torch, numpy as np, soundfile as sf
+            wav = _decode(path)  # (1, time) @ 16k
+            noisy = wav  # already (batch=1, time)
+            model = _state["model"]
+            if _state["kind"] == "sepformer":
+                # separate_batch -> (batch, time, n_src); enhancement = source 0.
+                est = model.separate_batch(noisy)
+                enhanced = est[..., 0]
+            else:
+                lengths = torch.ones(noisy.shape[0])
+                enhanced = model.enhance_batch(noisy, lengths=lengths)
+            out = enhanced.detach().cpu().numpy().reshape(-1)
+            peak = float(np.max(np.abs(out))) if out.size else 0.0
+            if peak > 1.0:
+                out = out / peak  # guard against clipping
+            buf = io.BytesIO()
+            sf.write(buf, out, SR, format="WAV", subtype="PCM_16")
+            body = buf.getvalue()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail="enhance failed: %s" % e)
+        finally:
+            try:
+                os.unlink(path)
+            except Exception:
+                pass
+        return Response(content=body, media_type="audio/wav",
+                        headers={"X-Audio-Model": MODEL_NAME, "X-Audio-Mode": "enhance"})
+
+    if __name__ == "__main__":
+        uvicorn.run(app, host="0.0.0.0", port=PORT, log_level=LOG_LEVEL)

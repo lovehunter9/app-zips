@@ -47,8 +47,8 @@ spec:
     **Clone form (4 required envs)**
     - `MODEL_SOURCE` — `hf://<repo>` (llm-init download spec).
     - `MODEL_NAME` — model id advertised to clients.
-    - `MODEL_MODE` — `stt` / `vad` / `diar` (engine auto-derived from mode).
-    - `AUDIO_REQUIRED_GPU_MEMORY` — `"0"` for CPU-only (VAD); STT: `8Gi`; Diar: `4Gi`.
+    - `MODEL_MODE` — `stt` / `vad` / `diar` / `translate` / `embed` / `enhance` (engine auto-derived from mode).
+    - `AUDIO_REQUIRED_GPU_MEMORY` — `"0"` for CPU-only (VAD, Translate, Embed, Enhance); STT: `8Gi`; Diar: `4Gi`.
 
     **Example clone sets**
     - STT:  MODEL_SOURCE=hf://Systran/faster-whisper-large-v3
@@ -57,6 +57,12 @@ spec:
       MODEL_NAME=silero-v5  MODEL_MODE=vad  AUDIO_REQUIRED_GPU_MEMORY=0
     - Diar: MODEL_SOURCE=hf://pyannote/speaker-diarization-community-1
       MODEL_NAME=pyannote-community-1  MODEL_MODE=diar  AUDIO_REQUIRED_GPU_MEMORY=4Gi
+    - Translate (text->text MT, NLLB): MODEL_SOURCE=hf://entai2965/nllb-200-distilled-600M-ctranslate2
+      MODEL_NAME=nllb-200-distilled-600M  MODEL_MODE=translate  AUDIO_REQUIRED_GPU_MEMORY=0
+    - Embed (speaker x-vector, pyannote): MODEL_SOURCE=hf://pyannote/embedding
+      MODEL_NAME=pyannote-embedding  MODEL_MODE=embed  AUDIO_REQUIRED_GPU_MEMORY=0
+    - Enhance (denoise, SpeechBrain): MODEL_SOURCE=hf://speechbrain/mtl-mimic-voicebank
+      MODEL_NAME=mtl-mimic-voicebank  MODEL_MODE=enhance  AUDIO_REQUIRED_GPU_MEMORY=0
 
   upgradeDescription: |
     v1.0.0: initial generic audio-model base. llm-init (download-only) + mode-mapped
@@ -131,6 +137,12 @@ envs:
       value: vad
     - title: Diarize
       value: diar
+    - title: Translate (text MT, NLLB)
+      value: translate
+    - title: Embed (speaker x-vector)
+      value: embed
+    - title: Enhance (denoise)
+      value: enhance
   - envName: ENGINE_IMAGE
     required: false
     type: string
