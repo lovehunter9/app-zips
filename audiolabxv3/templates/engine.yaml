@@ -60,6 +60,24 @@
 {{- if not $sel -}}
 {{- $sel = dict "image" (printf "docker.io/beclab/voice-engine-%s:notbuilt" $modelMode) "port" "8000" "health" "/healthz" -}}
 {{- end -}}
+{{- /* MODEL_ENGINE = "same model-type, different OFFICIAL engine". Empty => the mode's
+       default engine above (byte-identical back-compat for stt/vad/diar/...). A named
+       value selects from $engineAlts, each a DIFFERENT official engine for the SAME mode.
+       This is the one-chart / one-mode / multiple-engines axis the boss flagged.
+       stt: default = CTranslate2 faster-whisper (/v1/audio/transcriptions native);
+            MODEL_ENGINE=qwen2-audio = Qwen2-Audio via 🤗 transformers (its OFFICIAL
+            engine, NOT vLLM). The reused image is the official HF transformers CI image
+            (ships transformers+torch+CUDA, no vLLM) mirrored to beclab; /wrappers/qwen_asr.py
+            adapts Qwen2-Audio's chat surface to the SAME /v1/audio/transcriptions contract,
+            so the gateway stt route + clients don't change. Each alt is keyed by engine id;
+            it is the cloner's job to pick an engine compatible with the chosen mode. */ -}}
+{{- $engineSel := $oe.MODEL_ENGINE | default "" -}}
+{{- $engineAlts := dict
+      "qwen2-audio" (dict "image" "docker.io/beclab/huggingface-transformers-all-latest-gpu:sha256-da2eeebd5516d3cd9540163d36d3229f64550070753aadc4839c0fd2b99e8bc2" "port" "8000" "health" "/healthz" "cmd" "exec $(command -v python3 || command -v python) /wrappers/qwen_asr.py") -}}
+{{- if $engineSel -}}
+{{- $alt := index $engineAlts $engineSel -}}
+{{- if $alt -}}{{- $sel = $alt -}}{{- end -}}
+{{- end -}}
 {{- $engineImage := $oe.ENGINE_IMAGE | default (index $sel "image") -}}
 {{- $enginePort := int ($oe.ENGINE_PORT | default (index $sel "port")) -}}
 {{- $healthPath := $oe.ENGINE_HEALTH_PATH | default (index $sel "health") -}}
@@ -104,6 +122,7 @@ metadata:
     audio.mode: "{{ $modelMode }}"
   annotations:
     audio.bytetrade.io/model: "{{ $modelName }}"
+    audio.bytetrade.io/engine: "{{ $engineSel | default "default" }}"
 {{- if $wantGpu }}
     applications.app.bytetrade.io/gpu-inject: "{{ $cname }}"
 {{- end }}

@@ -48,11 +48,16 @@ spec:
     - `MODEL_SOURCE` — `hf://<repo>` (llm-init download spec).
     - `MODEL_NAME` — model id advertised to clients.
     - `MODEL_MODE` — `stt` / `vad` / `diar` / `translate` / `embed` / `enhance` (engine auto-derived from mode).
-    - `AUDIO_REQUIRED_GPU_MEMORY` — `"0"` for CPU-only (VAD, Translate, Embed, Enhance); STT: `8Gi`; Diar: `4Gi`.
+    - `MODEL_ENGINE` (optional) — same mode, different OFFICIAL engine. Empty = the mode's
+      default (e.g. stt -> faster-whisper). `qwen2-audio` runs Qwen2-Audio via transformers
+      for stt, exposing the same `/v1/audio/transcriptions` contract.
+    - `AUDIO_REQUIRED_GPU_MEMORY` — `"0"` for CPU-only (VAD, Translate, Embed, Enhance); STT: `8Gi`; Diar: `4Gi`; STT(qwen2-audio): `24Gi`.
 
     **Example clone sets**
     - STT:  MODEL_SOURCE=hf://Systran/faster-whisper-large-v3
       MODEL_NAME=Systran/faster-whisper-large-v3  MODEL_MODE=stt  AUDIO_REQUIRED_GPU_MEMORY=8Gi
+    - STT (Qwen2-Audio, transformers engine): MODEL_SOURCE=hf://Qwen/Qwen2-Audio-7B-Instruct
+      MODEL_NAME=Qwen/Qwen2-Audio-7B-Instruct  MODEL_MODE=stt  MODEL_ENGINE=qwen2-audio  AUDIO_REQUIRED_GPU_MEMORY=24Gi
     - VAD:  MODEL_SOURCE=hf://onnx-community/silero-vad
       MODEL_NAME=silero-v5  MODEL_MODE=vad  AUDIO_REQUIRED_GPU_MEMORY=0
     - Diar: MODEL_SOURCE=hf://pyannote/speaker-diarization-community-1
@@ -143,6 +148,17 @@ envs:
       value: embed
     - title: Enhance (denoise)
       value: enhance
+  - envName: MODEL_ENGINE
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+    default: ""
+    options:
+    - title: Default engine for the mode
+      value: ""
+    - title: Qwen2-Audio (transformers, stt)
+      value: qwen2-audio
   - envName: ENGINE_IMAGE
     required: false
     type: string
