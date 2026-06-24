@@ -65,15 +65,23 @@
        value selects from $engineAlts, each a DIFFERENT official engine for the SAME mode.
        This is the one-chart / one-mode / multiple-engines axis the boss flagged.
        stt: default = CTranslate2 faster-whisper (/v1/audio/transcriptions native);
-            MODEL_ENGINE=qwen2-audio = Qwen2-Audio via 🤗 transformers (its OFFICIAL
-            engine, NOT vLLM). The reused image is the official HF transformers CI image
-            (ships transformers+torch+CUDA, no vLLM) mirrored to beclab; /wrappers/qwen_asr.py
-            adapts Qwen2-Audio's chat surface to the SAME /v1/audio/transcriptions contract,
-            so the gateway stt route + clients don't change. Each alt is keyed by engine id;
-            it is the cloner's job to pick an engine compatible with the chosen mode. */ -}}
+            MODEL_ENGINE=qwen3-asr = Qwen3-ASR (0.6B/1.7B) on the OFFICIAL vLLM engine
+            image (vllm/vllm-openai v0.23.0-cu129, mirrored to beclab; native Qwen3-ASR
+            batch + realtime support). cu129 (CUDA 12.9) is the variant the cluster's
+            RTX 5090 (Blackwell) driver runs; the plain v0.23.0 is cu130 and risks a
+            too-new-CUDA mismatch. `vllm serve <model>` NATIVELY exposes the SAME
+            /v1/audio/transcriptions contract, so the gateway stt route + clients don't
+            change and NO wrapper is needed. The model is read from the shared HF cache
+            (HF_HUB_OFFLINE=1); librosa/soundfile (audio extras absent from the base image)
+            are pip-installed at startup, same on-demand pattern as the other engines. We
+            use vllm-openai instead of qwenllm/qwen3-asr because the latter ships as a
+            single-arch manifest the beclab image mirror rejects; vllm-openai is a
+            multi-arch index and mirrors cleanly (and is reusable for other vLLM models).
+            Each alt is keyed by engine id; it is the cloner's job to pick an engine
+            compatible with the chosen mode. */ -}}
 {{- $engineSel := $oe.MODEL_ENGINE | default "" -}}
 {{- $engineAlts := dict
-      "qwen2-audio" (dict "image" "docker.io/beclab/huggingface-transformers-all-latest-gpu:sha256-da2eeebd5516d3cd9540163d36d3229f64550070753aadc4839c0fd2b99e8bc2" "port" "8000" "health" "/healthz" "cmd" "exec $(command -v python3 || command -v python) /wrappers/qwen_asr.py") -}}
+      "qwen3-asr" (dict "image" "docker.io/beclab/vllm-vllm-openai:v0.23.0-cu129" "port" "8000" "health" "/health" "cmd" "export HF_HUB_OFFLINE=1; python3 -m pip install -q librosa soundfile 2>/dev/null || true; exec vllm serve $MODEL_NAME --host 0.0.0.0 --port $WRAPPER_PORT --gpu-memory-utilization 0.8") -}}
 {{- if $engineSel -}}
 {{- $alt := index $engineAlts $engineSel -}}
 {{- if $alt -}}{{- $sel = $alt -}}{{- end -}}
