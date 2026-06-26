@@ -99,8 +99,18 @@
        kernels → float16 silently runs CPU-speed). qwen3-asr is the only ALT: same vLLM
        cu129 image, but with --max-model-len (Qwen3-ASR is a decoder LLM); Whisper omits
        it (small-window encoder-decoder, max_model_len 448, vLLM sets it automatically). */ -}}
+{{- /* faster-whisper alt: vLLM's Whisper is autoregressive (one CUDA sync per token), which
+       the olares time-sliced vGPU lock throttles ~10x. faster-whisper (ctranslate2) issues
+       FEW CUDA calls/sec, so it stays fast UNDER time-slicing (proven by the harveyff
+       Whisper-WebUI on the same Blackwell card). We take ONLY that image's Blackwell-built
+       ctranslate2/faster_whisper and run our own /wrappers/stt_fw.py (NOT the WebUI app); it
+       serves the SAME OpenAI STT contract (/v1/audio/transcriptions + /translations +
+       /v1/models + /health) so the gateway and Demo are unchanged. MODEL_NAME at clone time
+       must be a CT2 whisper repo, e.g. Systran/faster-whisper-large-v3. fastapi/uvicorn are
+       pip-installed if missing WITHOUT --deps so the image's ctranslate2 is never replaced. */ -}}
 {{- $engineAlts := dict
-      "qwen3-asr" (dict "image" "docker.io/beclab/vllm-vllm-openai:v0.23.0-cu129" "port" "8000" "health" "/health" "cmd" "export HF_HUB_OFFLINE=1; python3 -m pip install -q librosa soundfile 2>/dev/null || true; exec vllm serve $MODEL_NAME --host 0.0.0.0 --port $WRAPPER_PORT --gpu-memory-utilization ${VLLM_GPU_UTIL:-0.45} --max-model-len ${VLLM_MAX_LEN:-32768}") -}}
+      "qwen3-asr" (dict "image" "docker.io/beclab/vllm-vllm-openai:v0.23.0-cu129" "port" "8000" "health" "/health" "cmd" "export HF_HUB_OFFLINE=1; python3 -m pip install -q librosa soundfile 2>/dev/null || true; exec vllm serve $MODEL_NAME --host 0.0.0.0 --port $WRAPPER_PORT --gpu-memory-utilization ${VLLM_GPU_UTIL:-0.45} --max-model-len ${VLLM_MAX_LEN:-32768}")
+      "faster-whisper" (dict "image" "docker.io/beclab/harveyff-whisper-webui:v1.0.7" "port" "8000" "health" "/health" "cmd" "export HF_HUB_OFFLINE=1; python3 -m pip install -q fastapi uvicorn 2>/dev/null || true; exec $(command -v python3 || command -v python) /wrappers/stt_fw.py") -}}
 {{- if $engineSel -}}
 {{- $alt := index $engineAlts $engineSel -}}
 {{- if $alt -}}{{- $sel = $alt -}}{{- end -}}

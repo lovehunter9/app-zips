@@ -671,3 +671,213 @@ data:
 
     if __name__ == "__main__":
         uvicorn.run(app, host="0.0.0.0", port=PORT, log_level=LOG_LEVEL)
+  stt_fw.py: |
+    # faster-whisper STT. Takes ONLY the harveyff Whisper-WebUI image's proven-on-Blackwell
+    # ctranslate2 + faster_whisper (NOT the WebUI/Gradio app). Drives the llm-init-downloaded
+    # CT2 model (read from the shared HF cache) on GPU and exposes the SAME OpenAI STT
+    # contract as vLLM so it is a drop-in (gateway + Demo unchanged):
+    #   GET /health, GET /healthz, GET /v1/models,
+    #   POST /v1/audio/transcriptions, POST /v1/audio/translations.
+    # Why this engine: faster-whisper issues FEW CUDA calls/sec, so it stays fast on the
+    # time-sliced vGPU where per-token vLLM gets throttled ~10x by the olares GPU lock.
+    import os, sys, tempfile, threading, subprocess, logging
+    from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+    from fastapi.responses import PlainTextResponse
+    import uvicorn
+
+    LOG_LEVEL = os.environ.get("LOG_LEVEL", "info").lower()
+    logging.basicConfig(level=getattr(logging, LOG_LEVEL.upper(), logging.INFO))
+    log = logging.getLogger("audio-stt-fw")
+
+    MODEL_NAME = os.environ.get("MODEL_NAME", "Systran/faster-whisper-large-v3")
+    _src = os.environ.get("MODEL_SOURCE", "")
+    MODEL_REPO = _src[5:] if _src.startswith("hf://") else (_src or MODEL_NAME)
+    PORT = int(os.environ.get("WRAPPER_PORT", "8000"))
+    COMPUTE_TYPE = os.environ.get("FW_COMPUTE_TYPE", "float16")
+    DEVICE = os.environ.get("FW_DEVICE", "auto")
+    BEAM_SIZE = int(os.environ.get("FW_BEAM_SIZE", "5") or 5)
+    # THE speedup: WhisperX-style BatchedInferencePipeline (VAD-cut + parallel batched
+    # decode). This is what the proven WebUI runs by default (batch_size=16, vad on) and
+    # is ~10x faster than sequential transcribe AND friendlier to the time-sliced vGPU
+    # (few big batched kernel launches instead of many tiny per-token ones).
+    BATCHED = os.environ.get("FW_BATCHED", "1").lower() in ("1", "true", "yes")
+    BATCH_SIZE = int(os.environ.get("FW_BATCH_SIZE", "16") or 16)
+    HF_TOKEN = os.environ.get("HF_TOKEN") or None
+
+    # Common full-name -> ISO 639-1 so callers can send "English"/"Chinese" (what some
+    # clients send) and not just "en"/"zh". Unknown values pass through lower-cased.
+    _LANG = {"english": "en", "chinese": "zh", "mandarin": "zh", "japanese": "ja",
+             "korean": "ko", "french": "fr", "german": "de", "spanish": "es",
+             "russian": "ru", "italian": "it", "portuguese": "pt", "arabic": "ar"}
+
+    app = FastAPI(title="audio-stt (faster-whisper)")
+    _state = {"ready": False, "error": None, "model": None, "pipeline": None,
+              "device": None, "compute": None}
+
+    def _locate():
+        # Resolve the CT2 model dir from the shared HF cache populated by llm-init.
+        from huggingface_hub import snapshot_download
+        return snapshot_download(MODEL_REPO, local_files_only=True,
+                                 cache_dir=os.environ.get("HF_HUB_CACHE"), token=HF_TOKEN)
+
+    def _load():
+        try:
+            try:
+                from faster_whisper import WhisperModel
+            except Exception:
+                # Present in the harveyff image; if ever missing, install WITHOUT deps so we
+                # never replace the image's Blackwell-built ctranslate2 with a generic wheel.
+                subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--no-deps",
+                                "faster-whisper"], check=False)
+                from faster_whisper import WhisperModel
+            import torch
+            dev = DEVICE
+            if dev == "auto":
+                dev = "cuda" if torch.cuda.is_available() else "cpu"
+            ctype = COMPUTE_TYPE if dev == "cuda" else "int8"
+            path = _locate()
+            model = WhisperModel(path, device=dev, compute_type=ctype)
+            pipeline = None
+            if BATCHED:
+                try:
+                    from faster_whisper import BatchedInferencePipeline
+                    pipeline = BatchedInferencePipeline(model=model)
+                    log.info("BatchedInferencePipeline enabled (batch_size=%d)", BATCH_SIZE)
+                except Exception as e:
+                    log.warning("BatchedInferencePipeline unavailable (%s); using buffered", e)
+            _state.update(model=model, pipeline=pipeline, device=dev, compute=ctype, ready=True)
+            log.info("faster-whisper loaded from %s on %s (%s)", path, dev, ctype)
+        except Exception as e:
+            _state["error"] = str(e)
+            log.exception("stt load failed: %s", e)
+
+    @app.on_event("startup")
+    def _startup():
+        threading.Thread(target=_load, daemon=True).start()
+
+    @app.get("/health")
+    def health():
+        if _state["ready"]:
+            return {"status": "ok", "device": _state["device"], "compute_type": _state["compute"]}
+        raise HTTPException(status_code=503, detail=_state["error"] or "loading model")
+
+    @app.get("/healthz")
+    def healthz():
+        return health()
+
+    @app.get("/v1/models")
+    def models():
+        return {"object": "list",
+                "data": [{"id": MODEL_NAME, "object": "model", "owned_by": "local", "mode": "stt"}]}
+
+    def _norm_lang(lang):
+        if not lang:
+            return None
+        l = str(lang).strip().lower()
+        if not l or l in ("auto", "none", "null", "automatic detection"):
+            return None
+        if l in _LANG:
+            return _LANG[l]
+        return l.split("-")[0].split("_")[0]  # en-US/zh_CN -> en/zh
+
+    def _parse_temp(raw):
+        if raw is None or str(raw).strip() == "":
+            return 0.0
+        parts = [p for p in str(raw).replace(" ", "").split(",") if p != ""]
+        try:
+            vals = [float(p) for p in parts]
+        except Exception:
+            return 0.0
+        return vals[0] if len(vals) == 1 else tuple(vals)
+
+    def _run(task, file, language, response_format, temperature, prompt, vad_filter, word_ts):
+        if not _state["ready"]:
+            raise HTTPException(status_code=503, detail=_state["error"] or "model not ready")
+        data = file.file.read() if hasattr(file, "file") else None
+        suffix = os.path.splitext(getattr(file, "filename", "") or "a.wav")[1] or ".wav"
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
+            f.write(data)
+            path = f.name
+        try:
+            kw = {
+                "task": task,
+                "beam_size": BEAM_SIZE,
+                "language": _norm_lang(language),
+                "word_timestamps": bool(word_ts),
+            }
+            if prompt:
+                kw["initial_prompt"] = prompt
+            temp = _parse_temp(temperature)
+            pipe = _state.get("pipeline")
+            if pipe is not None:
+                # Batched path (THE fast path): VAD-cut + parallel batched decode. Batched
+                # owns its VAD (so vad_filter=True drives chunking) and needs a SCALAR
+                # temperature; falls back to buffered if this faster_whisper rejects a kwarg.
+                bkw = dict(kw)
+                bkw["temperature"] = temp[0] if isinstance(temp, tuple) else temp
+                bkw["batch_size"] = BATCH_SIZE
+                bkw["vad_filter"] = True
+                try:
+                    segments, info = pipe.transcribe(path, **bkw)
+                    segs = list(segments)
+                except TypeError as te:
+                    log.warning("batched rejected kwargs (%s); buffered fallback", te)
+                    kw["temperature"] = temp
+                    if vad_filter:
+                        kw["vad_filter"] = True
+                    segments, info = _state["model"].transcribe(path, **kw)
+                    segs = list(segments)
+            else:
+                kw["temperature"] = temp
+                if vad_filter:
+                    kw["vad_filter"] = True
+                segments, info = _state["model"].transcribe(path, **kw)
+                segs = list(segments)  # realize the generator (runs inference)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail="transcription failed: %s" % e)
+        finally:
+            try:
+                os.unlink(path)
+            except Exception:
+                pass
+        full = "".join(s.text for s in segs).strip()
+        rf = (response_format or "json").lower()
+        if rf == "text":
+            return PlainTextResponse(full)
+        if rf in ("verbose_json", "verbose"):
+            out_segs = []
+            for s in segs:
+                d = {"id": getattr(s, "id", 0), "seek": getattr(s, "seek", 0),
+                     "start": round(float(s.start), 3), "end": round(float(s.end), 3),
+                     "text": s.text,
+                     "avg_logprob": getattr(s, "avg_logprob", None),
+                     "compression_ratio": getattr(s, "compression_ratio", None),
+                     "no_speech_prob": getattr(s, "no_speech_prob", None)}
+                if word_ts and getattr(s, "words", None):
+                    d["words"] = [{"word": w.word, "start": round(float(w.start), 3),
+                                   "end": round(float(w.end), 3),
+                                   "probability": getattr(w, "probability", None)} for w in s.words]
+                out_segs.append(d)
+            return {"task": task, "language": getattr(info, "language", None),
+                    "duration": round(float(getattr(info, "duration", 0.0) or 0.0), 3),
+                    "text": full, "segments": out_segs}
+        return {"text": full}
+
+    @app.post("/v1/audio/transcriptions")
+    async def transcriptions(file: UploadFile = File(...), model: str = Form(default=None),
+                             language: str = Form(default=None), response_format: str = Form(default="json"),
+                             temperature: str = Form(default=None), prompt: str = Form(default=None),
+                             vad_filter: str = Form(default=None), word_timestamps: str = Form(default=None)):
+        return _run("transcribe", file, language, response_format, temperature, prompt,
+                    str(vad_filter).lower() in ("1", "true", "yes"),
+                    str(word_timestamps).lower() in ("1", "true", "yes"))
+
+    @app.post("/v1/audio/translations")
+    async def translations(file: UploadFile = File(...), model: str = Form(default=None),
+                           response_format: str = Form(default="json"),
+                           temperature: str = Form(default=None), prompt: str = Form(default=None)):
+        # OpenAI semantics: translations = speech -> English (Whisper "translate" task).
+        return _run("translate", file, None, response_format, temperature, prompt, False, False)
+
+    if __name__ == "__main__":
+        uvicorn.run(app, host="0.0.0.0", port=PORT, log_level=LOG_LEVEL)

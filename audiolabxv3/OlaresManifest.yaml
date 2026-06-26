@@ -50,13 +50,15 @@ spec:
     - `MODEL_MODE` — `stt` / `vad` / `diar` / `translate` / `embed` / `enhance` (engine auto-derived from mode).
     - `MODEL_ENGINE` (optional) — same mode, different OFFICIAL engine. Empty = the mode's
       default (stt -> Whisper on vLLM). `qwen3-asr` runs Qwen3-ASR via its official
-      vLLM engine for stt, exposing the same `/v1/audio/transcriptions` contract.
+      vLLM engine for stt. `faster-whisper` runs Whisper via ctranslate2 (harveyff image)
+      — fast UNDER time-sliced vGPU where autoregressive vLLM gets ~10x throttled. All
+      expose the same `/v1/audio/transcriptions` contract.
     - `AUDIO_REQUIRED_GPU_MEMORY` — `"0"` for CPU-only (VAD, Translate, Embed, Enhance); STT: `8Gi`; Diar: `4Gi`; STT(qwen3-asr, 1.7B): `12Gi`.
 
-    **Engine images (TWO only)** — vLLM cu129 serves stt (Whisper / Qwen3-ASR);
-    the pyannote/torch image hosts vad/diar/translate/embed/enhance via wrappers.
-    (The faster-whisper/ctranslate2 image was dropped: its GPU ct2 gets no acceleration
-    on Blackwell sm_120, so Whisper now runs on vLLM like Qwen3-ASR.)
+    **Engine images** — vLLM cu129 serves stt (Whisper / Qwen3-ASR); the harveyff
+    Whisper-WebUI image serves stt via faster-whisper/ctranslate2 (its ct2 IS
+    Blackwell-built, used via wrapper, fast under time-slicing); the pyannote/torch
+    image hosts vad/diar/translate/embed/enhance via wrappers.
 
     **Example clone sets**
     - STT (Whisper, vLLM engine): MODEL_SOURCE=hf://openai/whisper-large-v3
@@ -164,6 +166,8 @@ envs:
       value: ""
     - title: Qwen3-ASR (vLLM, stt)
       value: qwen3-asr
+    - title: faster-whisper (ctranslate2, stt; fast under time-sliced vGPU)
+      value: faster-whisper
   - envName: ENGINE_IMAGE
     required: false
     type: string

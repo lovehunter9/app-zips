@@ -4,14 +4,17 @@
 
 ## 一、前置(各能力一次性准备)
 
-> **整座基座只用 2 个引擎镜像**(2026-06-25 收敛):
-> - `beclab/vllm-vllm-openai:v0.23.0-cu129` —— 所有 **stt**(Whisper / Qwen3-ASR)。
+> **引擎镜像(2026-06-26)**:
+> - `beclab/vllm-vllm-openai:v0.23.0-cu129` —— **stt** vLLM 引擎(Whisper / Qwen3-ASR)。
+> - `beclab/harveyff-whisper-webui:v1.0.7` —— **stt** `faster-whisper` 引擎(`MODEL_ENGINE=faster-whisper`,见引擎 C)。
 > - `beclab/maximsachs-pyannote_fastapi:4.0.4` —— **vad / diar / translate / embed / enhance**(wrapper 脚本,首次加载按需 pip 补依赖)。
-> 原 `fedirz-faster-whisper-server`(ctranslate2/CUDA 12.6)已**彻底弃用**:在 Blackwell(RTX 5090,sm_120)上 cuBLAS 无 sm_120 kernel,float16 静默退回 CPU(0% GPU util),所以 Whisper 改到与 Qwen3-ASR 同一套 vLLM 引擎上跑。
+>
+> 关于 STT 引擎选择(2026-06-26 关键结论):**vLLM 的 Whisper/Qwen3-ASR 是自回归**(每 token 一次 CUDA sync),在 olares **时分 vGPU** 的中心锁下被节流约 **10x**(实测 4 分钟音频:时分 79s+ vs 独占 8s)。`faster-whisper`(ctranslate2)每秒 CUDA 调用极少,**在时分下依然快**(harveyff Whisper-WebUI 同卡同 HAMI 实测"起飞")。故 Whisper 默认建议走引擎 C(`faster-whisper`)。原 `fedirz-faster-whisper-server`(CUDA 12.6,无 sm_120 kernel,float16 静默退回 CPU)已弃用;harveyff 镜像里的 ctranslate2 是 **Blackwell 编译可用** 的那一份,wrapper 只取它的 ct2/faster_whisper,**不跑** 其 Gradio WebUI。
 
 | 能力 | 引擎镜像 | 模型门禁 |
 |---|---|---|
-| STT(Whisper / Qwen3-ASR) | `beclab/vllm-vllm-openai:v0.23.0-cu129` | 无 |
+| STT(Whisper / Qwen3-ASR,vLLM) | `beclab/vllm-vllm-openai:v0.23.0-cu129` | 无 |
+| STT(faster-whisper) | `beclab/harveyff-whisper-webui:v1.0.7`(wrapper `/wrappers/stt_fw.py`) | 无 |
 | VAD | `beclab/maximsachs-pyannote_fastapi:4.0.4`(wrapper + `silero-vad`) | 无 |
 | Translate | `beclab/maximsachs-pyannote_fastapi:4.0.4`(wrapper + CPU ctranslate2/tokenizers) | 无 |
 | Diarize / Embed / Enhance | `beclab/maximsachs-pyannote_fastapi:4.0.4` | Diar 需 HF token + 网页同意条款 |
@@ -70,6 +73,29 @@ olares-cli market clone audiolabxv3 -s upload \
 > - **第一关 分配 OOM**：`--gpu-memory-utilization` 是占「物理整卡」的比例，写死 0.8 会把 KV 缓存按 24G 算（~19G）→ 首次推理 OOM 重启。chart 已改为按配额动态算 `VLLM_GPU_UTIL`（12Gi/24454×0.85≈**0.43**，env 可用 `MODEL_GPU_MEM_UTIL` 覆盖）。
 > - **第二关 KV 容量校验**：util 降到 0.43 后权重占 3.9G、KV 只剩 4.93G，而 Qwen3-ASR 默认 `max_model_len=65536` 单请求要 7G KV → vLLM 启动即 `ValueError` CrashLoop。chart 已加 `--max-model-len ${VLLM_MAX_LEN:-32768}`（ASR 音频分块，32768 足够；env 可用 `MODEL_MAX_LEN` 覆盖）。两处修好后引擎 1/1、`/v1/audio/transcriptions` jfk.wav 正确（2026-06-25）。
 
+### STT（引擎 C：`faster-whisper`，时分下首选）
+> ctranslate2/faster_whisper 跑 llm-init 下载的 CT2 权重(`Systran/faster-whisper-large-v3`)。wrapper `/wrappers/stt_fw.py` 复刻 vLLM 同款 OpenAI STT 契约,是 **drop-in**(gateway/Demo 不用改):`POST /v1/audio/transcriptions`、`POST /v1/audio/translations`(语音→英文)、`GET /v1/models`、`GET /health`(readinessProbe 用)。compute_type 默认 `float16`(`FW_COMPUTE_TYPE` 可覆盖);beam_size 默认 5(`FW_BEAM_SIZE`)。
+
+| Env | 值 |
+|---|---|
+| `MODEL_SOURCE` | `hf://Systran/faster-whisper-large-v3` |
+| `MODEL_NAME` | `Systran/faster-whisper-large-v3` |
+| `MODEL_MODE` | `stt` |
+| `MODEL_ENGINE` | `faster-whisper` |
+| `AUDIO_REQUIRED_GPU_MEMORY` | `6Gi` |
+
+```bash
+olares-cli market clone audiolabxv3 -s upload \
+  --title "Audio Lab X V3 STT" \
+  --env MODEL_SOURCE=hf://Systran/faster-whisper-large-v3 \
+  --env MODEL_NAME=Systran/faster-whisper-large-v3 \
+  --env MODEL_MODE=stt \
+  --env MODEL_ENGINE=faster-whisper \
+  --env AUDIO_REQUIRED_GPU_MEMORY=6Gi \
+  --watch
+```
+> 复用旧 Whisper STT 的 title `Audio Lab X V3 STT` → hash/URL 不变(仍 `da6625d5`),只是引擎换成 faster-whisper。务必**先 `market delete` 旧实例 + 删市场旧 chart,再 `upload` 新 tgz,再 clone**。
+
 ### VAD
 | Env | 值 |
 |---|---|
@@ -94,15 +120,15 @@ olares-cli market clone audiolabxv3 -s upload \
 
 | 能力 | title(照抄) | clone 名 | NS | public URL |
 |---|---|---|---|---|
-| STT(Whisper/vLLM) | `Audio Lab X V3 STT` | `audiolabxv39667b8` | `audiolabxv39667b8-shared` | `https://da6625d5.olarestest003.olares.com` |
-| STT(qwen3-asr/vLLM) | `Audio Lab X V3 Qwen3-ASR` | `audiolabxv3ad5667` | `audiolabxv3ad5667-shared` | `https://53b75222.olarestest003.olares.com` |
-| VAD | `Audio Lab X VAD` | `audiolabxv306a333` | `audiolabxv306a333-shared` | `https://694295f9.olarestest003.olares.com` |
-| Diar | `Audio Lab X V3 Diar` | `audiolabxv34c7e4e` | `audiolabxv34c7e4e-shared` | `https://2803f5ae.olarestest003.olares.com` |
-| Translate | `Audio Lab X V3 Translate` | `audiolabxv38ab6b2` | `audiolabxv38ab6b2-shared` | `https://95d80ca6.olarestest003.olares.com` |
-| Embed | `Audio Lab X V3 Embed` | `audiolabxv35db0f3` | `audiolabxv35db0f3-shared` | `https://1cd82f01.olarestest003.olares.com` |
-| Enhance | `AudioLabX Enhance` | `audiolabxv31c4d10` | `audiolabxv31c4d10-shared` | `https://2c7f7a17.olarestest003.olares.com` |
+| STT(**faster-whisper**) | `Audio Lab X V3 STT` | `audiolabxv30b0d85` | `audiolabxv30b0d85-shared` | **(待用户提供)** |
+| STT(qwen3-asr/vLLM) | `Audio Lab X V3 Qwen3-ASR` | (待重建) | — | — |
+| VAD | `Audio Lab X VAD` | (待重建) | — | — |
+| Diar | `Audio Lab X V3 Diar` | (待重建) | — | — |
+| Translate | `Audio Lab X V3 Translate` | (待重建) | — | — |
+| Embed | `Audio Lab X V3 Embed` | (待重建) | — | — |
+| Enhance | `AudioLabX Enhance` | (待重建) | — | — |
 
-> 2026-06-26:VAD 由 `aa0460`(旧 URL `https://eba7446b...`)删除重建为 `06a333`(VAD 引擎 silero 参数调优:threshold 0.3 / min_silence 500ms / speech_pad 200ms,form 可覆盖)。**Gateway VAD provider 需手动改指向新 URL。**
+> 2026-06-26（重置）:为换 STT 引擎,7 个旧实例全部卸载、chart 1.0.0 删后重传(同版本 upload 不刷新 manifest,实测确认),只先重建 STT。新 STT 走 **faster-whisper**(`MODEL_ENGINE=faster-whisper` + `Systran/faster-whisper-large-v3`,harveyff 镜像,cuda/float16 已确认)。clone 名变为 `0b0d85`(title 没变但 clone 名/URL 仍变了→**URL 用 clone 名 hash,不是 title**),新 URL 待用户提供。STT 速度达标后再逐个重建其余 6 个。
 
 Pod:`llminit-*`(下载面)、`audiolabxv3*`(官方引擎)、`audiolabxv3ingress-*`(openresty 合流)。引擎集群内地址:`http://audio-engine.<NS>:8000`。
 
