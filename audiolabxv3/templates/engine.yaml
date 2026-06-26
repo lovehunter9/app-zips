@@ -57,7 +57,7 @@
        + translate via CPU ctranslate2). All wrappers pip-install any missing deps on
        first load (same pattern as embed's omegaconf / enhance's speechbrain). */ -}}
 {{- $engines := dict
-      "stt"  (dict "image" "docker.io/beclab/vllm-vllm-openai:v0.23.0-cu129" "port" "8000" "health" "/health" "cmd" "export HF_HUB_OFFLINE=1; python3 -m pip install -q librosa soundfile 2>/dev/null || true; exec vllm serve $MODEL_NAME --host 0.0.0.0 --port $WRAPPER_PORT --gpu-memory-utilization ${VLLM_GPU_UTIL:-0.45}")
+      "stt"  (dict "image" "docker.io/beclab/vllm-vllm-openai:v0.23.0-cu129" "port" "8000" "health" "/health" "cmd" "export HF_HUB_OFFLINE=1; python3 -m pip install -q librosa soundfile av 2>/dev/null || true; exec vllm serve $MODEL_NAME --host 0.0.0.0 --port $WRAPPER_PORT --gpu-memory-utilization ${VLLM_GPU_UTIL:-0.45}")
       "vad"  (dict "image" "docker.io/beclab/maximsachs-pyannote_fastapi:4.0.4" "port" "8000" "health" "/healthz" "cmd" "exec $(command -v python3 || command -v python) /wrappers/vad.py")
       "diar" (dict "image" "docker.io/beclab/maximsachs-pyannote_fastapi:4.0.4" "port" "8000" "health" "/healthz" "cmd" "exec $(command -v python3 || command -v python) /wrappers/diar.py")
       "translate" (dict "image" "docker.io/beclab/maximsachs-pyannote_fastapi:4.0.4" "port" "8000" "health" "/healthz" "cmd" "exec $(command -v python3 || command -v python) /wrappers/translate.py")
@@ -109,7 +109,7 @@
        must be a CT2 whisper repo, e.g. Systran/faster-whisper-large-v3. fastapi/uvicorn are
        pip-installed if missing WITHOUT --deps so the image's ctranslate2 is never replaced. */ -}}
 {{- $engineAlts := dict
-      "qwen3-asr" (dict "image" "docker.io/beclab/vllm-vllm-openai:v0.23.0-cu129" "port" "8000" "health" "/health" "cmd" "export HF_HUB_OFFLINE=1; python3 -m pip install -q librosa soundfile 2>/dev/null || true; exec vllm serve $MODEL_NAME --host 0.0.0.0 --port $WRAPPER_PORT --gpu-memory-utilization ${VLLM_GPU_UTIL:-0.45} --max-model-len ${VLLM_MAX_LEN:-32768}")
+      "qwen3-asr" (dict "image" "docker.io/beclab/vllm-vllm-openai:v0.23.0-cu129" "port" "8000" "health" "/health" "cmd" "export HF_HUB_OFFLINE=1; python3 -m pip install -q librosa soundfile av 2>/dev/null || true; exec vllm serve $MODEL_NAME --host 0.0.0.0 --port $WRAPPER_PORT --gpu-memory-utilization ${VLLM_GPU_UTIL:-0.45} --max-model-len ${VLLM_MAX_LEN:-32768}")
       "faster-whisper" (dict "image" "docker.io/beclab/harveyff-whisper-webui:v1.0.7" "port" "8000" "health" "/health" "cmd" "export HF_HUB_OFFLINE=1; python3 -m pip install -q fastapi uvicorn 2>/dev/null || true; exec $(command -v python3 || command -v python) /wrappers/stt_fw.py") -}}
 {{- if $engineSel -}}
 {{- $alt := index $engineAlts $engineSel -}}
@@ -280,6 +280,25 @@ spec:
               value: "1000"
             - name: PGID
               value: "1000"
+{{- /* HAMi/olares GPU soft-isolation knobs, OPT-IN via clone --env (libvgpu reads them
+       directly). vLLM is autoregressive (many tiny kernel launches/token); the per-launch
+       rate_limiter throttles it ~10x under the time-sliced vGPU, while faster-whisper (few
+       launches) is unaffected. To make Qwen/vLLM fast under time-slicing, try (in order):
+       GPU_CORE_UTILIZATION_POLICY=disable (drop compute throttle, KEEP mem isolation), or
+       CUDA_DISABLE_CONTROL=true (bypass libvgpu entirely = no isolation, last resort).
+       Unset => stock HAMi behavior; only emitted when provided so non-GPU engines are clean. */ -}}
+{{- if $oe.GPU_CORE_UTILIZATION_POLICY }}
+            - name: GPU_CORE_UTILIZATION_POLICY
+              value: "{{ $oe.GPU_CORE_UTILIZATION_POLICY }}"
+{{- end }}
+{{- if $oe.CUDA_DEVICE_SM_LIMIT }}
+            - name: CUDA_DEVICE_SM_LIMIT
+              value: "{{ $oe.CUDA_DEVICE_SM_LIMIT }}"
+{{- end }}
+{{- if $oe.CUDA_DISABLE_CONTROL }}
+            - name: CUDA_DISABLE_CONTROL
+              value: "{{ $oe.CUDA_DISABLE_CONTROL }}"
+{{- end }}
           ports:
             - name: http
               containerPort: {{ $enginePort }}

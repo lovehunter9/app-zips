@@ -168,6 +168,21 @@ envs:
       value: qwen3-asr
     - title: faster-whisper (ctranslate2, stt; fast under time-sliced vGPU)
       value: faster-whisper
+  - envName: GPU_CORE_UTILIZATION_POLICY
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+  - envName: CUDA_DEVICE_SM_LIMIT
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+  - envName: CUDA_DISABLE_CONTROL
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
   - envName: ENGINE_IMAGE
     required: false
     type: string
