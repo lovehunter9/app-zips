@@ -49,13 +49,18 @@ spec:
     - `MODEL_NAME` — model id advertised to clients.
     - `MODEL_MODE` — `stt` / `vad` / `diar` / `translate` / `embed` / `enhance` (engine auto-derived from mode).
     - `MODEL_ENGINE` (optional) — same mode, different OFFICIAL engine. Empty = the mode's
-      default (e.g. stt -> faster-whisper). `qwen3-asr` runs Qwen3-ASR via its official
-      qwen-asr-serve (vLLM) for stt, exposing the same `/v1/audio/transcriptions` contract.
+      default (stt -> Whisper on vLLM). `qwen3-asr` runs Qwen3-ASR via its official
+      vLLM engine for stt, exposing the same `/v1/audio/transcriptions` contract.
     - `AUDIO_REQUIRED_GPU_MEMORY` — `"0"` for CPU-only (VAD, Translate, Embed, Enhance); STT: `8Gi`; Diar: `4Gi`; STT(qwen3-asr, 1.7B): `12Gi`.
 
+    **Engine images (TWO only)** — vLLM cu129 serves stt (Whisper / Qwen3-ASR);
+    the pyannote/torch image hosts vad/diar/translate/embed/enhance via wrappers.
+    (The faster-whisper/ctranslate2 image was dropped: its GPU ct2 gets no acceleration
+    on Blackwell sm_120, so Whisper now runs on vLLM like Qwen3-ASR.)
+
     **Example clone sets**
-    - STT:  MODEL_SOURCE=hf://Systran/faster-whisper-large-v3
-      MODEL_NAME=Systran/faster-whisper-large-v3  MODEL_MODE=stt  AUDIO_REQUIRED_GPU_MEMORY=8Gi
+    - STT (Whisper, vLLM engine): MODEL_SOURCE=hf://openai/whisper-large-v3
+      MODEL_NAME=openai/whisper-large-v3  MODEL_MODE=stt  AUDIO_REQUIRED_GPU_MEMORY=8Gi
     - STT (Qwen3-ASR, vLLM engine): MODEL_SOURCE=hf://Qwen/Qwen3-ASR-1.7B
       MODEL_NAME=Qwen/Qwen3-ASR-1.7B  MODEL_MODE=stt  MODEL_ENGINE=qwen3-asr  AUDIO_REQUIRED_GPU_MEMORY=12Gi
     - VAD:  MODEL_SOURCE=hf://onnx-community/silero-vad

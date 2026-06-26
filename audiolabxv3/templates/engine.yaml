@@ -26,17 +26,18 @@
 {{- /* Only stt/vad/diar/translate/embed/enhance are WIRED. Other modes are reserved in the
        MODEL_MODE enum; selecting one points at an obviously-unbuilt placeholder
        image (voice-engine-<mode>:notbuilt) so it's clear the engine isn't ready yet.
-       An entry may carry "cmd": that mode REUSES the image but overrides the
-       container command to run an injected wrapper script (templates/wrappers.yaml),
-       so we don't build a new image. vad reuses the whisper image (it bundles Silero
-       VAD + an audio decoder) and runs /wrappers/vad.py.
-       translate (text->text MT, the boss's "translate" = e.g. NLLB) ALSO reuses the
-       whisper image with NO new image: that image already ships ctranslate2 + the HF
-       tokenizers lib, and an NLLB CTranslate2 repo carries tokenizer.json (so NO
-       sentencepiece is needed). /wrappers/translate.py runs NLLB on CPU. NOTE: whisper's
-       stt mode already natively serves /v1/audio/translations (speech->English) — that
-       belongs to the stt model's own surface; this `translate` mode is the dedicated
-       text-MT class (arbitrary-direction text->text).
+       An entry may carry "cmd": that mode REUSES an image but overrides the container
+       command to run an injected wrapper script (templates/wrappers.yaml), so we don't
+       build a new image. EVERY non-stt capability rides the ONE pyannote/torch image and
+       pip-installs any missing dep on first load (same on-demand pattern throughout).
+       vad runs /wrappers/vad.py: soundfile decode + the `silero-vad` pip pkg on the
+       image's torch (it bundles its own model). CPU-ok.
+       translate (text->text MT, the boss's "translate" = e.g. NLLB) runs
+       /wrappers/translate.py: CPU ctranslate2 + HF tokenizers (an NLLB CTranslate2 repo
+       carries tokenizer.json, so NO sentencepiece). CPU ctranslate2 works on any image —
+       only GPU ctranslate2 is broken on Blackwell, which is why stt left it for vLLM.
+       NOTE: whisper's stt mode also natively serves /v1/audio/translations
+       (speech->English); this `translate` mode is the dedicated text-MT class.
        diar: the mapped image is the AMD64-only CUDA pyannote_fastapi (mirrored to
        beclab); we override its API with /wrappers/diar.py and run on GPU. BACKLOG:
        ARM64 (DGX Spark/GB10) + GPU needs a multi-arch image — the CPU-only multi-arch
@@ -49,11 +50,17 @@
        new image: it ships torch, and SpeechBrain is pip-installed on first load (same
        on-demand pattern as embed's omegaconf). /wrappers/enhance.py runs a SpeechBrain
        SpectralMaskEnhancement model (e.g. mtl-mimic-voicebank) at 16k mono; CPU-ok. */ -}}
+{{- /* TWO engine images only (the faster-whisper/ctranslate2 image was dropped: its
+       ct2 gets NO GPU on Blackwell sm_120, and it was the only thing pulling a 3rd
+       image): (1) vLLM cu129 serves stt natively; (2) the pyannote/torch image hosts
+       every non-LLM capability via a wrapper (diar/embed/enhance + vad via silero-vad,
+       + translate via CPU ctranslate2). All wrappers pip-install any missing deps on
+       first load (same pattern as embed's omegaconf / enhance's speechbrain). */ -}}
 {{- $engines := dict
-      "stt"  (dict "image" "docker.io/beclab/fedirz-faster-whisper-server:0.6.0-rc.3-cuda" "port" "8000" "health" "/health")
-      "vad"  (dict "image" "docker.io/beclab/fedirz-faster-whisper-server:0.6.0-rc.3-cuda" "port" "8000" "health" "/healthz" "cmd" "exec $(command -v python3 || command -v python) /wrappers/vad.py")
+      "stt"  (dict "image" "docker.io/beclab/vllm-vllm-openai:v0.23.0-cu129" "port" "8000" "health" "/health" "cmd" "export HF_HUB_OFFLINE=1; python3 -m pip install -q librosa soundfile 2>/dev/null || true; exec vllm serve $MODEL_NAME --host 0.0.0.0 --port $WRAPPER_PORT --gpu-memory-utilization ${VLLM_GPU_UTIL:-0.45}")
+      "vad"  (dict "image" "docker.io/beclab/maximsachs-pyannote_fastapi:4.0.4" "port" "8000" "health" "/healthz" "cmd" "exec $(command -v python3 || command -v python) /wrappers/vad.py")
       "diar" (dict "image" "docker.io/beclab/maximsachs-pyannote_fastapi:4.0.4" "port" "8000" "health" "/healthz" "cmd" "exec $(command -v python3 || command -v python) /wrappers/diar.py")
-      "translate" (dict "image" "docker.io/beclab/fedirz-faster-whisper-server:0.6.0-rc.3-cuda" "port" "8000" "health" "/healthz" "cmd" "exec $(command -v python3 || command -v python) /wrappers/translate.py")
+      "translate" (dict "image" "docker.io/beclab/maximsachs-pyannote_fastapi:4.0.4" "port" "8000" "health" "/healthz" "cmd" "exec $(command -v python3 || command -v python) /wrappers/translate.py")
       "embed" (dict "image" "docker.io/beclab/maximsachs-pyannote_fastapi:4.0.4" "port" "8000" "health" "/healthz" "cmd" "exec $(command -v python3 || command -v python) /wrappers/embed.py")
       "enhance" (dict "image" "docker.io/beclab/maximsachs-pyannote_fastapi:4.0.4" "port" "8000" "health" "/healthz" "cmd" "exec $(command -v python3 || command -v python) /wrappers/enhance.py") -}}
 {{- $sel := index $engines $modelMode -}}
@@ -64,7 +71,8 @@
        default engine above (byte-identical back-compat for stt/vad/diar/...). A named
        value selects from $engineAlts, each a DIFFERENT official engine for the SAME mode.
        This is the one-chart / one-mode / multiple-engines axis the boss flagged.
-       stt: default = CTranslate2 faster-whisper (/v1/audio/transcriptions native);
+       stt: default = Whisper on vLLM (vllm serve openai/whisper-large-v3, native
+            /v1/audio/transcriptions + verbose_json);
             MODEL_ENGINE=qwen3-asr = Qwen3-ASR (0.6B/1.7B) on the OFFICIAL vLLM engine
             image (vllm/vllm-openai v0.23.0-cu129, mirrored to beclab; native Qwen3-ASR
             batch + realtime support). cu129 (CUDA 12.9) is the variant the cluster's
@@ -80,8 +88,19 @@
             Each alt is keyed by engine id; it is the cloner's job to pick an engine
             compatible with the chosen mode. */ -}}
 {{- $engineSel := $oe.MODEL_ENGINE | default "" -}}
+{{- /* qwen3-asr: --gpu-memory-utilization is read from $VLLM_GPU_UTIL (computed
+       below from the HAMI gpumem quota vs the physical card; falls back to 0.45).
+       vLLM sees the FULL physical GPU even though HAMI enforces the smaller quota,
+       so a fixed 0.8 sizes the KV cache to the whole card and OOM-kills on the first
+       inference — the value MUST be scaled to the quota. */ -}}
+{{- /* The DEFAULT stt engine is already Whisper-on-vLLM (openai/whisper-large-v3 served
+       by `vllm serve`, native /v1/audio/transcriptions + verbose_json) — chosen because
+       faster-whisper/ctranslate2 gets NO GPU on Blackwell sm_120 (cuBLAS has no sm_120
+       kernels → float16 silently runs CPU-speed). qwen3-asr is the only ALT: same vLLM
+       cu129 image, but with --max-model-len (Qwen3-ASR is a decoder LLM); Whisper omits
+       it (small-window encoder-decoder, max_model_len 448, vLLM sets it automatically). */ -}}
 {{- $engineAlts := dict
-      "qwen3-asr" (dict "image" "docker.io/beclab/vllm-vllm-openai:v0.23.0-cu129" "port" "8000" "health" "/health" "cmd" "export HF_HUB_OFFLINE=1; python3 -m pip install -q librosa soundfile 2>/dev/null || true; exec vllm serve $MODEL_NAME --host 0.0.0.0 --port $WRAPPER_PORT --gpu-memory-utilization 0.8") -}}
+      "qwen3-asr" (dict "image" "docker.io/beclab/vllm-vllm-openai:v0.23.0-cu129" "port" "8000" "health" "/health" "cmd" "export HF_HUB_OFFLINE=1; python3 -m pip install -q librosa soundfile 2>/dev/null || true; exec vllm serve $MODEL_NAME --host 0.0.0.0 --port $WRAPPER_PORT --gpu-memory-utilization ${VLLM_GPU_UTIL:-0.45} --max-model-len ${VLLM_MAX_LEN:-32768}") -}}
 {{- if $engineSel -}}
 {{- $alt := index $engineAlts $engineSel -}}
 {{- if $alt -}}{{- $sel = $alt -}}{{- end -}}
@@ -116,6 +135,22 @@
 {{- $memLimit = printf "%sMi" $gpuMiB -}}
 {{- end -}}
 {{- end -}}
+{{- /* vLLM --gpu-memory-utilization is a fraction of the PHYSICAL GPU, but HAMI
+       only grants the nvidia.com/gpumem quota. Scale the fraction to the quota so
+       vLLM's KV cache fits inside it (else OOM on first inference):
+         util = (quota / physicalTotal) * 0.85 (safety headroom), clamp [0.1, 0.9].
+       AUDIO_GPU_TOTAL_MIB defaults to the cluster's ~24GB card (override per host);
+       MODEL_GPU_MEM_UTIL overrides the whole computation. Consumed by the qwen3-asr
+       engine cmd via $VLLM_GPU_UTIL; harmless for engines that ignore it. */ -}}
+{{- $vllmUtil := $oe.MODEL_GPU_MEM_UTIL | default "" -}}
+{{- if and (not $vllmUtil) $wantGpu -}}
+{{- $totalMiB := float64 (int ($oe.AUDIO_GPU_TOTAL_MIB | default "24454")) -}}
+{{- $u := divf (mulf (float64 (int $gpuMiB)) 0.85) $totalMiB -}}
+{{- if gt $u 0.9 -}}{{- $u = 0.9 -}}{{- end -}}
+{{- if lt $u 0.1 -}}{{- $u = 0.1 -}}{{- end -}}
+{{- $vllmUtil = printf "%.2f" $u -}}
+{{- end -}}
+{{- if not $vllmUtil -}}{{- $vllmUtil = "0.45" -}}{{- end -}}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -180,7 +215,7 @@ spec:
               echo "[wait] models ready; starting engine."
       containers:
         # Name embeds capability+model so the Containers panel shows both at a glance
-        # (e.g. audio-stt-systran-faster-whisper-large-v3). exec uses: -c {{ $cname }}.
+        # (e.g. audio-stt-openai-whisper-large-v3). exec uses: -c {{ $cname }}.
         - name: {{ $cname }}
           image: "{{ $engineImage }}"
           imagePullPolicy: IfNotPresent
@@ -204,6 +239,14 @@ spec:
               value: "{{ $modelMode }}"
             - name: WRAPPER_PORT
               value: "{{ $enginePort }}"
+            # vLLM KV-cache sizing scaled to the HAMI gpumem quota (see $vllmUtil above).
+            - name: VLLM_GPU_UTIL
+              value: "{{ $vllmUtil }}"
+            # Qwen3-ASR's default max_model_len (65536) needs ~7GiB KV for ONE request,
+            # which exceeds the KV budget left after weights under the 12GiB quota. ASR
+            # audio is chunked, so a smaller window is plenty. Override via MODEL_MAX_LEN.
+            - name: VLLM_MAX_LEN
+              value: "{{ $oe.MODEL_MAX_LEN | default "32768" }}"
             - name: LOG_LEVEL
               value: "{{ $oe.LOG_LEVEL | default "info" }}"
             # Read the model from the shared HF cache populated by llm-init.

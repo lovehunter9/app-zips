@@ -51,9 +51,13 @@ data:
       name: openai
       base_url: https://api.openai.com/v1
       api_key: ""
-      timeout: 60s
+      # Audio routes (STT/diarize/enhance) can take minutes on multi-minute clips,
+      # far longer than chat completions. read_timeout is the most common cause of
+      # upstream_timeout (504) on whole-clip transcription; timeout is the overall cap
+      # and must be >= read_timeout.
+      timeout: 600s
       connect_timeout: 5s
-      read_timeout: 30s
+      read_timeout: 300s
       retry_max: 1
       retry_backoff: 200ms
       breaker_min_requests: 10

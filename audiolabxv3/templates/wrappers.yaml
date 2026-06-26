@@ -1,8 +1,8 @@
 {{- /* Engine wrapper scripts injected into a REUSED converted image (no new image
-       build). A mode whose $engines entry sets "cmd" runs one of these via a
-       command override (see engine.yaml). vad.py reuses faster-whisper's bundled
-       Silero VAD + audio decoder (both already present in the whisper image), so it
-       needs no extra deps and no model download. */ -}}
+       build). A mode whose $engines entry sets "cmd" runs one of these via a command
+       override (see engine.yaml). EVERY non-stt capability rides the ONE pyannote/torch
+       image and pip-installs any missing dep on first load (vad: silero-vad; translate:
+       ctranslate2+tokenizers; embed: omegaconf; enhance: speechbrain). */ -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -12,9 +12,12 @@ metadata:
     io.kompose.service: audio-engine
 data:
   vad.py: |
-    # Silero VAD service, reusing faster-whisper's bundled Silero (onnx) + decoder.
-    # Exposes: GET /healthz, GET /readyz, GET /v1/models, POST /v1/audio/vad.
-    import io, os, logging
+    # Silero VAD service running on the shared pyannote/torch image (NO faster-whisper).
+    # Decodes with soundfile (+ torchaudio only to resample) and runs Silero via the
+    # `silero-vad` pip pkg (bundles its own model, uses the image's torch), pip-installed
+    # on first load like embed/enhance. Exposes: GET /healthz, GET /readyz, GET /v1/models,
+    # POST /v1/audio/vad.
+    import io, os, sys, subprocess, threading, logging
     from fastapi import FastAPI, UploadFile, File, Form, HTTPException
     import uvicorn
 
@@ -26,36 +29,63 @@ data:
     PORT = int(os.environ.get("WRAPPER_PORT", "8000"))
     SR = 16000
 
-    from faster_whisper.audio import decode_audio
-    from faster_whisper.vad import get_speech_timestamps, VadOptions
-
-    app = FastAPI(title="audio-vad (silero via faster-whisper)")
-    _ready = {"ok": False}
-
-    def _vad(audio, threshold=None):
-        opts = None
+    # Defaults tuned for music/singing (silero's stock defaults over-split and drop
+    # sung passages that have backing music). Each is overridable per-request via form.
+    #   threshold            silero default 0.5 -> 0.3  (catch quieter / accompanied vocals)
+    #   min_silence_ms        silero default 100 -> 500  (don't shred on short pauses)
+    #   speech_pad_ms         silero default  30 -> 200  (keep word edges, less clipping)
+    #   min_speech_ms         silero default 250         (drop ultra-short blips)
+    #   max_speech_s          silero default inf -> 30   (cap windows to Whisper's frame)
+    def _envf(name, default):
         try:
-            opts = VadOptions() if threshold is None else VadOptions(threshold=float(threshold))
+            return float(os.environ.get(name, "") or default)
         except Exception:
-            opts = None
-        # API has shifted across faster-whisper versions; try the common forms.
+            return default
+    VAD_THRESHOLD = _envf("VAD_THRESHOLD", 0.3)
+    VAD_MIN_SILENCE_MS = _envf("VAD_MIN_SILENCE_MS", 500)
+    VAD_SPEECH_PAD_MS = _envf("VAD_SPEECH_PAD_MS", 200)
+    VAD_MIN_SPEECH_MS = _envf("VAD_MIN_SPEECH_MS", 250)
+    VAD_MAX_SPEECH_S = _envf("VAD_MAX_SPEECH_S", 30)
+
+    app = FastAPI(title="audio-vad (silero)")
+    _state = {"ready": False, "error": None, "model": None, "get_ts": None}
+
+    def _decode(data):
+        # Bytes -> mono float32 torch tensor @ 16k. soundfile first (same as diar/embed),
+        # torchaudio only as fallback + for resample, so we never touch the image's broken
+        # torchcodec AudioDecoder path.
+        import torch
         try:
-            return get_speech_timestamps(audio, vad_options=opts, sampling_rate=SR)
-        except TypeError:
+            import soundfile as sf
+            arr, sr = sf.read(io.BytesIO(data), dtype="float32", always_2d=True)  # (time, ch)
+            wav = torch.from_numpy(arr.mean(axis=1).copy())  # mono (time,)
+        except Exception:
+            import torchaudio
+            w, sr = torchaudio.load(io.BytesIO(data))  # (ch, time)
+            wav = w.float().mean(dim=0)
+        if int(sr) != SR:
+            import torchaudio
+            wav = torchaudio.functional.resample(wav, int(sr), SR)
+        return wav.contiguous()
+
+    def _load():
+        try:
             try:
-                return get_speech_timestamps(audio, opts)
+                from silero_vad import load_silero_vad, get_speech_timestamps
             except Exception:
-                return get_speech_timestamps(audio)
+                subprocess.run([sys.executable, "-m", "pip", "install", "-q", "silero-vad"], check=False)
+                from silero_vad import load_silero_vad, get_speech_timestamps
+            _state["model"] = load_silero_vad()
+            _state["get_ts"] = get_speech_timestamps
+            _state["ready"] = True
+            log.info("silero-vad loaded; ready")
+        except Exception as e:
+            _state["error"] = str(e)
+            log.exception("vad load failed: %s", e)
 
     @app.on_event("startup")
-    def _warm():
-        try:
-            import numpy as np
-            _vad(np.zeros(SR, dtype="float32"))
-            _ready["ok"] = True
-            log.info("silero vad warmed up; ready")
-        except Exception as e:
-            log.exception("vad warmup failed: %s", e)
+    def _startup():
+        threading.Thread(target=_load, daemon=True).start()
 
     @app.get("/healthz")
     def healthz():
@@ -63,31 +93,67 @@ data:
 
     @app.get("/readyz")
     def readyz():
-        if _ready["ok"]:
+        if _state["ready"]:
             return {"status": "ready"}
-        raise HTTPException(status_code=503, detail="model not loaded yet")
+        raise HTTPException(status_code=503, detail=_state["error"] or "model not loaded yet")
 
     @app.get("/v1/models")
     def models():
         return {"object": "list", "data": [{"id": MODEL_NAME, "object": "model", "mode": "vad"}]}
 
     @app.post("/v1/audio/vad")
-    async def vad(file: UploadFile = File(...), threshold: str = Form(default=None)):
+    async def vad(
+        file: UploadFile = File(...),
+        threshold: str = Form(default=None),
+        min_silence_ms: str = Form(default=None),
+        speech_pad_ms: str = Form(default=None),
+        min_speech_ms: str = Form(default=None),
+        max_speech_s: str = Form(default=None),
+    ):
+        if not _state["ready"]:
+            raise HTTPException(status_code=503, detail=_state["error"] or "model not ready")
         data = await file.read()
         try:
-            audio = decode_audio(io.BytesIO(data), sampling_rate=SR)
+            wav = _decode(data)
         except Exception as e:
             raise HTTPException(status_code=400, detail="audio decode failed: %s" % e)
-        ts = _vad(audio, threshold)
+
+        def _pick(form_val, default):
+            if form_val is None or form_val == "":
+                return default
+            try:
+                return float(form_val)
+            except Exception:
+                return default
+
+        thr = _pick(threshold, VAD_THRESHOLD)
+        max_s = _pick(max_speech_s, VAD_MAX_SPEECH_S)
+        kw = {
+            "sampling_rate": SR,
+            "threshold": thr,
+            "min_silence_duration_ms": int(_pick(min_silence_ms, VAD_MIN_SILENCE_MS)),
+            "speech_pad_ms": int(_pick(speech_pad_ms, VAD_SPEECH_PAD_MS)),
+            "min_speech_duration_ms": int(_pick(min_speech_ms, VAD_MIN_SPEECH_MS)),
+        }
+        # silero treats max_speech_duration_s=inf as "no cap"; only pass a finite cap.
+        if max_s and max_s > 0:
+            kw["max_speech_duration_s"] = max_s
+        log.info("vad params: %s", {k: v for k, v in kw.items() if k != "sampling_rate"})
+        try:
+            # silero get_speech_timestamps returns [{'start','end'}] in SAMPLES.
+            ts = _state["get_ts"](wav, _state["model"], **kw)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail="vad failed: %s" % e)
         segs = [{"start": round(t["start"] / SR, 3), "end": round(t["end"] / SR, 3)} for t in ts]
         speech = round(sum(s["end"] - s["start"] for s in segs), 3)
         return {
             "model": MODEL_NAME,
             "mode": "vad",
             "sampling_rate": SR,
-            "duration": round(len(audio) / SR, 3),
+            "duration": round(int(wav.shape[-1]) / SR, 3),
             "speech_seconds": speech,
             "num_segments": len(segs),
+            "params": {k: v for k, v in kw.items() if k != "sampling_rate"},
             "segments": segs,
         }
 
@@ -222,13 +288,15 @@ data:
     if __name__ == "__main__":
         uvicorn.run(app, host="0.0.0.0", port=PORT, log_level=LOG_LEVEL)
   translate.py: |
-    # Text->text machine translation (NLLB) reusing the whisper image's bundled
-    # ctranslate2 + HF tokenizers (NO new image, NO sentencepiece: an NLLB CTranslate2
-    # repo ships tokenizer.json which the tokenizers lib reads directly). Model is the
-    # llm-init-downloaded CT2 repo (e.g. entai2965/nllb-200-distilled-600M-ctranslate2),
-    # read from the shared HF cache. Exposes: GET /healthz, GET /readyz, GET /v1/models,
+    # Text->text machine translation (NLLB) on the shared pyannote/torch image. Uses
+    # CPU ctranslate2 + HF tokenizers (pip-installed on first load if missing, like
+    # embed/enhance; NO sentencepiece: an NLLB CTranslate2 repo ships tokenizer.json the
+    # tokenizers lib reads directly). CPU ct2 works on any image — only GPU ct2 is broken
+    # on Blackwell. Model is the llm-init-downloaded CT2 repo (e.g.
+    # entai2965/nllb-200-distilled-600M-ctranslate2), read from the shared HF cache.
+    # Exposes: GET /healthz, GET /readyz, GET /v1/models,
     # POST /v1/translate {text, target, source?} with FLORES-200 codes.
-    import os, threading, logging
+    import os, sys, subprocess, threading, logging
     from typing import Optional
     from fastapi import FastAPI, HTTPException
     from pydantic import BaseModel
@@ -256,8 +324,13 @@ data:
 
     def _load():
         try:
-            import ctranslate2
-            from tokenizers import Tokenizer
+            try:
+                import ctranslate2
+                from tokenizers import Tokenizer
+            except Exception:
+                subprocess.run([sys.executable, "-m", "pip", "install", "-q", "ctranslate2", "tokenizers"], check=False)
+                import ctranslate2
+                from tokenizers import Tokenizer
             d = _locate()
             tok = Tokenizer.from_file(os.path.join(d, "tokenizer.json"))
             tr = ctranslate2.Translator(d, device=DEVICE)

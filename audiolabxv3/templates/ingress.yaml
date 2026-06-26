@@ -40,11 +40,10 @@ data:
       proxy_set_header Upgrade $http_upgrade;
       proxy_set_header Connection "upgrade";
 
-      # Synthesize an OpenAI-style model list. The upstream faster-whisper-server
-      # GET /v1/models queries the HF Hub catalog (401 on the internal mirror) and
-      # has NO offline "loaded models" route, so proxying it anywhere still 500s.
-      # We answer it here from the install-time MODEL_NAME so the single entrance
-      # exposes a working /v1/models for the LLM gateway. Engine + llm-init untouched.
+      # Synthesize an OpenAI-style model list from the install-time MODEL_NAME so the
+      # single entrance always exposes a working /v1/models for the LLM gateway,
+      # regardless of what each engine's own /v1/models returns (offline mirrors can
+      # 401/500 on HF-catalog-backed routes). Engine + llm-init untouched.
       location = /v1/models {
           default_type application/json;
           return 200 '{"object":"list","data":[{"id":"{{ $modelName }}","object":"model","created":0,"owned_by":"audiolabxv3","mode":"{{ $modelMode }}"}]}';

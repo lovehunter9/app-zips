@@ -1,6 +1,8 @@
-# audiolabxv3 — two-service audio base (STT/whisper engine as scaffold).
+# audiolabxv3 — two-service audio base (STT/whisper on vLLM as scaffold).
 # llm-init downloads MODEL_SOURCE into shared HF cache; audio-engine serves it.
-# Refine after `chart from-compose` — see audiolabwv3 for the target shape.
+# Real engine mapping lives in templates/engine.yaml (TWO images only: vLLM cu129 for
+# stt; pyannote/torch for vad/diar/translate/embed/enhance). This compose is just the
+# kompose scaffold. Refine after `chart from-compose` — see audiolabwv3 for the shape.
 services:
   llm-init:
     image: docker.io/beclab/llm-init:v1.2.4
@@ -13,7 +15,7 @@ services:
       io.kompose.service: llm-init
 
   audio-engine:
-    image: docker.io/beclab/fedirz-faster-whisper-server:0.6.0-rc.3-cuda
+    image: docker.io/beclab/vllm-vllm-openai:v0.23.0-cu129
     ports:
       - "8000:8000"
     labels:

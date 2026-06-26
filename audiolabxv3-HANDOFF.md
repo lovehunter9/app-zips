@@ -66,10 +66,11 @@
 
 - **llm-init(download-only)**:镜像 `docker.io/beclab/llm-init:v1.2.4`,`ENGINE_KIND=""`(纯下载),端口 8090,`/readyz`。把 `MODEL_SOURCE` 下到**共享 HF 缓存** `appCommon/huggingface`(挂 `/cache/hf/hub`)。Service 名 `download-svc`。
   - 这正是 `olares-chart` 的 `llm-models.md` §8 官方点名给 **TTS/ASR/音频** 用的 download-only 模式。
-- **audio-engine**:端口 8000;镜像**按 MODEL_MODE 选**:
-  - `stt` / `vad` → `docker.io/beclab/fedirz-faster-whisper-server:0.6.0-rc.3-cuda`
-  - `diar` → `docker.io/beclab/maximsachs-pyannote_fastapi:4.0.4`(仅 amd64+GPU)
-  - `vad`/`diar` **复用镜像 + 命令覆盖**跑 wrapper 脚本(`/wrappers/vad.py`、`diar.py`,来自 ConfigMap `audio-wrappers`)。
+- **audio-engine**:端口 8000;镜像**按 MODEL_MODE 选**(2026-06-25 收敛为 **2 个镜像**,弃用 faster-whisper,详见 `audiolabxv3-docs/_internal/WORK_LOG_2026-06-25.md`):
+  - `stt`(Whisper 默认 + `MODEL_ENGINE=qwen3-asr`)→ `docker.io/beclab/vllm-vllm-openai:v0.23.0-cu129`(`vllm serve`,原生 `/v1/audio/transcriptions`)。
+  - `vad` / `diar` / `translate` / `embed` / `enhance` → `docker.io/beclab/maximsachs-pyannote_fastapi:4.0.4`(仅 amd64+GPU)。
+  - 非 stt 能力**复用 pyannote 镜像 + 命令覆盖**跑 wrapper 脚本(`/wrappers/{vad,diar,translate,embed,enhance}.py`,来自 ConfigMap `audio-wrappers`;首次加载按需 pip 补依赖)。
+  - ⚠️ 旧 `fedirz-faster-whisper-server:0.6.0-rc.3-cuda`(ctranslate2/CUDA 12.6)在 Blackwell sm_120 上吃不到 GPU(静默退 CPU),已彻底弃用,Whisper 改到 vLLM。
   - initContainer `wait-models` 阻塞直到 `download-svc:8090/readyz` 通,再启引擎。
   - 引擎从共享 HF 缓存读模型(`HF_HUB_CACHE=/cache/hf/hub`)。
   - Service `audio-engine:8000`(内部)。
@@ -79,7 +80,8 @@
 ### clone 时 4 个 env(其余默认)
 | 能力 | MODEL_SOURCE | MODEL_NAME | MODEL_MODE | AUDIO_REQUIRED_GPU_MEMORY |
 |---|---|---|---|---|
-| STT | `hf://Systran/faster-whisper-large-v3` | `Systran/faster-whisper-large-v3` | `stt` | `8Gi` |
+| STT(Whisper,默认) | `hf://openai/whisper-large-v3` | `openai/whisper-large-v3` | `stt` | `8Gi` |
+| STT(Qwen3-ASR) | `hf://Qwen/Qwen3-ASR-1.7B` | `Qwen/Qwen3-ASR-1.7B` | `stt`(+`MODEL_ENGINE=qwen3-asr`) | `12Gi` |
 | VAD | `hf://onnx-community/silero-vad` | `silero-v5` | `vad` | `0`(纯CPU) |
 | Diarize | `hf://pyannote/speaker-diarization-community-1` | `pyannote-community-1` | `diar` | `4Gi` |
 
@@ -146,13 +148,13 @@ gateway 入口 `llmgatewayv3-frontend` 是 `authLevel: internal`(SSO),`olares-cl
 注册结果(全 `200`):
 | 能力 | provider | base_url | model | mode |
 |---|---|---|---|---|
-| STT | stt-audiolabxv3 | `https://d9635122.olarestest003.olares.com/v1` | `Systran/faster-whisper-large-v3` | stt |
+| STT | stt-audiolabxv3 | `https://da6625d5.olarestest003.olares.com/v1`(2026-06-25 重 clone,whisper→vLLM,id→`audiolabxv39667b8`;热 2.4s/11s) | `openai/whisper-large-v3` | stt |
 | VAD | vad-audiolabxv3 | `https://eba7446b.olarestest003.olares.com/v1` | `silero-v5` | vad |
 | Diar | diar-audiolabxv3 | `https://2803f5ae.olarestest003.olares.com/v1` | `pyannote-community-1` | diar |
 
 ### 8.4 验证(经 gateway 数据面,全 200)
 入口是 internal SSO,外部 curl 会被 303 弹去登录;**在浏览器 DevTools 同源 fetch**(带 SSO cookie 过入口 + `Authorization: Bearer <gateway-key>` 过网关鉴权)即可。样本 jfk.wav:
-- `POST /v1/audio/transcriptions`(model=Systran/faster-whisper-large-v3)→ 200,正确转写。
+- `POST /v1/audio/transcriptions`(model=openai/whisper-large-v3 或 Qwen/Qwen3-ASR-1.7B)→ 200,正确转写。
 - `POST /v1/audio/vad`(model=silero-v5)→ 200,`num_segments:1` `0–11s`。
 - `POST /v1/audio/diarization`(model=pyannote-community-1)→ 200,`device:cuda`,SPEAKER_00 / 5 段(jfk 单人)。
 
@@ -189,7 +191,7 @@ gateway 入口 `llmgatewayv3-frontend` 是 `authLevel: internal`(SSO),`olares-cl
 - 镜像不带 `librosa`/`soundfile`,在 `engine.yaml` 的 qwen3-asr 命令里启动时 `pip install -q librosa soundfile || true` 按需补(沿用既有 wrapper 模式)。
 
 **chart 改动(`audiolabxv3/`,版本仍锁 1.0.0):**
-- `templates/engine.yaml`:`MODEL_ENGINE=qwen3-asr` 分支 → 镜像 `beclab/vllm-vllm-openai:v0.23.0-cu129`,命令 `export HF_HUB_OFFLINE=1; pip install -q librosa soundfile||true; exec vllm serve $MODEL_NAME --host 0.0.0.0 --port $WRAPPER_PORT --gpu-memory-utilization 0.8`。
+- `templates/engine.yaml`:`MODEL_ENGINE=qwen3-asr` 分支 → 镜像 `beclab/vllm-vllm-openai:v0.23.0-cu129`,命令 `export HF_HUB_OFFLINE=1; pip install -q librosa soundfile||true; exec vllm serve $MODEL_NAME --host 0.0.0.0 --port $WRAPPER_PORT --gpu-memory-utilization ${VLLM_GPU_UTIL:-0.45} --max-model-len ${VLLM_MAX_LEN:-32768}`(原 `0.8` 写死会 OOM,详见下「GPU 配额下两道内存关」)。
 - `templates/wrappers.yaml`:删掉 `qwen_asr.py`(vLLM 原生 OpenAI 音频接口,无需 wrapper)。
 - `OlaresManifest.yaml`:`MODEL_ENGINE` 选项/示例/GPU 需求(qwen3-asr=12Gi)。
 
@@ -201,7 +203,13 @@ gateway 入口 `llmgatewayv3-frontend` 是 `authLevel: internal`(SSO),`olares-cl
 5. 引擎级:`POST /v1/audio/transcriptions`(model=`Qwen/Qwen3-ASR-1.7B`)jfk.wav → 转写正确,`/v1/models` 返回 `mode:stt`。
 6. Gateway:DevTools 同源脚本建 provider `audiolabxv3-qwen3asr`(openai_compatible,base_url=入口 `/v1`)+ model(mode=stt)+ 签 api-key,经网关 `POST /v1/audio/transcriptions` → `200` 正确转写。
 
+**GPU 配额下 vLLM 两道内存关(2026-06-25 定位,务必牢记):** HAMI 只给 pod 12Gi 配额,但 vLLM 看到整张 24G 卡。
+- **第一关 分配 OOM**:`--gpu-memory-utilization` 是占「物理整卡」比例,写死 0.8≈19G ≫ 12G → 首次推理 OOM 重启。改为按配额动态算 `VLLM_GPU_UTIL`=(gpumem/物理总 ×0.85),12288/24454→**0.43**;`AUDIO_GPU_TOTAL_MIB`(默认 24454)、`MODEL_GPU_MEM_UTIL` 可覆盖。
+- **第二关 KV 容量校验**:util=0.43 后权重 3.9G、可用 KV 仅 4.93G,而 Qwen3-ASR 默认 `max_model_len=65536` 单请求需 7G KV → 启动即 `ValueError` CrashLoopBackOff(**非分配 OOM,是启动期断言**)。加 `--max-model-len ${VLLM_MAX_LEN:-32768}`(`MODEL_MAX_LEN` 可覆盖)。两处修好引擎 1/1、0 重启,jfk.wav 直连 public 正确转写。
+
+**GPU 应用不能原地 upgrade:** `nvidia.com/gpu` 由 Olares gpu-inject webhook「安装时」注入(chart 只声明 `nvidia.com/gpumem`+`gpu-inject` 注解)。`market upgrade` 走 patch 不触发注入 → `resources.limits: Limit must be set for non overcommitable resources`。**改 GPU 应用 chart 必须:先删后传 chart → `uninstall` 实例 → 重 `clone`**。clone id 由 `--title` 哈希,同 title 必回同一 id/NS/URL → 网关 provider 无需重建。
+
 **坑/经验补充:**
-- 同版本 chart **先删后传**(已多次踩,务必记住)。
+- 同版本 chart **先删后传**(只 upload 不 delete,clone 仍发旧渲染;已多次踩,务必记住)。
 - DevTools 同源脚本拉测试音频用 `cdn.jsdelivr.net/gh/...`(github raw 会 CORS 拦)。
 - api-key 明文只在创建时返回一次,重测要重新签发。
