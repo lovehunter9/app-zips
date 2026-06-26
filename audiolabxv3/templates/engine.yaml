@@ -257,6 +257,11 @@ spec:
             # audio is chunked, so a smaller window is plenty. Override via MODEL_MAX_LEN.
             - name: VLLM_MAX_LEN
               value: "{{ $oe.MODEL_MAX_LEN | default "32768" }}"
+            # vLLM rejects audio uploads >25MB by default; a 1h+ MP3 easily exceeds it.
+            # Raise the ceiling so long-audio STT works (override via MODEL_MAX_AUDIO_MB).
+            # Harmless to non-vLLM engines (they ignore it).
+            - name: VLLM_MAX_AUDIO_CLIP_FILESIZE_MB
+              value: "{{ $oe.MODEL_MAX_AUDIO_MB | default "1024" }}"
             - name: LOG_LEVEL
               value: "{{ $oe.LOG_LEVEL | default "info" }}"
             # Read the model from the shared HF cache populated by llm-init.

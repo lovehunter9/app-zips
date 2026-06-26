@@ -168,6 +168,11 @@ envs:
       value: qwen3-asr
     - title: faster-whisper (ctranslate2, stt; fast under time-sliced vGPU)
       value: faster-whisper
+  - envName: MODEL_MAX_AUDIO_MB
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
   - envName: GPU_CORE_UTILIZATION_POLICY
     required: false
     type: string
