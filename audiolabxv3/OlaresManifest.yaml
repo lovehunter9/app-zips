@@ -48,11 +48,12 @@ spec:
     - `MODEL_SOURCE` — `hf://<repo>` (llm-init download spec).
     - `MODEL_NAME` — model id advertised to clients.
     - `MODEL_MODE` — `stt` / `vad` / `diar` / `translate` / `embed` / `enhance` (engine auto-derived from mode).
-    - `MODEL_ENGINE` (optional) — same mode, different OFFICIAL engine. Empty = the mode's
-      default (stt -> Whisper on vLLM). `qwen3-asr` runs Qwen3-ASR via its official
-      vLLM engine for stt. `faster-whisper` runs Whisper via ctranslate2 (harveyff image)
-      — fast UNDER time-sliced vGPU where autoregressive vLLM gets ~10x throttled. All
-      expose the same `/v1/audio/transcriptions` contract.
+    - The stt ENGINE is AUTO-SELECTED from `MODEL_NAME` (NOT a clone field): a Qwen name ->
+      Qwen3-ASR on vLLM; a CTranslate2 / Systran faster-whisper name -> faster-whisper
+      (harveyff image, must use that engine since vLLM can't load CT2); otherwise -> Whisper
+      on vLLM. All expose the same `/v1/audio/transcriptions` contract. GPU engines also force
+      `GPU_CORE_UTILIZATION_POLICY=disable` (drop HAMi compute throttle, keep memory isolation)
+      so they run full-speed under the time-sliced vGPU.
     - `AUDIO_REQUIRED_GPU_MEMORY` — `"0"` for CPU-only (VAD, Translate, Embed, Enhance); STT: `8Gi`; Diar: `4Gi`; STT(qwen3-asr, 1.7B): `12Gi`.
 
     **Engine images** — vLLM cu129 serves stt (Whisper / Qwen3-ASR); the harveyff
@@ -169,21 +170,6 @@ envs:
     - title: faster-whisper (ctranslate2, stt; fast under time-sliced vGPU)
       value: faster-whisper
   - envName: MODEL_MAX_AUDIO_MB
-    required: false
-    type: string
-    editable: true
-    applyOnChange: true
-  - envName: GPU_CORE_UTILIZATION_POLICY
-    required: false
-    type: string
-    editable: true
-    applyOnChange: true
-  - envName: CUDA_DEVICE_SM_LIMIT
-    required: false
-    type: string
-    editable: true
-    applyOnChange: true
-  - envName: CUDA_DISABLE_CONTROL
     required: false
     type: string
     editable: true

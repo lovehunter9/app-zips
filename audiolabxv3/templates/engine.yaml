@@ -88,6 +88,21 @@
             Each alt is keyed by engine id; it is the cloner's job to pick an engine
             compatible with the chosen mode. */ -}}
 {{- $engineSel := $oe.MODEL_ENGINE | default "" -}}
+{{- /* AUTO-SELECT the stt engine FROM THE MODEL NAME (MODEL_ENGINE is NOT a clone-form field —
+       users only type MODEL_NAME). This is correctness, not convenience: the engine must match
+       the model FORMAT. A CTranslate2 repo (Systran/faster-whisper-*) can ONLY load on
+       faster-whisper; a transformers Whisper repo (openai/whisper-*) loads on vLLM; Qwen3-ASR
+       has its own vLLM path. So: name says qwen -> qwen3-asr; name is a CT2/Systran whisper ->
+       faster-whisper; otherwise -> "" = default Whisper-on-vLLM. An explicit MODEL_ENGINE
+       (advanced CLI override) still wins. Only stt has alternates; other modes ignore this. */ -}}
+{{- if and (not $engineSel) (eq $modelMode "stt") -}}
+{{- $mn := lower $modelName -}}
+{{- if contains "qwen" $mn -}}
+{{- $engineSel = "qwen3-asr" -}}
+{{- else if or (contains "faster-whisper" $mn) (contains "ctranslate2" $mn) (hasPrefix "systran/" $mn) -}}
+{{- $engineSel = "faster-whisper" -}}
+{{- end -}}
+{{- end -}}
 {{- /* qwen3-asr: --gpu-memory-utilization is read from $VLLM_GPU_UTIL (computed
        below from the HAMI gpumem quota vs the physical card; falls back to 0.45).
        vLLM sees the FULL physical GPU even though HAMI enforces the smaller quota,
@@ -285,24 +300,15 @@ spec:
               value: "1000"
             - name: PGID
               value: "1000"
-{{- /* HAMi/olares GPU soft-isolation knobs, OPT-IN via clone --env (libvgpu reads them
-       directly). vLLM is autoregressive (many tiny kernel launches/token); the per-launch
-       rate_limiter throttles it ~10x under the time-sliced vGPU, while faster-whisper (few
-       launches) is unaffected. To make Qwen/vLLM fast under time-slicing, try (in order):
-       GPU_CORE_UTILIZATION_POLICY=disable (drop compute throttle, KEEP mem isolation), or
-       CUDA_DISABLE_CONTROL=true (bypass libvgpu entirely = no isolation, last resort).
-       Unset => stock HAMi behavior; only emitted when provided so non-GPU engines are clean. */ -}}
-{{- if $oe.GPU_CORE_UTILIZATION_POLICY }}
+{{- /* Drop HAMi's per-kernel compute rate_limiter while KEEPING memory isolation, so every
+       GPU engine runs full-speed under the time-sliced vGPU. This is the proven fix for vLLM's
+       ~10x autoregressive throttle (Qwen 1h5m: 4269s clip 42s cold / 28s warm); pyannote /
+       speechbrain benefit too. FORCED ON for any GPU engine (no clone-form knob — users can't
+       and shouldn't have to set it); advanced override still possible via olaresEnv. Tradeoff:
+       this pod can grab more SM time on a shared card, so it may crowd time-sliced neighbours. */ -}}
+{{- if $wantGpu }}
             - name: GPU_CORE_UTILIZATION_POLICY
-              value: "{{ $oe.GPU_CORE_UTILIZATION_POLICY }}"
-{{- end }}
-{{- if $oe.CUDA_DEVICE_SM_LIMIT }}
-            - name: CUDA_DEVICE_SM_LIMIT
-              value: "{{ $oe.CUDA_DEVICE_SM_LIMIT }}"
-{{- end }}
-{{- if $oe.CUDA_DISABLE_CONTROL }}
-            - name: CUDA_DISABLE_CONTROL
-              value: "{{ $oe.CUDA_DISABLE_CONTROL }}"
+              value: "{{ $oe.GPU_CORE_UTILIZATION_POLICY | default "disable" }}"
 {{- end }}
           ports:
             - name: http
