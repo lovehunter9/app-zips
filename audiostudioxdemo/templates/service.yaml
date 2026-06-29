@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: audiostudioxdemo
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    io.kompose.service: audiostudioxdemo
+spec:
+  type: ClusterIP
+  selector:
+    io.kompose.service: audiostudioxdemo
+  ports:
+    - name: web
+      protocol: TCP
+      port: 8080
+      targetPort: 8080
