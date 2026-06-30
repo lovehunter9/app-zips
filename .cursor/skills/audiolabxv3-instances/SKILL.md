@@ -76,6 +76,19 @@ provider manually — tell them the new URL.
 | Translate | `Audio Lab X V3 Translate` | `audiolabxv38ab6b2` | `audiolabxv38ab6b2-shared` | (ask user — unchanged) | `http://audio-engine.audiolabxv38ab6b2-shared:8000` |
 | Embed | `Audio Lab X V3 Embed` | `audiolabxv35db0f3` | `audiolabxv35db0f3-shared` | (ask user — unchanged) | `http://audio-engine.audiolabxv35db0f3-shared:8000` |
 | Enhance (GPU 2Gi) | `AudioLabX Enhance` | `audiolabxv3d616f5` (was `1c4d10`) | `audiolabxv3d616f5-shared` | **NEW → ask user** | `http://audio-engine.audiolabxv3d616f5-shared:8000` |
+| Align (GPU 4Gi) | `Audio Lab X V3 Align` | `audiolabxv3396efb` | `audiolabxv3396efb-shared` | `https://3276066a.olarestest003.olares.com` | `http://audio-engine.audiolabxv3396efb-shared:8000` |
+
+> 2026-06-30 ALIGN (forced alignment, Qwen3-ForcedAligner-0.6B): NEW capability. Wrapper
+> `align.py` (qwen-asr `Qwen3ForcedAligner.align()`, end-to-end timestamps). Engine = reuses
+> the **vLLM cu129** image (recent transformers + Blackwell torch), NOT pyannote. Engine cmd
+> pip-installs qwen-asr on first load; needed `pip install --ignore-installed blinker` first
+> (cu129 image ships a distutils blinker 1.4 pip refuses to uninstall → install aborted).
+> Serves BOTH `/v1/align` (direct/contract) and `/v1/audio/align` (the path the Gateway uses,
+> same multipart family as vad/diar/embed/enhance). **Verified** direct curl: 13/13 Chinese
+> chars with monotonic per-char timestamps, ~5s on GPU. Gateway route `/v1/audio/align`
+> (AudioAlignHandler + spend.ModeAlign) added in backend image `v2.0.6-test6` — needs the live
+> backend bumped to test6 + a provider registered (base_url `<public>/v1`, model
+> `Qwen/Qwen3-ForcedAligner-0.6B`, mode `align`).
 
 > 2026-06-29 FULL REBUILD (enhance.py server-side chunking + Enhance → GPU): changed
 > `enhance.py` so per RULE 1 all 7 were uninstalled → chart 1.0.0 deleted → new tgz
@@ -115,6 +128,7 @@ olares-cli market clone audiolabxv3 -s upload --title "<EXACT TITLE>" \
 | Translate | `hf://entai2965/nllb-200-distilled-600M-ctranslate2` | `nllb-200-distilled-600M` | `translate` | `0` | — |
 | Embed | `hf://pyannote/embedding` | `pyannote-embedding` | `embed` | `0` | — |
 | Enhance | `hf://speechbrain/mtl-mimic-voicebank` | `mtl-mimic-voicebank` | `enhance` | `2Gi` (server-side chunking bounds VRAM; `0`=CPU still works) | — |
+| Align | `hf://Qwen/Qwen3-ForcedAligner-0.6B` | `Qwen/Qwen3-ForcedAligner-0.6B` | `align` | `4Gi` | engine = vLLM cu129 (NOT pyannote); needs forced text |
 
 ## ConfigMap (wrapper) edits → delete + re-clone (see RULE 1)
 

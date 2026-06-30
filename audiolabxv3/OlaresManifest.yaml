@@ -47,17 +47,18 @@ spec:
     **Clone form (4 required envs)**
     - `MODEL_SOURCE` — `hf://<repo>` (llm-init download spec).
     - `MODEL_NAME` — model id advertised to clients.
-    - `MODEL_MODE` — `stt` / `vad` / `diar` / `translate` / `embed` / `enhance` (engine auto-derived from mode).
+    - `MODEL_MODE` — `stt` / `vad` / `diar` / `translate` / `embed` / `enhance` / `align` (engine auto-derived from mode).
     - The stt ENGINE is AUTO-SELECTED from `MODEL_NAME` (NOT a clone field): a Qwen name ->
       Qwen3-ASR on vLLM; a CTranslate2 / Systran faster-whisper name -> faster-whisper
       (harveyff image, must use that engine since vLLM can't load CT2); otherwise -> Whisper
       on vLLM. All expose the same `/v1/audio/transcriptions` contract. GPU engines also force
       `GPU_CORE_UTILIZATION_POLICY=disable` (drop HAMi compute throttle, keep memory isolation)
       so they run full-speed under the time-sliced vGPU.
-    - `AUDIO_REQUIRED_GPU_MEMORY` — `"0"` for CPU-only (VAD, Translate, Embed, Enhance); STT: `8Gi`; Diar: `4Gi`; STT(qwen3-asr, 1.7B): `12Gi`.
+    - `AUDIO_REQUIRED_GPU_MEMORY` — `"0"` for CPU-only (VAD, Translate, Embed, Enhance); STT: `8Gi`; Diar: `4Gi`; STT(qwen3-asr, 1.7B): `12Gi`; Align(Qwen3-ForcedAligner-0.6B): `4Gi`.
 
-    **Engine images** — vLLM cu129 serves stt (Whisper / Qwen3-ASR); the harveyff
-    Whisper-WebUI image serves stt via faster-whisper/ctranslate2 (its ct2 IS
+    **Engine images** — vLLM cu129 serves stt (Whisper / Qwen3-ASR) AND align
+    (Qwen3-ForcedAligner via /wrappers/align.py — needs recent transformers + cu129 torch);
+    the harveyff Whisper-WebUI image serves stt via faster-whisper/ctranslate2 (its ct2 IS
     Blackwell-built, used via wrapper, fast under time-slicing); the pyannote/torch
     image hosts vad/diar/translate/embed/enhance via wrappers.
 
@@ -76,6 +77,8 @@ spec:
       MODEL_NAME=pyannote-embedding  MODEL_MODE=embed  AUDIO_REQUIRED_GPU_MEMORY=0
     - Enhance (denoise, SpeechBrain): MODEL_SOURCE=hf://speechbrain/mtl-mimic-voicebank
       MODEL_NAME=mtl-mimic-voicebank  MODEL_MODE=enhance  AUDIO_REQUIRED_GPU_MEMORY=0
+    - Align (forced alignment, Qwen3-ForcedAligner): MODEL_SOURCE=hf://Qwen/Qwen3-ForcedAligner-0.6B
+      MODEL_NAME=Qwen/Qwen3-ForcedAligner-0.6B  MODEL_MODE=align  AUDIO_REQUIRED_GPU_MEMORY=4Gi
 
   upgradeDescription: |
     v1.0.0: initial generic audio-model base. llm-init (download-only) + mode-mapped
@@ -156,6 +159,8 @@ envs:
       value: embed
     - title: Enhance (denoise)
       value: enhance
+    - title: Align (forced alignment, Qwen3-ForcedAligner)
+      value: align
   - envName: MODEL_ENGINE
     required: false
     type: string

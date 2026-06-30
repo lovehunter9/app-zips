@@ -176,6 +176,23 @@ export function translate(
   });
 }
 
+// Forced alignment (mode=align): audio + known text -> precise char/word
+// timestamps. Multipart like the other audio ops but carries a `text` field
+// (and optional `language`). Gateway routes POST /v1/audio/align to the
+// Qwen3-ForcedAligner provider. Callers pass a WAV slice (skipEdgeSafe) so the
+// engine decode path matches what STT uses.
+export function alignAudio(
+  s: Settings,
+  model: string,
+  clip: Blob,
+  text: string,
+  language?: string
+): Promise<CallResult> {
+  const extra: Record<string, string> = { text };
+  if (language) extra.language = language;
+  return audioMultipart(s, "align", clip, model, extra, false, true);
+}
+
 export async function uploadMedia(
   file: File,
   onProgress?: (pct: number) => void

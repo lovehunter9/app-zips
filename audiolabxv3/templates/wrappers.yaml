@@ -745,6 +745,145 @@ data:
 
     if __name__ == "__main__":
         uvicorn.run(app, host="0.0.0.0", port=PORT, log_level=LOG_LEVEL)
+  align.py: |
+    # Forced alignment (audio + text -> word/char timestamps) via Qwen3-ForcedAligner,
+    # reusing the vLLM cu129 image's recent transformers + Blackwell (cu129) torch (NO new
+    # image). The capability is END-TO-END in the model: the official qwen-asr toolkit's
+    # Qwen3ForcedAligner directly predicts timestamps (no external CTC/Viterbi algorithm),
+    # which is exactly why it fits our "the capability lives in the model" paradigm.
+    # The llm-init-downloaded model (e.g. Qwen/Qwen3-ForcedAligner-0.6B) is read from the
+    # shared HF cache (HF_HUB_OFFLINE=1). Exposes: GET /health, GET /healthz, GET /readyz,
+    # GET /v1/models, POST /v1/align (multipart audio file + text [+ language]).
+    import os, tempfile, threading, logging
+    from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+    import uvicorn
+
+    LOG_LEVEL = os.environ.get("LOG_LEVEL", "info").lower()
+    logging.basicConfig(level=getattr(logging, LOG_LEVEL.upper(), logging.INFO))
+    log = logging.getLogger("audio-align")
+
+    MODEL_NAME = os.environ.get("MODEL_NAME", "Qwen/Qwen3-ForcedAligner-0.6B")
+    _src = os.environ.get("MODEL_SOURCE", "")
+    MODEL_REPO = _src[5:] if _src.startswith("hf://") else (_src or MODEL_NAME)
+    PORT = int(os.environ.get("WRAPPER_PORT", "8000"))
+    HF_TOKEN = os.environ.get("HF_TOKEN") or None
+
+    app = FastAPI(title="audio-align (Qwen3-ForcedAligner)")
+    _state = {"ready": False, "error": None, "model": None, "device": "cpu"}
+
+    def _load():
+        try:
+            # qwen-asr ships the Qwen3-ForcedAligner modeling code + .align() API. The engine
+            # cmd pip-installs it on first load; fall back to a pip here just in case.
+            try:
+                from qwen_asr import Qwen3ForcedAligner  # noqa: F401
+            except Exception:
+                import subprocess, sys
+                log.info("qwen-asr missing; pip-installing for forced aligner...")
+                # qwen-asr pulls flask->blinker; the cu129 image has a distutils-installed
+                # blinker 1.4 that pip refuses to uninstall. Reinstall blinker as a
+                # pip-managed pkg first so the qwen-asr install doesn't abort on it.
+                subprocess.run([sys.executable, "-m", "pip", "install", "-q",
+                                "--ignore-installed", "blinker"], check=False)
+                subprocess.run([sys.executable, "-m", "pip", "install", "-q", "qwen-asr"], check=False)
+                from qwen_asr import Qwen3ForcedAligner  # noqa: F401
+            import torch
+            from qwen_asr import Qwen3ForcedAligner
+            dev = "cuda" if torch.cuda.is_available() else "cpu"
+            dtype = torch.bfloat16 if dev == "cuda" else torch.float32
+            kw = dict(dtype=dtype, device_map=(dev if dev == "cpu" else "cuda:0"))
+            if HF_TOKEN:
+                kw["token"] = HF_TOKEN
+            try:
+                model = Qwen3ForcedAligner.from_pretrained(MODEL_REPO, **kw)
+            except TypeError:
+                kw.pop("token", None)
+                model = Qwen3ForcedAligner.from_pretrained(MODEL_REPO, **kw)
+            _state.update(model=model, device=dev, ready=True)
+            log.info("Qwen3-ForcedAligner %s loaded on %s", MODEL_REPO, dev)
+        except Exception as e:
+            _state["error"] = str(e)
+            log.exception("forced-aligner load failed: %s", e)
+
+    @app.on_event("startup")
+    def _startup():
+        threading.Thread(target=_load, daemon=True).start()
+
+    @app.get("/health")
+    def health():
+        if _state["ready"]:
+            return {"status": "ok", "device": _state["device"]}
+        raise HTTPException(status_code=503, detail=_state["error"] or "loading model")
+
+    @app.get("/healthz")
+    def healthz():
+        return health()
+
+    @app.get("/readyz")
+    def readyz():
+        return health()
+
+    @app.get("/v1/models")
+    def models():
+        return {"object": "list", "data": [{"id": MODEL_NAME, "object": "model", "mode": "align"}]}
+
+    def _field(u, *names):
+        for n in names:
+            try:
+                if isinstance(u, dict):
+                    if n in u:
+                        return u[n]
+                elif hasattr(u, n):
+                    return getattr(u, n)
+            except Exception:
+                pass
+        return None
+
+    # Gateway routes multipart audio-in capabilities under /v1/audio/<op>
+    # (same family as vad/diar/embed/enhance), so /v1/audio/align is the path
+    # the LLM Gateway hits. /v1/align is kept as an alias for direct curl /
+    # the documented contract.
+    @app.post("/v1/audio/align")
+    @app.post("/v1/align")
+    async def align(file: UploadFile = File(...), text: str = Form(...),
+                    language: str = Form(default=None)):
+        if not _state["ready"]:
+            raise HTTPException(status_code=503, detail=_state["error"] or "model not ready")
+        if not (text or "").strip():
+            raise HTTPException(status_code=400, detail="`text` is required for forced alignment")
+        data = await file.read()
+        suffix = os.path.splitext(file.filename or "a.wav")[1] or ".wav"
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
+            f.write(data)
+            path = f.name
+        try:
+            lang = (language or "").strip() or None
+            kw = {"language": lang} if lang else {}
+            try:
+                results = _state["model"].align(audio=path, text=text, **kw)
+            except TypeError:
+                results = _state["model"].align(path, text)
+            # results is a batch list; results[0] is the unit list for our single input.
+            units_raw = results[0] if results else []
+            units = []
+            for u in units_raw:
+                units.append({
+                    "text": _field(u, "text", "word", "token"),
+                    "start": _field(u, "start_time", "start"),
+                    "end": _field(u, "end_time", "end"),
+                })
+        except Exception as e:
+            raise HTTPException(status_code=500, detail="alignment failed: %s" % e)
+        finally:
+            try:
+                os.unlink(path)
+            except Exception:
+                pass
+        return {"model": MODEL_NAME, "mode": "align", "device": _state["device"],
+                "language": (language or None), "units": units}
+
+    if __name__ == "__main__":
+        uvicorn.run(app, host="0.0.0.0", port=PORT, log_level=LOG_LEVEL)
   stt_fw.py: |
     # faster-whisper STT. Takes ONLY the harveyff Whisper-WebUI image's proven-on-Blackwell
     # ctranslate2 + faster_whisper (NOT the WebUI/Gradio app). Drives the llm-init-downloaded

@@ -1,9 +1,10 @@
-export type CapId = "stt" | "translate" | "vad" | "diar" | "enhance" | "embed";
+export type CapId = "stt" | "align" | "translate" | "vad" | "diar" | "enhance" | "embed";
 
 // Gateway provider_models.mode values map to our capabilities. translate/vad/
-// diar/embed/enhance are 1:1; stt is the "transcriptions" surface.
+// diar/embed/enhance/align are 1:1; stt is the "transcriptions" surface.
 export const CAP_MODE: Record<CapId, string> = {
   stt: "stt",
+  align: "align",
   translate: "translate",
   vad: "vad",
   diar: "diar",
@@ -13,6 +14,7 @@ export const CAP_MODE: Record<CapId, string> = {
 
 export const CAP_LABEL: Record<CapId, string> = {
   stt: "转写 STT",
+  align: "强制对齐 Align",
   translate: "翻译 Translate",
   vad: "人声分段 VAD",
   diar: "说话人分离 Diarize",
@@ -20,7 +22,7 @@ export const CAP_LABEL: Record<CapId, string> = {
   embed: "声纹向量 Embed",
 };
 
-export const CAP_ORDER: CapId[] = ["stt", "translate", "vad", "diar", "enhance", "embed"];
+export const CAP_ORDER: CapId[] = ["stt", "align", "translate", "vad", "diar", "enhance", "embed"];
 
 export interface Settings {
   base: string; // gateway base URL (may be empty -> use server env)

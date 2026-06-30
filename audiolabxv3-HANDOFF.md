@@ -7,7 +7,9 @@
 
 ## 0. 一句话现状(更新于 2026-06-23 晚)
 
-**M1(会议转录)已完全收尾 —— 引擎级 + Gateway 数据面全线打通。** 在 STT/VAD/Diar 之上,把 `translate`(文本机翻 NLLB,复用 whisper 镜像)、`word_timestamps`(stt 原生,零开发)、`embed`(说话人 512 维向量,复用 pyannote 镜像)、`enhance`(降噪,复用 pyannote 镜像 + SpeechBrain)四项跑通;三项新能力**全部零新镜像**(wrapper 注入 + 按需 pip 装依赖)。随后给 gateway 补了这三类的数据面、出 `v2.0.6-test5` 镜像,经网关端到端验证全部 `200`(详见 §8.5)。M1 七项能力(stt·vad·diar·translate·word_timestamps·embed·enhance)引擎 ✅ + Gateway ✅。详见 `audiolabxv3-docs/_internal/WORK_LOG_2026-06-23.md`、`WORK_LOG_2026-06-24.md` 与 `audiolabxv3-ROADMAP.md`。
+**M1(会议转录)六项能力已收尾 —— 引擎级 + Gateway 数据面全线打通。** 在 STT/VAD/Diar 之上,把 `translate`(文本机翻 NLLB,复用 whisper 镜像)、`embed`(说话人 512 维向量,复用 pyannote 镜像)、`enhance`(降噪,复用 pyannote 镜像 + SpeechBrain)三项新能力跑通,**全部零新镜像**(wrapper 注入 + 按需 pip 装依赖)。随后给 gateway 补了这三类的数据面、出 `v2.0.6-test5` 镜像,经网关端到端验证全部 `200`(详见 §8.5)。M1 六项能力(stt·vad·diar·translate·embed·enhance)引擎 ✅ + Gateway ✅。详见 `audiolabxv3-docs/_internal/WORK_LOG_2026-06-23.md`、`WORK_LOG_2026-06-24.md` 与 `audiolabxv3-ROADMAP.md`。
+
+**能力口径修正(2026-06-30):** 删除此前自造的 `word_timestamps`(并非独立模型,只是 STT 原生输出;Whisper 的 `verbose_json + word` 随 stt 保留,不单列能力)。新提级 **`align` 强制对齐**为 M1 独立能力(音频+文本→精确时间戳,可对齐任意文本),范例 **`Qwen/Qwen3-ForcedAligner-0.6B`**(Apache-2.0,复用 vLLM cu129 镜像),**待实现**。选型横评见 `audiolabxv3-docs/align能力_选型调研.md`。
 
 **多引擎(2026-06-24):** STT 增加第二套官方引擎 `MODEL_ENGINE=qwen3-asr`(Qwen3-ASR-1.7B,**复用** vLLM 官方镜像 `beclab/vllm-vllm-openai:v0.23.0-cu129`,`vllm serve` 原生 `/v1/audio/transcriptions`)。实例 `audiolabxv3ad5667`(`53b75222...`),引擎级 + 网关 `mode=stt` provider 端到端 `200`。这验证了"一 mode 多引擎"(`MODEL_MODE` 定能力、`MODEL_ENGINE` 选引擎)架构。详见 §9。**下一步:M2 流式 ASR(stt_stream,需 WebSocket 透传)。**
 

@@ -55,14 +55,21 @@
        image): (1) vLLM cu129 serves stt natively; (2) the pyannote/torch image hosts
        every non-LLM capability via a wrapper (diar/embed/enhance + vad via silero-vad,
        + translate via CPU ctranslate2). All wrappers pip-install any missing deps on
-       first load (same pattern as embed's omegaconf / enhance's speechbrain). */ -}}
+       first load (same pattern as embed's omegaconf / enhance's speechbrain).
+       align (forced alignment, Qwen3-ForcedAligner-0.6B) is the ONE non-stt capability
+       that ALSO rides the vLLM cu129 image (NOT pyannote): the Qwen3-ForcedAligner is a
+       brand-new model arch needing recent transformers + Blackwell-built (cu129) torch,
+       both of which the vLLM image already has. It runs /wrappers/align.py (the official
+       qwen-asr toolkit's end-to-end aligner — timestamps come from the model itself, no
+       external CTC/Viterbi), pip-installing qwen-asr on first load. Still NO new image. */ -}}
 {{- $engines := dict
       "stt"  (dict "image" "docker.io/beclab/vllm-vllm-openai:v0.23.0-cu129" "port" "8000" "health" "/health" "cmd" "export HF_HUB_OFFLINE=1; python3 -m pip install -q librosa soundfile av 2>/dev/null || true; exec vllm serve $MODEL_NAME --host 0.0.0.0 --port $WRAPPER_PORT --gpu-memory-utilization ${VLLM_GPU_UTIL:-0.45}")
       "vad"  (dict "image" "docker.io/beclab/maximsachs-pyannote_fastapi:4.0.4" "port" "8000" "health" "/healthz" "cmd" "exec $(command -v python3 || command -v python) /wrappers/vad.py")
       "diar" (dict "image" "docker.io/beclab/maximsachs-pyannote_fastapi:4.0.4" "port" "8000" "health" "/healthz" "cmd" "exec $(command -v python3 || command -v python) /wrappers/diar.py")
       "translate" (dict "image" "docker.io/beclab/maximsachs-pyannote_fastapi:4.0.4" "port" "8000" "health" "/healthz" "cmd" "exec $(command -v python3 || command -v python) /wrappers/translate.py")
       "embed" (dict "image" "docker.io/beclab/maximsachs-pyannote_fastapi:4.0.4" "port" "8000" "health" "/healthz" "cmd" "exec $(command -v python3 || command -v python) /wrappers/embed.py")
-      "enhance" (dict "image" "docker.io/beclab/maximsachs-pyannote_fastapi:4.0.4" "port" "8000" "health" "/healthz" "cmd" "exec $(command -v python3 || command -v python) /wrappers/enhance.py") -}}
+      "enhance" (dict "image" "docker.io/beclab/maximsachs-pyannote_fastapi:4.0.4" "port" "8000" "health" "/healthz" "cmd" "exec $(command -v python3 || command -v python) /wrappers/enhance.py")
+      "align" (dict "image" "docker.io/beclab/vllm-vllm-openai:v0.23.0-cu129" "port" "8000" "health" "/healthz" "cmd" "export HF_HUB_OFFLINE=1; python3 -m pip install -q --ignore-installed blinker || true; python3 -m pip install -q qwen-asr librosa soundfile av || true; exec $(command -v python3 || command -v python) /wrappers/align.py") -}}
 {{- $sel := index $engines $modelMode -}}
 {{- if not $sel -}}
 {{- $sel = dict "image" (printf "docker.io/beclab/voice-engine-%s:notbuilt" $modelMode) "port" "8000" "health" "/healthz" -}}

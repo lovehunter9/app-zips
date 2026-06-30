@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  alignAudio,
   audioMultipart,
   fetchDefaultModels,
   fetchProviderModels,
@@ -59,6 +60,19 @@ function detectLang(text: string, fallback = "eng_Latn"): string {
   return FRANC_TO_FLORES[code] || fallback;
 }
 const langLabel = (code: string) => SOURCE_LANGS.find((l) => l.code === code)?.label || code;
+
+// Qwen3-ForcedAligner takes a language NAME ("Chinese"/"English"/…), not a FLORES
+// code. Map our FLORES source codes to the aligner's names; unknown → undefined
+// (let the model auto-detect). "auto" is resolved by the caller via detectLang first.
+const FLORES_TO_ALIGN_LANG: Record<string, string> = {
+  zho_Hans: "Chinese",
+  eng_Latn: "English",
+  jpn_Jpan: "Japanese",
+  kor_Hang: "Korean",
+  fra_Latn: "French",
+  spa_Latn: "Spanish",
+};
+const alignLangName = (floresCode: string): string | undefined => FLORES_TO_ALIGN_LANG[floresCode];
 
 function loadSettings(): Settings {
   try {
@@ -151,6 +165,300 @@ function windowSegs(duration: number, win = 30): Seg[] {
   for (let t = 0; t < duration - 0.05; t += win) out.push({ start: t, end: Math.min(duration, t + win) });
   return out.length ? out : [{ start: 0, end: duration }];
 }
+// ---- Align (forced alignment) helpers ----
+interface AlignWin {
+  clip: Blob;
+  text: string;
+  offset: number; // absolute start (s) added to each window-local unit time
+  speaker?: string; // stable speaker for ALL units in this window (per-segment mode)
+}
+// Window-primitive runner shared by BOTH modes: whole-clip ("分段对齐" off → a
+// single window) and per-segment ("分段对齐" on → one window per VAD/Diar segment).
+// The ONLY thing that differs between the two is how the caller builds `wins`;
+// the call, merge, speaker attribution and display are identical — so switching
+// modes is a small delta, never a rewrite.
+async function runAlignWindows(
+  s: Settings,
+  model: string,
+  wins: AlignWin[],
+  language: string | undefined,
+  concurrency: number,
+  onTick?: () => void
+): Promise<{ units: Seg[]; ok: number; total: number; lastStatus: number; errSample: string }> {
+  let ok = 0,
+    lastStatus = 0,
+    errSample = "";
+  const per = await mapLimit(wins, Math.max(1, concurrency), async (w) => {
+    const res = await callRetry(() => alignAudio(s, model, w.clip, w.text, language), 2);
+    lastStatus = res.status;
+    if (res.ok) ok++;
+    else if (!errSample) errSample = `${res.status}: ${errBody(res)}`;
+    const raw = Array.isArray(res.json?.units) ? res.json.units : [];
+    const units: Seg[] = raw.map((u: any) => ({
+      start: Number(u.start ?? 0) + w.offset,
+      end: Number(u.end ?? 0) + w.offset,
+      text: u.text ?? "",
+      // stable per-window speaker (per-segment mode); undefined → caller derives later
+      ...(w.speaker !== undefined ? { speaker: w.speaker } : {}),
+    }));
+    onTick?.();
+    return units;
+  });
+  const units = per.flat().sort((a, b) => a.start - b.start);
+  return { units, ok, total: wins.length, lastStatus, errSample };
+}
+// Join text pieces inserting a space ONLY when both sides of the seam are non-CJK
+// (so English "fresh" + "start" → "fresh start", but Chinese "万里" + "，飞过" stays glued
+// without the spurious spaces that a naive join(" ") sprinkles through CJK text).
+const isCJK = (ch: string): boolean => !!ch && /[\u3000-\u303f\u3400-\u9fff\uff00-\uffef]/.test(ch);
+function smartCat(x: string, y: string): string {
+  const a = (x || "").trim();
+  const b = (y || "").trim();
+  if (!a) return b;
+  if (!b) return a;
+  const sp = !isCJK(a[a.length - 1]) && !isCJK(b[0]) ? " " : "";
+  return a + sp + b;
+}
+function joinSegText(parts: (string | undefined)[]): string {
+  return parts.reduce<string>((acc, p) => smartCat(acc, p || ""), "");
+}
+// The aligner returns bare spoken tokens (word/char level) WITHOUT spaces or
+// sentence punctuation. Rebuilding line text by concatenating units therefore glues
+// English words and drops all punctuation. Instead we map each unit back to its
+// character span in the ORIGINAL reference text (greedy forward search, case-
+// insensitive fallback) and slice the ORIGINAL text for display — preserving spaces,
+// punctuation and casing. Align is used ONLY for timing.
+function mapUnitsToRef(units: Seg[], refText: string): { ci: number; cj: number }[] {
+  const out: { ci: number; cj: number }[] = [];
+  let cursor = 0;
+  const lower = refText.toLowerCase();
+  for (const u of units) {
+    const t = (u.text || "").trim();
+    if (!t) {
+      out.push({ ci: cursor, cj: cursor });
+      continue;
+    }
+    let idx = refText.indexOf(t, cursor);
+    if (idx < 0) idx = lower.indexOf(t.toLowerCase(), cursor);
+    if (idx < 0) {
+      out.push({ ci: cursor, cj: Math.min(refText.length, cursor + t.length) });
+      continue;
+    }
+    out.push({ ci: idx, cj: idx + t.length });
+    cursor = idx + t.length;
+  }
+  return out;
+}
+// Build a monotonic char-position → time table from the aligned units so ANY character index
+// can be given a time by interpolation — even where the aligner's tokens didn't match the
+// reference text (so a line never has to "fold" into a neighbour for lack of a unit).
+function buildCharToTime(units: Seg[], map: { ci: number; cj: number }[]): (c: number) => number {
+  const aC: number[] = [];
+  const aT: number[] = [];
+  for (let i = 0; i < units.length; i++) {
+    aC.push(map[i].ci);
+    aT.push(units[i].start);
+    aC.push(map[i].cj);
+    aT.push(units[i].end);
+  }
+  for (let i = 1; i < aC.length; i++) if (aC[i] < aC[i - 1]) aC[i] = aC[i - 1];
+  return (c: number): number => {
+    if (!aC.length) return 0;
+    if (c <= aC[0]) return aT[0];
+    for (let i = 1; i < aC.length; i++) {
+      if (c <= aC[i]) {
+        const c0 = aC[i - 1];
+        const c1 = aC[i];
+        return c1 <= c0 ? aT[i] : aT[i - 1] + ((aT[i] - aT[i - 1]) * (c - c0)) / (c1 - c0);
+      }
+    }
+    return aT[aT.length - 1];
+  };
+}
+// Punctuation-driven line breaks within refText[c0,c1):
+//   • always break after a sentence end (。！？, or Latin .!? next to space/quote/end)
+//   • a sentence shorter than maxLen stays whole (a line never stops on an early comma)
+//   • a longer sentence wraps at its LAST comma before the cap (pieces as long as possible),
+//     or — if it has no comma — at a CJK char / Latin space (never mid-word)
+// Returns exclusive end positions, the last being c1.
+function punctLineBreaks(refText: string, c0: number, c1: number, maxLen: number): number[] {
+  const swallow = (k: number): number => {
+    let j = k + 1;
+    while (j < c1 && /["'”’」』）)\]\s]/.test(refText[j])) j++;
+    return j;
+  };
+  const cuts: number[] = [];
+  let lineStart = c0;
+  let lastComma = -1;
+  for (let i = c0; i < c1; i++) {
+    const ch = refText[i];
+    const nxt = i + 1 < c1 ? refText[i + 1] : "";
+    const sentEnd = /[。！？]/.test(ch) || (/[.!?]/.test(ch) && (nxt === "" || /[\s"'”’)\]]/.test(nxt)));
+    const comma = /[，、；,;：:]/.test(ch);
+    let cutAt = -1;
+    if (sentEnd) cutAt = swallow(i);
+    else if (comma) lastComma = swallow(i);
+    if (cutAt < 0 && i - lineStart + 1 >= maxLen) {
+      if (lastComma > lineStart) cutAt = lastComma;
+      else if (isCJK(ch) || nxt === "" || /\s/.test(nxt)) cutAt = i + 1;
+    }
+    if (cutAt > lineStart) {
+      cuts.push(cutAt);
+      lineStart = cutAt;
+      lastComma = -1;
+      i = cutAt - 1;
+    }
+  }
+  if (!cuts.length || cuts[cuts.length - 1] !== c1) cuts.push(c1);
+  return cuts;
+}
+// Build fused Seg lines for refText[c0,c1): break by punctuation/length, time each line by
+// char-position interpolation, and attach the given speaker (if any). Verbatim text slices.
+function linesFromRange(
+  refText: string,
+  c0: number,
+  c1: number,
+  timeAtChar: (c: number) => number,
+  maxLen: number,
+  speaker?: string
+): Seg[] {
+  const cuts = punctLineBreaks(refText, c0, c1, maxLen);
+  const lines: Seg[] = [];
+  let prev = c0;
+  for (const e of cuts) {
+    const s0 = prev;
+    prev = e;
+    const text = refText.slice(s0, e).trim();
+    if (!text) continue;
+    lines.push({ start: timeAtChar(s0), end: timeAtChar(e), text, ...(speaker !== undefined ? { speaker } : {}) });
+  }
+  return lines;
+}
+// No-skeleton path: group the whole transcript purely by its own punctuation.
+function groupAlignUnitsRef(units: Seg[], refText: string, maxLen = 80): Seg[] {
+  if (!units.length || !refText) return [];
+  const map = mapUnitsToRef(units, refText);
+  return linesFromRange(refText, 0, refText.length, buildCharToTime(units, map), maxLen);
+}
+// Use an EXISTING segmentation (the STT / VAD / Diarize segments — text + speaker already
+// good) as the fused skeleton, and let Align only TIGHTEN each segment's start/end to the
+// real spoken extent (min/max of the aligned units overlapping that segment). This keeps the
+// granularity the user already liked instead of re-grouping from scratch — the answer to
+// "能不能把说话人分离的分段拿来做参考". Segments with no overlapping unit keep their original times.
+function refineSegmentsWithAlign(skeleton: Seg[], units: Seg[]): Seg[] {
+  return skeleton
+    .filter((s) => (s.text || "").trim())
+    .map((s) => {
+      const inside = units.filter((u) => Math.min(u.end, s.end) - Math.max(u.start, s.start) > 0);
+      if (!inside.length) return { ...s };
+      const start = Math.min(...inside.map((u) => u.start));
+      const end = Math.max(...inside.map((u) => u.end));
+      return { start, end, text: s.text, speaker: s.speaker };
+    });
+}
+// Candidate punctuation positions (char index AFTER the mark, swallowing trailing closing
+// quotes/brackets/spaces) — sentence ends AND clause marks, plus 0 and length. These are the
+// only places a fused line is allowed to start/end.
+function punctBounds(refText: string): number[] {
+  const s = new Set<number>([0, refText.length]);
+  for (let i = 0; i < refText.length; i++) {
+    const ch = refText[i];
+    const nxt = refText[i + 1] || "";
+    const sentEnd = /[。！？]/.test(ch) || (/[.!?]/.test(ch) && (nxt === "" || /[\s"'”’)\]]/.test(nxt)));
+    const clause = /[，、；,;：:]/.test(ch);
+    if (sentEnd || clause) {
+      let j = i + 1;
+      while (j < refText.length && /["'”’」』）)\]\s]/.test(refText[j])) j++;
+      s.add(j);
+    }
+  }
+  return Array.from(s).sort((a, b) => a - b);
+}
+// Respect BOTH the diar timeline AND the text punctuation: keep one fused line per diar run
+// (so the speaker timeline is honoured) but SNAP every run boundary to the nearest punctuation
+// position. When a diar boundary lands mid-sentence it moves to the closest mark — merging a
+// run into its neighbour if that empties it — so a line never starts/ends mid-word or on a lone
+// quote, while the timeline shifts as little as possible. Implements the user's rule:
+//   • no punctuation        → (caller uses refineSegmentsWithAlign: timeline is everything)
+//   • diar boundary == punct → unchanged (snap distance 0)
+//   • diar boundary ≠ punct  → snap to nearest punct (minimal timeline impact)
+function snapRunsToPunct(runs: Seg[], units: Seg[], refText: string, maxLen = 80): Seg[] {
+  if (!runs.length) return [];
+  if (!units.length) return refineSegmentsWithAlign(runs, units);
+  const map = mapUnitsToRef(units, refText);
+  const timeAtChar = buildCharToTime(units, map);
+  const bounds = punctBounds(refText);
+  const timeToChar = (t: number): number => {
+    for (let i = 0; i < units.length; i++) {
+      if (t <= units[i].end) {
+        if (t <= units[i].start) return map[i].ci;
+        const span = Math.max(1e-6, units[i].end - units[i].start);
+        return Math.round(map[i].ci + ((t - units[i].start) / span) * (map[i].cj - map[i].ci));
+      }
+    }
+    return refText.length;
+  };
+  // Snap each run boundary to the nearest punctuation that is STRICTLY AFTER the previous
+  // boundary. This both cleans the cut to a punctuation AND guarantees every run keeps a
+  // distinct, non-empty slice — so a run shorter than a sentence is nudged to the next mark
+  // instead of collapsing (which previously cascaded whole passages into one giant block).
+  const ci: number[] = [0];
+  let last = 0;
+  for (let k = 1; k < runs.length; k++) {
+    const target = timeToChar(runs[k].start);
+    let cand = -1;
+    let bd = Infinity;
+    for (const b of bounds) {
+      if (b <= last) continue;
+      const d = Math.abs(b - target);
+      if (d < bd) {
+        bd = d;
+        cand = b;
+      }
+    }
+    ci.push(cand < 0 ? refText.length : cand);
+    last = ci[ci.length - 1];
+  }
+  ci.push(refText.length);
+  const out: Seg[] = [];
+  for (let k = 0; k < runs.length; k++) {
+    const c0 = ci[k];
+    const c1 = ci[k + 1];
+    if (c1 <= c0) continue; // run swallowed by snapping → merged into a neighbour
+    if (!refText.slice(c0, c1).trim()) continue;
+    // Split the run's text by punctuation/length too — so a long single-speaker monologue
+    // run becomes several readable lines (same speaker) instead of one giant block.
+    out.push(...linesFromRange(refText, c0, c1, timeAtChar, maxLen, runs[k].speaker));
+  }
+  return out.length ? out : refineSegmentsWithAlign(runs, units);
+}
+// Split a long reference text into n roughly-equal parts for the whole-clip auto-split
+// align path, preferring to cut at sentence boundaries (。！？.!?) near each target so a
+// sentence isn't sliced across two audio windows. Proportional (assumes ~steady speech
+// rate) — coarse on purpose; the accurate path is per-segment ("分段对齐").
+function splitTextN(text: string, n: number): string[] {
+  if (n <= 1 || !text) return [text];
+  const len = text.length;
+  const parts: string[] = [];
+  let start = 0;
+  for (let i = 1; i < n; i++) {
+    const target = Math.round((len * i) / n);
+    const reach = Math.max(8, Math.round(len * 0.15));
+    let cut = -1;
+    for (let j = target; j < Math.min(len, target + reach); j++) {
+      if (/[。！？!?.]/.test(text[j])) { cut = j + 1; break; }
+    }
+    if (cut < 0) for (let j = target; j > Math.max(start + 1, target - reach); j--) {
+      if (/[。！？!?.]/.test(text[j])) { cut = j + 1; break; }
+    }
+    if (cut < 0 || cut <= start) cut = Math.max(start + 1, target);
+    parts.push(text.slice(start, cut));
+    start = cut;
+  }
+  parts.push(text.slice(start));
+  return parts;
+}
+
 // Remove text duplicated by the audio overlap between a split-continuation piece and its
 // predecessor: find the largest tail-of-prev == head-of-cur (char-level, so it works for
 // both space-delimited and CJK text) and drop it from the head of `cur`. Best-effort — if
@@ -243,9 +551,10 @@ export default function App() {
   const [modelStatus, setModelStatus] = useState<string>("");
   const [enabled, setEnabled] = useState<Record<CapId, boolean>>({
     stt: true,
-    translate: true,
-    vad: true,
-    diar: true,
+    align: false,
+    translate: false,
+    vad: false,
+    diar: false,
     enhance: false,
     embed: false,
   });
@@ -266,6 +575,11 @@ export default function App() {
   // the coalesced VAD/Diarize windows and each is transcribed separately (N calls). Slower
   // but higher quality (full context per turn). OFF = the whole-clip single-call path.
   const [sttPerSeg, setSttPerSeg] = useState(false);
+  // "分段对齐": OFF = whole-clip single align call (the heuristic was here before);
+  // ON (needs VAD/Diarize + STT) = align each VAD/Diar segment against its own STT
+  // text (one call per segment, offset=seg.start). The proper long-audio path —
+  // each segment is <300s, so the model's 5-min cap never bites.
+  const [alignPerSeg, setAlignPerSeg] = useState(false);
   // Per-segment (per-line) translation: ON = translate each fused transcript line (concurrent,
   // shown per-segment in the fused view); OFF = one whole-text translation call. Default OFF
   // — like every other default, it minimises the number of gateway calls.
@@ -353,6 +667,10 @@ export default function App() {
     switch (cap) {
       case "stt":
         return `text ${String(j?.text || "").length} 字, segments ${asSegments(j).length}`;
+      case "align": {
+        const u = j?.units;
+        return Array.isArray(u) ? `${u.length} 个对齐单元` : "无对齐单元";
+      }
       case "translate":
         return `→ ${String(j?.translation ?? j?.text ?? j?.translated_text ?? "").slice(0, 60)}`;
       case "vad":
@@ -614,6 +932,7 @@ export default function App() {
 
     // ── Stage 2: STT ──────────────────────────────────────────────────
     let fused: Seg[] = []; // {start,end,speaker?,text}
+    let alignPrimary = false; // set when Align supersedes the STT heuristic timeline
     if (enabled.stt) {
       const model = selModel.stt;
       if (!model) skip("stt", "无可用模型");
@@ -666,7 +985,7 @@ export default function App() {
             // drop slices that transcribed to nothing (silence/noise)
             fused = raw.filter((f) => f.text.trim()).map((f) => ({ start: f.start, end: f.end, speaker: f.speaker, text: f.text }));
             const tsSource = `逐段转写 (按 ${sliceSrc} 切片,引擎原生分段)`;
-            out.stt = { text: fused.map((f) => f.text).join(" "), segments: fused, tsSource };
+            out.stt = { text: joinSegText(fused.map((f) => f.text)), segments: fused, tsSource };
             push({
               cap: "stt",
               invoked: true,
@@ -722,7 +1041,7 @@ export default function App() {
               setProgress({ cap: "stt", phase: "整段未果→分窗转写中", done: ++done, total: wins.length });
               return (r.json?.text ?? r.text ?? "").toString().trim();
             });
-            fullText = texts.filter(Boolean).join(" ");
+            fullText = joinSegText(texts.filter(Boolean));
             nativeSegs = [];
             fellBack = true;
           }
@@ -749,15 +1068,21 @@ export default function App() {
             const coalesced = coalesceSegments(modelRuns);
             const textForRuns = fullText || nativeSegs.map((s) => s.text).join("");
             fused = distributeTextOverRuns(textForRuns, coalesced);
-            tsSource = `非 AI 后处理 (整段文本按 ${tlSource} 分段对齐)`;
+            // When Align is on this is only a PRE-segmentation for the STT view + speaker/run
+            // skeleton — its rough timestamps are discarded, Align supplies the final ones. So
+            // don't call it "非 AI 后处理" (which implies a competing timestamp step).
+            tsSource = enabled.align
+              ? `预分段展示 (按 ${tlSource} 切分文本;最终时间戳由 Align 接管)`
+              : `非 AI 后处理 (整段文本按 ${tlSource} 分段对齐)`;
           } else if (isWhisper && nativeSegs.length) {
             // No VAD/Diarize, Whisper: keep the engine's native verbose_json segments.
             fused = nativeSegs.map((s) => ({ start: s.start, end: s.end, text: s.text }));
             tsSource = "引擎原生 (Whisper verbose_json)";
             tlSource = "";
-          } else if (!alignTs) {
-            // No VAD/Diarize, Qwen, post-processing OFF → show the raw whole-clip transcript
-            // as one untimed block (the model's pure output, no fabricated timestamps).
+          } else if (!alignTs || enabled.align) {
+            // No VAD/Diarize, Qwen, post-processing OFF (or Align enabled, which TAKES OVER
+            // timestamping — the heuristic must not also run) → show the raw whole-clip
+            // transcript as one untimed block (the model's pure output, no fabricated times).
             const whole = fullText || nativeSegs.map((s) => s.text).join("");
             fused = whole ? [{ start: 0, end: dur || 0, text: whole }] : [];
             tsSource = "关闭后处理 (整段原文,无分段时间戳)";
@@ -780,7 +1105,7 @@ export default function App() {
               ? `非 AI 后处理 (整段文本按 ${tlSource} 匀速对齐)`
               : "非 AI 后处理 (整段文本按总时长匀速断句)";
           }
-          const joined = fused.map((f) => (f.text || "").trim()).filter(Boolean).join(" ") || fullText;
+          const joined = joinSegText(fused.map((f) => (f.text || "").trim()).filter(Boolean)) || fullText;
           out.stt = { text: joined, segments: fused, tsSource };
 
           push({
@@ -814,6 +1139,193 @@ export default function App() {
       }
     } else skip("stt", "未勾选");
 
+    // ── Stage 2.5: Align (forced alignment → precise char/word timestamps) ──
+    // We RESPECT the model's native 300s/inference cap (no engine change) and handle
+    // length entirely on the client. Two modes via the "分段对齐" toggle, both feeding a
+    // {clip,text,offset}[] window list into runAlignWindows (mode only changes how the
+    // list is built):
+    //   • OFF (whole-clip): one window if ≤5min; if longer, AUTO-SPLIT the audio into
+    //     ≤290s windows and the text proportionally (sentence-aware) — one call per
+    //     window. Critically each call gets only the text for its own audio, so the
+    //     model is never overfed (that overfeeding is what piled everything at the end).
+    //   • ON (per VAD/Diar segment): align each STT segment's audio against its own
+    //     text (each <300s naturally). The accurate long-audio path.
+    // On success Align becomes the PRIMARY timeline (supersedes the STT heuristic);
+    // the heuristic stays as fallback when Align is off or yields nothing.
+    const ALIGN_WIN_S = 290;     // stay safely under the model's 300s cap
+    const ALIGN_CONCURRENCY = 2; // forced aligner is heavy; keep parallelism low
+    // Attribute units to speakers (diar overlap), publish out.align, and — if any units
+    // came back — rebuild `fused` from the real timestamps. Shared by both modes.
+    const finishAlign = (
+      units: Seg[],
+      refText: string,
+      meta: { mode: string; textSrc: string; lang?: string; calls: number; ok: number; lastStatus: number; errSample: string; durationMs: number }
+    ) => {
+      // Speaker per unit: per-segment mode already carries a STABLE window speaker
+      // (don't re-derive — re-deriving per unit makes short function words like "a"/"the"
+      // land in diar micro-gaps → "" → absurd single-word lines). Only derive by overlap
+      // for units that have no speaker yet (whole-clip mode), then median-smooth single-
+      // unit islands so one stray unit can't split a line.
+      let withSpk = units.map((u) => ({ ...u }));
+      if (diarSegs.length) {
+        for (let i = 0; i < withSpk.length; i++) {
+          if (withSpk[i].speaker !== undefined) continue;
+          let best = "",
+            bestOv = 0;
+          for (const d of diarSegs) {
+            const ov = Math.max(0, Math.min(withSpk[i].end, d.end) - Math.max(withSpk[i].start, d.start));
+            if (ov > bestOv) {
+              bestOv = ov;
+              best = d.speaker || "";
+            }
+          }
+          withSpk[i].speaker = best;
+        }
+        for (let i = 1; i < withSpk.length - 1; i++) {
+          const a = withSpk[i - 1].speaker || "",
+            b = withSpk[i].speaker || "",
+            c = withSpk[i + 1].speaker || "";
+          if (b !== a && b !== c && a === c) withSpk[i].speaker = a;
+        }
+      }
+      out.align = { units: withSpk, text: refText, textSource: meta.textSrc, language: meta.lang || "(自动)", mode: meta.mode, withSpeaker: diarSegs.length > 0, calls: meta.calls };
+      // Line text comes from the ORIGINAL text (spaces/punctuation preserved); Align
+      // supplies only timing. One grouping rule for both modes (speaker change / sentence
+      // / pause / duration / length) — merges same-speaker turns yet still breaks a long
+      // monologue into readable lines.
+      // When the user enabled VAD/Diarize, the STT step already produced good segments
+      // (text + speaker). Use THAT as the fused skeleton and let Align only tighten the
+      // boundaries — this respects the segmentation the user liked instead of re-grouping
+      // (which over-merged spaceless CJK into one block). Without VAD/Diarize there is no
+      // trustworthy skeleton (whole-clip = 1 block), so fall back to sentence-level grouping.
+      const hasSkeleton = (diarSegs.length > 0 || vadSegs.length > 0) && fused.length > 0;
+      const hasPunct = /[。！？.!?]/.test(refText);
+      // With a diar/vad skeleton: if the text has punctuation, keep the speaker timeline but
+      // snap every boundary to a punctuation mark (no mid-word/mid-sentence cuts); if it has
+      // none, the timeline IS the segmentation (just tighten times). Without a skeleton, group
+      // purely by punctuation.
+      const alignFused = hasSkeleton
+        ? hasPunct
+          ? snapRunsToPunct(fused, withSpk, refText)
+          : refineSegmentsWithAlign(fused, withSpk)
+        : groupAlignUnitsRef(withSpk, refText);
+      if (alignFused.length) {
+        fused = alignFused; // Align-primary: real timestamps supersede the heuristic
+        alignPrimary = true;
+        // Align and the STT heuristic timestamping are mutually exclusive — only one is ever
+        // in effect. So when Align owns the final timeline, REPLACE the STT row's timestamp
+        // source (don't append) so it never advertises "非 AI 后处理" next to Align.
+        const sttRec = records.find((r) => r.cap === "stt" && r.invoked);
+        if (sttRec && !/Align/.test(sttRec.responseSummary || "")) {
+          const note = "由 Align 强制对齐接管(精确时间)";
+          if (sttRec.responseSummary) {
+            sttRec.responseSummary = /· 时间戳:/.test(sttRec.responseSummary)
+              ? sttRec.responseSummary.replace(/· 时间戳:.*$/, `· 时间戳:${note}`)
+              : sttRec.responseSummary + ` · 时间戳:${note}`;
+          }
+          if (sttRec.params && typeof sttRec.params === "object" && "时间戳来源" in (sttRec.params as object)) {
+            (sttRec.params as Record<string, unknown>)["时间戳来源"] = `${note} — STT 自身分段时间戳已被取代`;
+          }
+          setExec([...records]);
+        }
+      }
+      push({
+        cap: "align",
+        invoked: true,
+        endpoint: "/v1/audio/align",
+        method: `POST ×${meta.calls}${meta.calls > 1 ? `(并发${ALIGN_CONCURRENCY})` : ""}`,
+        model: selModel.align,
+        params: {
+          模式: meta.mode,
+          文本来源: meta.textSrc,
+          语言: meta.lang || "(自动检测)",
+          调用数: meta.calls,
+          说话人归属: diarSegs.length ? "按 Diarize overlap" : "(无 Diarize)",
+        },
+        status: meta.lastStatus,
+        ok: meta.ok === meta.calls && withSpk.length > 0,
+        durationMs: meta.durationMs,
+        responseSummary:
+          `${meta.mode} · 对齐 ${withSpk.length} 个单元(来源:${meta.textSrc}),调用 ${meta.ok}/${meta.calls} 成功` +
+          (diarSegs.length ? " · 已按说话人归属" : "") +
+          (alignFused.length ? ` · 已作为融合时间轴(${alignFused.length} 段${hasSkeleton ? (hasPunct ? ",Diar 时间轴+边界对齐标点" : ",按 Diar 分段精修边界") : ""})` : "") +
+          (meta.ok < meta.calls && meta.errSample ? ` · 首个错误 ${meta.errSample}` : ""),
+        rawResponse: JSON.stringify(withSpk.slice(0, 60), null, 2),
+      });
+    };
+
+    if (enabled.align) {
+      const model = selModel.align;
+      const sttText = (out.stt?.text || "").trim();
+      const manual = manualText.trim();
+      const dur = upload!.durationSec || 0;
+      const lang = alignLangName(source === "auto" ? detectLang(sttText || manual) : source);
+      // per-segment mode needs VAD/Diar segmentation AND per-segment STT text (fused)
+      const perSeg = alignPerSeg && (enabled.vad || enabled.diar) && fused.length > 0;
+      if (!model) skip("align", "无可用模型");
+      else if (perSeg) {
+        // ── 分段对齐: one window per STT segment (each already <300s) ──
+        try {
+          const dec = await getDecoded();
+          const segs = fused.filter((f) => (f.text || "").trim());
+          const wins: AlignWin[] = segs.map((s) => ({ clip: sliceWav(dec, s.start, s.end), text: s.text || "", offset: s.start, speaker: s.speaker }));
+          const src = enabled.diar ? "Diarize" : "VAD";
+          let done = 0;
+          const t0 = Date.now();
+          setProgress({ cap: "align", phase: `分段对齐中(${src})`, done: 0, total: wins.length });
+          const r = await runAlignWindows(settings, model, wins, lang, ALIGN_CONCURRENCY, () =>
+            setProgress({ cap: "align", phase: `分段对齐中(${src})`, done: ++done, total: wins.length })
+          );
+          finishAlign(r.units, joinSegText(segs.map((s) => s.text || "")), { mode: `分段对齐(逐段·${src})`, textSrc: "STT 分段文本", lang, calls: r.total, ok: r.ok, lastStatus: r.lastStatus, errSample: r.errSample, durationMs: Date.now() - t0 });
+        } catch (e: any) {
+          push({ cap: "align", invoked: true, model, error: String(e.message || e) });
+        }
+      } else {
+        // ── whole-clip: 1 window if ≤5min, else auto-split audio + text ──
+        const alignText = sttText || manual;
+        const textSrc = sttText ? "STT 转写" : manual ? "文本框参考文稿" : "";
+        if (!alignText) skip("align", "需要文本:勾选 STT,或在文本框输入参考文稿");
+        else {
+          try {
+            const dec = await getDecoded();
+            const total = dur || dec.duration || 0;
+            const wins: AlignWin[] = [];
+            if (total <= ALIGN_WIN_S + 5) {
+              wins.push({ clip: sliceWav(dec, 0, total || ALIGN_WIN_S), text: alignText, offset: 0 });
+            } else {
+              const nWin = Math.ceil(total / ALIGN_WIN_S);
+              const winLen = total / nWin;
+              const parts = splitTextN(alignText, nWin);
+              for (let i = 0; i < nWin; i++) {
+                const a = i * winLen,
+                  b = Math.min(total, (i + 1) * winLen);
+                wins.push({ clip: sliceWav(dec, a, b), text: parts[i] || "", offset: a });
+              }
+            }
+            const phase = wins.length > 1 ? `整段自动分段对齐中(${wins.length}×≤${ALIGN_WIN_S}s)` : "强制对齐中(整段)";
+            let done = 0;
+            const t0 = Date.now();
+            setProgress({ cap: "align", phase, done: 0, total: wins.length });
+            const r = await runAlignWindows(settings, model, wins, lang, ALIGN_CONCURRENCY, () =>
+              setProgress({ cap: "align", phase, done: ++done, total: wins.length })
+            );
+            finishAlign(r.units, alignText, {
+              mode: wins.length > 1 ? `整段自动分段(${wins.length}×≤${ALIGN_WIN_S}s)` : "整段一次",
+              textSrc,
+              lang,
+              calls: r.total,
+              ok: r.ok,
+              lastStatus: r.lastStatus,
+              errSample: r.errSample,
+              durationMs: Date.now() - t0,
+            });
+          } catch (e: any) {
+            push({ cap: "align", invoked: true, model, error: String(e.message || e) });
+          }
+        }
+      }
+    } else skip("align", "未勾选");
+
     // ── Stage 3: Translate (per-line over the fused transcript) ────────
     if (enabled.translate) {
       const model = selModel.translate;
@@ -821,7 +1333,7 @@ export default function App() {
       // translation (the nice part). Each call is fail-fast (tries=1) so it degrades
       // gracefully instead of stacking gateway timeouts. Whole-text otherwise.
       const lines = translatePerSeg ? fused.filter((f) => (f.text || "").trim()) : [];
-      const wholeText = out.stt?.text || (fused.length ? fused.map((f) => f.text || "").join(" ").trim() : "");
+      const wholeText = out.stt?.text || (fused.length ? joinSegText(fused.map((f) => f.text || "")).trim() : "");
       // Source language: explicit pick, or auto-detect. The document-level guess
       // (over the whole transcript) is the stable fallback for short per-line text.
       const docLang = source === "auto" ? detectLang(wholeText, "eng_Latn") : source;
@@ -1164,8 +1676,45 @@ export default function App() {
           )}
         </Card>
 
+        {/* shared text box: translation source (no audio) / Align reference (with audio) */}
+        <Card title="③ 文本输入 — 翻译源(无音频) / Align 参考文稿(有音频)">
+          {(() => {
+            // Two roles depending on whether audio is present:
+            //   • no audio + Translate → plain-text translation source
+            //   • audio + Align        → reference transcript for forced alignment
+            //     (used as a FALLBACK when STT is off / yields nothing)
+            const boxActive = (!upload && enabled.translate) || (!!upload && enabled.align);
+            const has = manualText.trim().length > 0;
+            return (
+              <div className="flex flex-col gap-1">
+                <textarea
+                  className="input min-h-[120px] w-full"
+                  rows={5}
+                  disabled={!boxActive}
+                  value={manualText}
+                  onChange={(e) => setManualText(e.target.value)}
+                  placeholder="未上传音频 → 纯文本翻译(在此输入/粘贴文字);已上传音频 + 启用 Align → 可填参考文稿(留空则用 STT 转写文本对齐)"
+                />
+                <span className={`text-xs ${boxActive && has ? "text-emerald-400" : boxActive ? "text-neutral-500" : "text-neutral-600"}`}>
+                  {upload
+                    ? enabled.align
+                      ? enabled.stt
+                        ? "Align 将优先使用 STT 转写文本对齐;此框作为 STT 无输出时的后备参考文稿"
+                        : has
+                          ? "Align 将使用此文本框内容做强制对齐(未勾选 STT)"
+                          : "请输入参考文稿:未勾选 STT 时 Align 需要此框提供文本"
+                      : "已上传音频:勾选 Align 后,此框可作对齐参考文稿(翻译则以音频转写为源)"
+                    : has
+                      ? "将翻译此文本框内容(纯文本模式,无需音频)"
+                      : "未上传音频:可在此输入文字做纯文本翻译"}
+                </span>
+              </div>
+            );
+          })()}
+        </Card>
+
         {/* capabilities */}
-        <Card title="③ 能力开关(仅勾选项会被调用)">
+        <Card title="④ 能力开关(仅勾选项会被调用)">
           <div className="space-y-2">
             {CAP_ORDER.map((cap) => {
               const list = modelsByMode[CAP_MODE[cap]] || [];
@@ -1258,23 +1807,6 @@ export default function App() {
                           {perSegWarn ? "⚠ 需分段时间戳,否则=整段翻译" : "按 STT 分段逐行"}
                         </span>
                       )}
-                      <div className="flex w-full basis-full flex-col gap-1 pt-1">
-                        <textarea
-                          className="input min-h-[120px] w-full"
-                          rows={5}
-                          disabled={!enabled.translate || !!upload}
-                          value={manualText}
-                          onChange={(e) => setManualText(e.target.value)}
-                          placeholder="纯文本翻译:未上传音频时,在此输入/粘贴文字可直接翻译(已上传音频时本框被忽略)"
-                        />
-                        <span className={`text-xs ${upload ? "text-neutral-600" : manualText.trim() ? "text-emerald-400" : "text-neutral-500"}`}>
-                          {upload
-                            ? "已上传音频 → 忽略此文本框(以音频转写结果为翻译源)"
-                            : manualText.trim()
-                              ? "将翻译此文本框内容(纯文本模式,无需音频)"
-                              : "未上传音频:可在此输入文字做纯文本翻译"}
-                        </span>
-                      </div>
                         </div>
                       );
                     })()}
@@ -1287,18 +1819,25 @@ export default function App() {
                       const perSegOn = perSegActive && sttPerSeg;
                       // The align toggle is only meaningful for a timestamp-less engine (Qwen)
                       // when there is NO VAD/Diarize (and not in per-segment mode).
-                      const alignActive = enabled.stt && !fuseOn && !sttIsWhisper;
+                      // When Align is enabled it produces the final (precise) timeline and
+                      // supersedes STT's own timestamp post-processing — so the toggle is
+                      // moot for the result; grey it out to avoid a "switch does nothing"
+                      // confusion (it still only governs STT's standalone view otherwise).
+                      const alignTakenOver = enabled.align;
+                      const alignActive = enabled.stt && !fuseOn && !sttIsWhisper && !alignTakenOver;
                       const status = !enabled.stt
                         ? ""
-                        : perSegOn
-                          ? `逐段发送 · 按 ${enabled.diar ? "Diarize" : "VAD"} 切片转写(并发${sttConc})`
-                          : fuseOn
-                            ? `整段一次 · 按 ${enabled.diar ? "Diarize" : "VAD"} 分段协同(必融合)`
-                            : sttIsWhisper
-                              ? "整段一次 · Whisper 引擎原生分段"
-                              : alignTs
-                                ? "整段一次 · 按静音检测/匀速对齐(造时间戳)"
-                                : "整段一次 · 整段原文(不造时间戳)";
+                        : alignTakenOver
+                          ? "整段一次 · 时间戳由 Align 接管(强制对齐提供精确时间)"
+                          : perSegOn
+                            ? `逐段发送 · 按 ${enabled.diar ? "Diarize" : "VAD"} 切片转写(并发${sttConc})`
+                            : fuseOn
+                              ? `整段一次 · 按 ${enabled.diar ? "Diarize" : "VAD"} 分段协同(必融合)`
+                              : sttIsWhisper
+                                ? "整段一次 · Whisper 引擎原生分段"
+                                : alignTs
+                                  ? "整段一次 · 按静音检测/匀速对齐(造时间戳)"
+                                  : "整段一次 · 整段原文(不造时间戳)";
                       return (
                         <div className="flex w-full basis-full flex-wrap items-center gap-3 border-t border-neutral-800/60 pt-2">
                           {/* Interactive controls are anchored left with constant-width labels
@@ -1342,17 +1881,23 @@ export default function App() {
                           <label
                             className={`flex shrink-0 items-center gap-1.5 whitespace-nowrap text-xs ${alignActive ? "text-neutral-300" : "text-neutral-600"}`}
                             title={
-                              fuseOn
-                                ? "已选 VAD/Diarize,STT 必与之协同融合,本开关不生效"
-                                : sttIsWhisper
-                                  ? "Whisper 自带时间戳,本开关只对 Qwen 等无时间戳引擎生效"
-                                  : "开:整段文本按静音检测/总时长匀速对齐出时间戳。关:显示 Qwen 整段原文,不造分段时间戳"
+                              alignTakenOver
+                                ? "已勾选 Align:最终时间戳由强制对齐(精确)提供,本开关不影响结果,已置灰"
+                                : fuseOn
+                                  ? "已选 VAD/Diarize,STT 必与之协同融合,本开关不生效"
+                                  : sttIsWhisper
+                                    ? "Whisper 自带时间戳,本开关只对 Qwen 等无时间戳引擎生效"
+                                    : "开:整段文本按静音检测/总时长匀速对齐出时间戳。关:显示 Qwen 整段原文,不造分段时间戳"
                             }
                           >
                             <input
                               type="checkbox"
                               disabled={!alignActive}
-                              checked={alignTs}
+                              // When Align has taken over, show UNCHECKED (not just greyed) — the
+                              // heuristic genuinely does not run, so a lingering check would imply
+                              // it still triggers. The user's real preference (alignTs) is kept and
+                              // restored once Align is unchecked.
+                              checked={alignTs && !alignTakenOver}
                               onChange={(e) => setAlignTs(e.target.checked)}
                             />
                             时间戳后处理对齐
@@ -1360,6 +1905,54 @@ export default function App() {
                           <span className="ml-auto shrink-0 text-xs text-neutral-500" title="STT 的调用方式与分段来源;详见执行面板。">
                             {status}
                           </span>
+                        </div>
+                      );
+                    })()}
+                  {cap === "align" &&
+                    (() => {
+                      const dur = upload?.durationSec || 0;
+                      const fuseOn = enabled.vad || enabled.diar;
+                      // 分段对齐 needs VAD/Diar (segments) AND STT (per-segment text).
+                      const perSegActive = enabled.align && fuseOn && enabled.stt;
+                      const perSegOn = perSegActive && alignPerSeg;
+                      const willSplit = enabled.align && !perSegOn && dur > 295;
+                      const needText = enabled.align && !!upload && !enabled.stt && !manualText.trim();
+                      const status = !enabled.align
+                        ? ""
+                        : !upload
+                          ? "需上传音频(Align = 音频 + 已知文本 → 精确时间戳)"
+                          : needText
+                            ? "缺文本:勾选 STT 或在『③ 文本输入』框填参考文稿"
+                            : perSegOn
+                              ? `分段对齐 · 按 ${enabled.diar ? "Diarize" : "VAD"} 逐段(每段 <5min,精确)`
+                              : willSplit
+                                ? `整段 · 音频>5min 自动按 ≤${290}s 分段(${Math.ceil(dur / 290)} 段)+ 文本同步切分`
+                                : `整段一次 · 文本来源:${enabled.stt ? "STT 转写" : "文本框"}${enabled.diar ? " · 按 Diarize 归属说话人" : ""}`;
+                      return (
+                        <div className="flex w-full basis-full flex-wrap items-center gap-3 border-t border-neutral-800/60 pt-2">
+                          <label
+                            className={`flex shrink-0 items-center gap-1.5 whitespace-nowrap text-xs ${perSegActive ? "text-neutral-300" : "text-neutral-600"}`}
+                            title={
+                              perSegActive
+                                ? "开:按 VAD/Diarize 段逐段对齐(每段都 <5min,音频与文本天然对应,最准、可处理任意长度);关:整段对齐(>5min 时自动按≤290s切分+文本同步切分)。"
+                                : "需同时勾选 STT 和 VAD/Diarize 才能分段对齐(逐段需要每段的转写文本)。"
+                            }
+                          >
+                            <input
+                              type="checkbox"
+                              disabled={!perSegActive}
+                              checked={alignPerSeg}
+                              onChange={(e) => setAlignPerSeg(e.target.checked)}
+                            />
+                            分段对齐
+                          </label>
+                          <span
+                            className="text-xs text-neutral-500"
+                            title="强制对齐:给定音频与已知文本,输出每字/词精确起止时间。模型单次上限 5 分钟:不分段时,>5min 会在本应用侧自动切音频+切文本多次调用(尊重模型原生限制,不改引擎)。"
+                          >
+                            Align = 音频 + 文本 → 精确字/词时间戳(WhisperX 式)
+                          </span>
+                          <span className={`ml-auto shrink-0 text-xs ${needText ? "text-amber-400" : "text-neutral-500"}`}>{status}</span>
                         </div>
                       );
                     })()}
@@ -1412,7 +2005,7 @@ export default function App() {
 
         {/* execution transparency */}
         {exec.length > 0 && (
-          <Card title="④ 执行透明面板(自证:只调了勾选项)">
+          <Card title="⑤ 执行透明面板(自证:只调了勾选项)">
             <div className="space-y-2">
               {CAP_ORDER.map((cap) => {
                 const r = exec.find((x) => x.cap === cap);
@@ -1425,7 +2018,7 @@ export default function App() {
 
         {/* fused workflow result */}
         {exec.length > 0 && (
-          <Card title="⑤ 工作流融合结果(各能力按依赖编排后的统一产出)">
+          <Card title="⑥ 工作流融合结果(各能力按依赖编排后的统一产出)">
             <FusionView merged={merged} diarSegs={asSegments(results.diar)} vadSegs={asSegments(results.vad)} embed={results.embed} />
             <div className="mt-5 flex gap-2">
               <button className="btn" onClick={() => exportFile("txt")}>
@@ -1443,8 +2036,9 @@ export default function App() {
 
         {/* per-capability raw outputs (evidence) */}
         {Object.keys(results).filter((k) => k !== "_fused").length > 0 || enhanceUrl ? (
-          <Card title="⑥ 各能力单独输出(工作流中间产物 / 证据)">
+          <Card title="⑦ 各能力单独输出(工作流中间产物 / 证据)">
             {results.stt && <SttView data={results.stt} />}
+            {results.align && <AlignView data={results.align} />}
             {results.translate && <TranslateView data={results.translate} />}
             {results.vad && <SegView title="VAD 语音段" segs={asSegments(results.vad)} />}
             {results.diar && <DiarView segs={asSegments(results.diar)} />}
@@ -1555,6 +2149,45 @@ function SttView({ data }: { data: any }) {
             </div>
           ))}
         </div>
+      )}
+    </div>
+  );
+}
+function AlignView({ data }: { data: any }) {
+  const units: Seg[] = Array.isArray(data?.units) ? data.units : [];
+  const speakers = Array.from(new Set(units.map((u) => u.speaker || "").filter(Boolean)));
+  const text = data?.text || units.map((u) => u.text || "").join("");
+  return (
+    <div className="mb-4">
+      <h3 className="mb-1 flex flex-wrap items-center gap-2 font-medium">
+        强制对齐 Align
+        <span className="rounded bg-neutral-800 px-1.5 py-0.5 text-[10px] font-normal text-neutral-400">
+          {data.mode || "对齐"} · 文本来源:{data.textSource || "?"} · 语言:{data.language || "?"}
+          {data.calls > 1 ? ` · ${data.calls} 次调用` : ""}
+        </span>
+      </h3>
+      {!units.length ? (
+        <p className="rounded bg-black/40 p-2 text-sm text-neutral-400">(无对齐单元)</p>
+      ) : (
+        <>
+          <p className="whitespace-pre-wrap rounded bg-black/40 p-2 text-sm text-neutral-200">{text || "(空)"}</p>
+          <div className="mt-2 flex max-h-56 flex-wrap gap-1 overflow-auto">
+            {units.map((u, i) => (
+              <span
+                key={i}
+                className="inline-flex flex-col items-center rounded border border-neutral-800 bg-neutral-900/60 px-1.5 py-0.5"
+                title={`${fmtTime(u.start)}–${fmtTime(u.end)}${u.speaker ? ` · ${u.speaker}` : ""}`}
+                style={u.speaker ? { borderColor: speakerColor(u.speaker, speakers) } : undefined}
+              >
+                <span className="text-sm text-neutral-100">{u.text || "·"}</span>
+                <span className="text-[10px] tabular-nums text-neutral-500">{u.start.toFixed(2)}</span>
+              </span>
+            ))}
+          </div>
+          <p className="mt-1 text-xs text-neutral-500">
+            {units.length} 个对齐单元(字/词级精确时间戳){speakers.length ? ` · 已按 ${speakers.length} 位说话人归属(悬停看说话人)` : ""}
+          </p>
+        </>
       )}
     </div>
   );

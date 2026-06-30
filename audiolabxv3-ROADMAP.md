@@ -10,7 +10,7 @@
 
 **ASR（自动语音识别）与 STT（Speech-to-Text）在业界通用为同义**，均指把语音转成文字；本文档统一以 `stt` mode 表示。它是整条音频能力线的地基与公共入口，故置于所有阶段之前。
 
-- **贯穿三阶段**：M1 以它为主轴（diar / word_timestamps / translate 都基于转写结果）；M2 Typeless 是它的流式形态（`stt_stream`）；M3 本地化 `ASR → translate → tts` 的第一步也是它。
+- **贯穿三阶段**：M1 以它为主轴（diar / align / translate 都基于转写结果）；M2 Typeless 是它的流式形态（`stt_stream`）；M3 本地化 `ASR → translate → tts` 的第一步也是它。
 - **现状（两套引擎，同 `stt` mode，均 ✅ 已验证 + 接入 Gateway）**：
   - 引擎 A `faster-whisper`：范例 `Systran/faster-whisper-large-v3`，引擎 faster-whisper-server（CTranslate2），附带 word_timestamps。
   - 引擎 B `qwen3-asr`（2026-06-24 验证）：范例 `Qwen/Qwen3-ASR-1.7B`，仍是 download-only + 官方引擎，**复用** 官方 vLLM 镜像 `beclab/vllm-vllm-openai:v0.23.0-cu129`（v0.23.0 原生支持 Qwen3-ASR，`vllm serve` 直接暴露 `/v1/audio/transcriptions`；cu129 匹配集群 5090 驱动），启动时按需 `pip install librosa soundfile`。通过 chart 的 `MODEL_ENGINE=qwen3-asr` 选择，验证 jfk.wav 引擎级 + 网关数据面端到端 200。
@@ -22,7 +22,7 @@
 
 | 阶段 | 版本 | 场景 | 本阶段能力 |
 |---|---|---|---|
-| M1 | 1.12.7 | 会议转录 | stt · vad · diar · translate · word_timestamps · embed · enhance |
+| M1 | 1.12.7 | 会议转录 | stt · vad · diar · translate · align · embed · enhance |
 | M2 | 1.12.8 | Typeless 语音输入 | stt_stream（流式 ASR） |
 | M3 | 1.12.9 | YouTube / 播客本地化 | tts · tts_clone（translate 已于 M1 落地） |
 | M4 | 1.12.10 | 数字人 | 待确认（audio_s2s / tts_dialogue / diar_stream 等） |
@@ -31,7 +31,7 @@
 
 ## M1（1.12.7）会议转录
 
-**场景**：把多人、多语种、带噪的会议录音，变成带时间轴、分说话人、可读可翻译的纪要。流水线：降噪（enhance）→ 切音（vad）→ 转写（stt）→ 词级时间（word_timestamps）→ 分说话人（diar）→ 声纹（embed）→ 翻译（translate）。
+**场景**：把多人、多语种、带噪的会议录音，变成带时间轴、分说话人、可读可翻译的纪要。流水线：降噪（enhance）→ 切音（vad）→ 转写（stt）→ 强制对齐/词级时间（align）→ 分说话人（diar）→ 声纹（embed）→ 翻译（translate）。
 
 | 能力 | 范例模型 | 驱动引擎 | 复用 | 状态 | Gateway | 下一个范例 |
 |---|---|---|---|---|---|---|
@@ -40,11 +40,13 @@
 | **vad** 人声检测 | `onnx-community/silero-vad` | `/wrappers/vad.py`（whisper 自带 Silero+解码器） | ♻️ whisper | ✅ | ✅ | `pyannote/voice-activity-detection` |
 | **diar** 说话人分离 | `pyannote/speaker-diarization-community-1` | pyannote.audio，`/wrappers/diar.py` | 基准 pyannote | ✅ | ✅ | `pyannote/speaker-diarization-3.1` / NeMo Sortformer |
 | **translate** 文本机翻 | `entai2965/nllb-200-distilled-600M-ctranslate2` | `/wrappers/translate.py`（whisper 自带 ctranslate2+tokenizers） | ♻️ whisper | ✅ | ✅ | NLLB-1.3B / MADLAD-400 / SeamlessM4T |
-| **word_timestamps** 词级时间 | 随 stt 模型 | stt 原生 `verbose_json + word`，非独立 mode | — | ✅ | ✅ | WhisperX（更精对齐） |
+| **align** 强制对齐（音频+文本→词/字级时间） | `Qwen/Qwen3-ForcedAligner-0.6B`（Apache-2.0） | qwen-asr 工具包 NAR 对齐，`/wrappers/align.py`（♻️ 复用 vLLM cu129 镜像） | ♻️ vllm-openai | ⬜ | ⬜ | MFA（精度SOTA）· Seamless（多语种）；MMS/ctc-forced-aligner 因 CC-BY-NC 仅作非商用备选 |
 | **embed** 说话人向量 | `pyannote/embedding`（512 维） | `/wrappers/embed.py`（首次按需补 `omegaconf`） | ♻️ pyannote | ✅ | ✅ | wespeaker / ECAPA / TitaNet |
 | **enhance** 降噪增强 | `speechbrain/mtl-mimic-voicebank`（apache-2.0） | `/wrappers/enhance.py`（pyannote 自带 torch；首次按需补 speechbrain，自动探测增强类） | ♻️ pyannote | ✅ | ✅ | `speechbrain/sepformer-wham16k-enhancement` / DeepFilterNet3 / resemble-enhance |
 
-> **收尾（已完成）**：M1 七项能力引擎级 + Gateway 数据面已全部验证通过。translate / embed / enhance 经 gateway `v2.0.6-test5` 接入（新增 `/v1/translate` JSON 透传 + `/v1/audio/{embeddings,enhance}`，enhance 音频出），端到端 200。Whisper 自带的语音→英文 `translations` 接口随 stt 暴露，不占 `translate` mode（`translate` 专指文本→文本机翻）。
+> **收尾进度**：M1 中 **stt / vad / diar / translate / embed / enhance 六项**引擎级 + Gateway 数据面已全部验证通过。translate / embed / enhance 经 gateway `v2.0.6-test5` 接入（新增 `/v1/translate` JSON 透传 + `/v1/audio/{embeddings,enhance}`，enhance 音频出），端到端 200。Whisper 自带的语音→英文 `translations` 接口随 stt 暴露，不占 `translate` mode（`translate` 专指文本→文本机翻）。
+>
+> **能力口径修正（2026-06-30）**：删除此前自造的 `word_timestamps`（它并非独立模型，只是 STT 的原生输出——Whisper 的 `verbose_json + word` 仍随 stt 暴露，保留但不单列为能力）。新提级 **`align` 强制对齐**为独立能力（音频+文本→精确时间戳，可对齐任意文本），范例 `Qwen/Qwen3-ForcedAligner-0.6B`，归 M1，**待实现**（选型见 `audiolabxv3-docs/align能力_选型调研.md`）。
 
 ---
 
@@ -87,7 +89,7 @@
 |---|---|---|
 | `beclab/fedirz-faster-whisper-server:0.6.0-rc.3-cuda` | CTranslate2 / faster-whisper | stt（原生）· vad · translate · word_timestamps |
 | `beclab/maximsachs-pyannote_fastapi:4.0.4` | PyTorch / pyannote.audio（embed 首次补 omegaconf、enhance 首次补 speechbrain） | diar（原生）· embed · enhance |
-| `beclab/vllm-vllm-openai:v0.23.0-cu129` | vLLM（`vllm serve`，首次补 librosa/soundfile） | stt（`MODEL_ENGINE=qwen3-asr`，原生 `/v1/audio/transcriptions`） |
+| `beclab/vllm-vllm-openai:v0.23.0-cu129` | vLLM（`vllm serve`，首次补 librosa/soundfile；align 首次补 qwen-asr） | stt（`MODEL_ENGINE=qwen3-asr`，原生 `/v1/audio/transcriptions`）· align（`Qwen3-ForcedAligner`，qwen-asr 工具包，`/wrappers/align.py`，待建） |
 | 待转/待建 | 流式 ASR / kokoro / CosyVoice / 语音对话 | stt_stream · tts · tts_clone · audio_s2s |
 
 ## 附：横向事项
