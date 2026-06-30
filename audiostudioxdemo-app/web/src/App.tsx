@@ -3,12 +3,14 @@ import {
   audioMultipart,
   fetchDefaultModels,
   fetchProviderModels,
+  fetchSilences,
   fetchUploadAudio,
   transcodeToMp3,
   translate,
   uploadMedia,
   type CallResult,
 } from "./api";
+import { alignTextToTimeline, distributeTextOverRuns } from "./align";
 import {
   CAP_LABEL,
   CAP_MODE,
@@ -19,7 +21,7 @@ import {
   type Settings,
   type UploadInfo,
 } from "./types";
-import { concatToWav, decodeAudio, mapLimit, sliceWav, type DecodedAudio } from "./audio";
+import { decodeAudio, mapLimit, sliceWav, type DecodedAudio } from "./audio";
 import { franc } from "franc-min";
 
 const LS_KEY = "audiostudioxdemo.settings";
@@ -256,6 +258,18 @@ export default function App() {
   // Fan-out concurrency (user-tunable sliders). STT default tracks the selected STT
   // model (see effect below); translate is model-agnostic (NLLB is light).
   const [sttConc, setSttConc] = useState(4);
+  // STT timestamp post-processing: ON = distribute the whole-clip transcript over the
+  // VAD/Diarize (or silencedetect) timeline to get per-segment timestamps; OFF = show the
+  // engine's raw output (Qwen → one untimed block, Whisper → native verbose_json segments).
+  const [alignTs, setAlignTs] = useState(true);
+  // Per-segment STT fan-out: when ON (and VAD/Diarize is selected) the audio is sliced by
+  // the coalesced VAD/Diarize windows and each is transcribed separately (N calls). Slower
+  // but higher quality (full context per turn). OFF = the whole-clip single-call path.
+  const [sttPerSeg, setSttPerSeg] = useState(false);
+  // Per-segment (per-line) translation: ON = translate each fused transcript line (concurrent,
+  // shown per-segment in the fused view); OFF = one whole-text translation call. Default OFF
+  // — like every other default, it minimises the number of gateway calls.
+  const [translatePerSeg, setTranslatePerSeg] = useState(false);
   const [translateConc, setTranslateConc] = useState(4);
   const [upload, setUpload] = useState<UploadInfo | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -415,116 +429,41 @@ export default function App() {
     };
 
     // ── Stage 0: Enhance (pre-processing) ──────────────────────────────
-    // Whole-clip enhance OOMs on long audio (the speechbrain model loads the entire
-    // waveform onto the GPU — a 1h clip tried to allocate 15 GiB). So past a threshold
-    // we chunk: enhance ~3-min windows, then concatenate the enhanced clips back into
-    // one track (with a short fade at each join to hide seams). Each chunk needs <~1 GiB.
-    const ENH_WHOLE_MAX = 900; // <= 15 min → single whole-clip call (15-min whole is PROVEN OK)
-    const ENH_CHUNK = 900; // 15-min windows when chunking (~3.5 GiB each, fits the pod)
-    const ENH_CONC = 1; // big (15-min) chunks → run serial to keep peak VRAM low
+    // Whole-clip enhance: the engine now chunks internally (sliding window + crossfade
+    // overlap-add, see enhance.py), so peak VRAM is bounded by one window and the client
+    // always sends the FULL clip in a single request regardless of duration.
     if (enabled.enhance) {
       const model = selModel.enhance;
       if (!model) skip("enhance", "无可用模型");
       else {
         try {
-          const decOrig = await decodeAudio(original); // decode once for slicing (doesn't touch the working cache)
-          const dur = decOrig.duration || upload!.durationSec || 0;
-          if (dur > ENH_WHOLE_MAX) {
-            // CHUNKED enhance: slice → enhance each → decode → concat back to one track.
-            const wins: { start: number; end: number }[] = [];
-            for (let st = 0; st < dur; st += ENH_CHUNK) wins.push({ start: st, end: Math.min(dur, st + ENH_CHUNK) });
-            const t0 = Date.now();
-            let okCount = 0,
-              errSample = "",
-              aborted = false,
-              lastStatus = 0;
-            let enhDone = 0;
-            setProgress({ cap: "enhance", phase: "分块降噪", done: 0, total: wins.length });
-            const blobs = await mapLimit(wins, ENH_CONC, async (w) => {
-              if (aborted) return null as Blob | null;
-              const clip = sliceWav(decOrig, w.start, w.end);
-              const res = await callRetry(() => audioMultipart(settings, "enhance", clip, model, {}, true), 2);
-              lastStatus = res.status;
-              if (res.ok && res.blob) {
-                okCount++;
-                setProgress({ cap: "enhance", phase: "分块降噪", done: ++enhDone, total: wins.length });
-                return res.blob;
-              }
-              if (!errSample) errSample = isEdgeTimeout(res) ? `${res.status} 边缘超时` : `${res.status}: ${errBody(res)}`;
-              if (isCircuitOpen(res)) aborted = true;
-              setProgress({ cap: "enhance", phase: "分块降噪", done: ++enhDone, total: wins.length });
-              return null;
-            });
-            // decode enhanced chunks; for any failed chunk fall back to the ORIGINAL slice
-            // so the reassembled track keeps full length & timing (downstream slices by time).
-            const parts: { data: Float32Array; sampleRate: number }[] = [];
-            for (let i = 0; i < wins.length; i++) {
-              let dec: DecodedAudio | null = null;
-              if (blobs[i]) {
-                try {
-                  dec = await decodeAudio(blobs[i]!);
-                } catch {
-                  dec = null;
-                }
-              }
-              if (!dec) dec = await decodeAudio(sliceWav(decOrig, wins[i].start, wins[i].end));
-              parts.push({ data: dec.data, sampleRate: dec.sampleRate });
-            }
-            // compress the reassembled WAV to MP3 — a 1h enhanced track is ~115 MB of WAV
-            // and would 413 at the edge when sent to vad/diar downstream.
-            const mergedWav = concatToWav(parts);
-            const merged = await transcodeToMp3(mergedWav).catch(() => mergedWav);
-            setEnhanceUrl(URL.createObjectURL(merged));
+          setProgress({ cap: "enhance", phase: "整段降噪中", done: 0, total: 0 });
+          const res = await callRetry(() => audioMultipart(settings, "enhance", original, model, {}, true));
+          if (res.blob) {
+            // engine returns WAV → compress to MP3 so it stays edge-safe downstream
+            const enhanced = await transcodeToMp3(res.blob).catch(() => res.blob!);
+            setEnhanceUrl(URL.createObjectURL(enhanced));
             if (enhancePre) {
-              workingAudio = merged;
-              workingLabel = "增强后音频(分块拼接)";
+              workingAudio = enhanced;
+              workingLabel = "增强后音频";
               decoded = null; // force downstream to re-decode the enhanced track
             }
-            push({
-              cap: "enhance",
-              invoked: true,
-              endpoint: "/v1/audio/enhance",
-              method: `POST ×${wins.length}(分块${ENH_CHUNK}s,并发${ENH_CONC})`,
-              model,
-              params: { 角色: enhancePre ? "前处理 → 后续步骤使用增强后的音频" : "仅前后对比(不作为后续输入)", 分块: `${wins.length}×${ENH_CHUNK}s` },
-              status: lastStatus,
-              ok: okCount === wins.length && !aborted,
-              durationMs: Date.now() - t0,
-              responseSummary:
-                `分块降噪 ${wins.length} 块,成功 ${okCount}/${wins.length},已拼接为整段(${merged.size} B)` +
-                (aborted ? " · 触发熔断已中止" : "") +
-                (okCount < wins.length && errSample ? ` · 失败块用原音替代 · 首个错误 ${errSample}` : ""),
-              rawResponse: `[concatenated WAV ${merged.size} B, ${wins.length} chunks]`,
-            });
-          } else {
-            setProgress({ cap: "enhance", phase: "整段降噪中", done: 0, total: 0 });
-            const res = await callRetry(() => audioMultipart(settings, "enhance", original, model, {}, true));
-            if (res.blob) {
-              // engine returns WAV → compress to MP3 so it stays edge-safe downstream
-              const enhanced = await transcodeToMp3(res.blob).catch(() => res.blob!);
-              setEnhanceUrl(URL.createObjectURL(enhanced));
-              if (enhancePre) {
-                workingAudio = enhanced;
-                workingLabel = "增强后音频";
-                decoded = null; // force downstream to re-decode the enhanced track
-              }
-            }
-            push({
-              cap: "enhance",
-              invoked: true,
-              endpoint: "/v1/audio/enhance",
-              method: "POST",
-              model,
-              params: { 角色: enhancePre ? "前处理 → 后续步骤使用增强后的音频" : "仅前后对比(不作为后续输入)" },
-              status: res.status,
-              ok: res.ok,
-              durationMs: res.durationMs,
-              responseSummary: res.blob
-                ? `增强音频 ${res.blob.size} B${enhancePre ? ",后续步骤将使用它" : "(后续仍用原始音频)"}`
-                : res.ok ? "无音频输出" : `失败 ${res.status}: ${errBody(res)}`,
-              rawResponse: res.blob ? `[binary ${res.blob.size} B ${res.contentType}]` : JSON.stringify(res.json ?? res.text, null, 2)?.slice(0, 4000),
-            });
           }
+          push({
+            cap: "enhance",
+            invoked: true,
+            endpoint: "/v1/audio/enhance",
+            method: "POST",
+            model,
+            params: { 角色: enhancePre ? "前处理 → 后续步骤使用增强后的音频" : "仅前后对比(不作为后续输入)" },
+            status: res.status,
+            ok: res.ok,
+            durationMs: res.durationMs,
+            responseSummary: res.blob
+              ? `增强音频 ${res.blob.size} B${enhancePre ? ",后续步骤将使用它" : "(后续仍用原始音频)"}`
+              : res.ok ? "无音频输出" : `失败 ${res.status}: ${errBody(res)}`,
+            rawResponse: res.blob ? `[binary ${res.blob.size} B ${res.contentType}]` : JSON.stringify(res.json ?? res.text, null, 2)?.slice(0, 4000),
+          });
         } catch (e: any) {
           push({ cap: "enhance", invoked: true, model, error: String(e.message || e) });
         }
@@ -534,142 +473,6 @@ export default function App() {
     // ── Stage 1: Segmentation (VAD / Diarize) on the working audio ─────
     let vadSegs: Seg[] = [];
     let diarSegs: Seg[] = [];
-
-    // Long-audio diarization. pyannote whole-file diarization on a 15-min clip
-    // takes ~100s+, but the Olares public edge cuts ANY single request at ~40s →
-    // a whole-clip call is a guaranteed 504. So for long audio we diarize in
-    // <=DIAR_CHUNK_LEN windows (each call safely under the edge limit), then stitch
-    // the per-window LOCAL speakers into consistent GLOBAL speakers by clustering a
-    // voiceprint per (window,localSpeaker) via the embeddings endpoint. Short audio
-    // keeps the simple single whole-clip call.
-    const DIAR_CHUNK_LEN = 1200; // s/window = 20 min, matched to DIAR_WHOLE_MAX. A 15-min
-    // whole-clip diar is PROVEN to return in ~66s (well under the 300s gateway), so big
-    // chunks are safe — and bigger chunks mean FEWER stitch points (better cross-chunk
-    // speaker consistency). 1h5m → ~4 chunks instead of ~17.
-    const DIAR_OVERLAP = 5; // s of context overlap between windows
-    const DIAR_CONCURRENCY = 1; // big (20-min) chunks → run serial; 2 concurrent would ~2× the
-    // 12G pod's VRAM and risk OOM. Serial keeps each chunk fast with the full GPU.
-    const DIAR_WHOLE_MAX = 1200; // <= 20 min → single whole-clip (best quality, native global speakers).
-    // Beyond that, pyannote's O(N²) clustering + 12G pod VRAM + the 300s gateway make a
-    // single call risky, so we fall back to 20-min chunks + voiceprint stitching.
-    const STITCH_SIM = 0.5; // cosine >= this ⇒ same global speaker
-    const embedModel = selModel.embed; // reused for cross-window speaker identity
-
-    const embedClip = async (clip: Blob): Promise<number[]> => {
-      if (!embedModel) return [];
-      const res = await callRetry(() => audioMultipart(settings, "embeddings", clip, embedModel, {}), 2);
-      const raw = res.json?.embedding || res.json?.embeddings || res.json?.vector || res.json?.data;
-      return (Array.isArray(raw) ? (Array.isArray(raw[0]) ? raw[0] : raw) : []) as number[];
-    };
-
-    // Chunked diarization + voiceprint stitching. Returns global-labelled segments.
-    async function diarizeChunked(model: string, dec: DecodedAudio): Promise<Seg[]> {
-      const dur = dec.duration || upload!.durationSec || 0;
-      const step = Math.max(5, DIAR_CHUNK_LEN - DIAR_OVERLAP);
-      const wins: { start: number; end: number; idx: number }[] = [];
-      for (let st = 0, idx = 0; st < dur; st += step, idx++) {
-        wins.push({ start: st, end: Math.min(dur, st + DIAR_CHUNK_LEN), idx });
-        if (st + DIAR_CHUNK_LEN >= dur) break;
-      }
-      const t0 = Date.now();
-      let okCount = 0,
-        errSample = "",
-        aborted = false,
-        maxCallMs = 0;
-      // diarize each window; speaker labelled `${winIdx}:${localSpk}` (a local key)
-      let diarDone = 0;
-      setProgress({ cap: "diar", phase: "分块说话人分离", done: 0, total: wins.length });
-      const perWin = await mapLimit(wins, DIAR_CONCURRENCY, async (w) => {
-        if (aborted) return [] as Seg[];
-        const clip = sliceWav(dec, w.start, w.end);
-        const res = await callRetry(() => audioMultipart(settings, "diarization", clip, model, {}), 1);
-        maxCallMs = Math.max(maxCallMs, res.durationMs);
-        if (res.ok) okCount++;
-        else if (!errSample) errSample = isEdgeTimeout(res) ? `${res.status} 边缘超时` : `${res.status}: ${errBody(res)}`;
-        if (isCircuitOpen(res)) aborted = true;
-        setProgress({ cap: "diar", phase: "分块说话人分离", done: ++diarDone, total: wins.length });
-        return asSegments(res.json).map((s) => ({
-          start: s.start + w.start,
-          end: s.end + w.start,
-          speaker: `${w.idx}:${s.speaker ?? "?"}`,
-        }));
-      });
-      const all = perWin.flat();
-      // representative (longest) segment per local speaker → voiceprint
-      const localKeys = Array.from(new Set(all.map((s) => s.speaker!)));
-      const reps = localKeys.map((k) => {
-        const segs = all.filter((s) => s.speaker === k);
-        return { key: k, seg: segs.reduce((a, b) => (b.end - b.start > a.end - a.start ? b : a), segs[0]) };
-      });
-      const repVecs = await mapLimit(reps, 3, async (r) => embedClip(embedSlice(dec, r.seg.start, r.seg.end)));
-      // greedy online cosine clustering: map each local speaker → a global index
-      const centroids: { v: number[]; n: number }[] = [];
-      const keyToGlobal = new Map<string, number>();
-      reps.forEach((r, i) => {
-        const v = repVecs[i];
-        let gi = -1;
-        if (v.length) {
-          let best = -1,
-            bi = -1;
-          centroids.forEach((c, ci) => {
-            const sim = cosine(c.v, v);
-            if (sim > best) {
-              best = sim;
-              bi = ci;
-            }
-          });
-          if (bi >= 0 && best >= STITCH_SIM) gi = bi;
-        }
-        if (gi < 0) {
-          centroids.push({ v: v.slice(), n: 1 });
-          gi = centroids.length - 1;
-        } else {
-          const c = centroids[gi];
-          for (let j = 0; j < c.v.length; j++) c.v[j] = (c.v[j] * c.n + (v[j] || 0)) / (c.n + 1);
-          c.n++;
-        }
-        keyToGlobal.set(r.key, gi);
-      });
-      // relabel to global speakers + drop overlap duplicates (keep a segment only if
-      // its midpoint is in this window's exclusive territory, last window keeps tail)
-      const merged: Seg[] = [];
-      perWin.forEach((segs, wi) => {
-        const w = wins[wi];
-        const validEnd = wi === wins.length - 1 ? Infinity : w.start + step;
-        for (const s of segs) {
-          const mid = (s.start + s.end) / 2;
-          if (mid < w.start || mid >= validEnd) continue;
-          merged.push({ start: s.start, end: s.end, speaker: `S${keyToGlobal.get(s.speaker!) ?? 0}` });
-        }
-      });
-      merged.sort((a, b) => a.start - b.start);
-      const final = coalesceSegments(merged, 1e9, 0.4); // join touching same-speaker bits
-      out.diar = { segments: final, chunked: true, windows: wins.length, globalSpeakers: centroids.length };
-      push({
-        cap: "diar",
-        invoked: true,
-        endpoint: "/v1/audio/diarization",
-        method: `POST ×${wins.length}(分块≤${DIAR_CHUNK_LEN}s,并发${DIAR_CONCURRENCY})`,
-        model,
-        params: {
-          模式: "长音频分块 + 声纹拼接",
-          窗口: `${wins.length}×${DIAR_CHUNK_LEN}s(重叠${DIAR_OVERLAP}s)`,
-          单块最长: `${Math.round(maxCallMs / 1000)}s`,
-          声纹模型: embedModel || "(无→无法跨块对齐)",
-          全局说话人: centroids.length,
-        },
-        status: aborted ? 503 : okCount === wins.length ? 200 : 207,
-        ok: okCount === wins.length && !aborted,
-        durationMs: Date.now() - t0,
-        responseSummary:
-          `分块分离 ${wins.length} 块,成功 ${okCount}/${wins.length}; 声纹拼接出 ${centroids.length} 位全局说话人,合计 ${final.length} 段` +
-          (aborted ? " · 触发熔断已中止" : "") +
-          (okCount < wins.length && errSample ? ` · 首个错误 ${errSample}` : "") +
-          (embedModel ? "" : " · 无 embed 模型,跨块未对齐(每块独立编号)"),
-        rawResponse: JSON.stringify(final.slice(0, 12), null, 2),
-      });
-      return final;
-    }
 
     const vadTask = async () => {
       if (!enabled.vad) return skip("vad", "未勾选");
@@ -754,71 +557,24 @@ export default function App() {
       const model = selModel.stt;
       if (!model) skip("stt", "无可用模型");
       else {
-        // STT runs on decoded-to-WAV audio — NEVER the raw upload (the vLLM engines reject
-        // containers they can't decode → 400 "Invalid or unsupported audio file"). Two paths:
-        //   • NO VAD/Diar → WHOLE-CLIP fast path. The engine itself chunks >30s audio
-        //     internally (energy-aware overlap split) and batches the chunks on the GPU, so
-        //     ONE request transcribes a 150s clip in ~1–2s — exactly how Whisper WebUI is
-        //     fast. So we send the whole clip in ONE call instead of N×30s round-trips.
-        //   • VAD/Diarize present → per-segment path (slices carry speaker labels for the
-        //     fused timeline); inherently many calls, that's the cost of speaker attribution.
+        // Two STT paths, chosen by the "分段发送转写请求" toggle:
+        //   • OFF (default): WHOLE-CLIP ONE call — the model's native usage. Qwen returns
+        //     plain text (no timestamps), timed in the Demo via NON-AI post-processing
+        //     (align.ts); Whisper returns native verbose_json segments.
+        //   • ON (requires VAD/Diarize): per-segment fan-out — slice the audio by the
+        //     coalesced VAD/Diarize windows and transcribe each (N calls). Slower but higher
+        //     quality (full context per turn, real per-slice text, speaker labels preserved).
         try {
           const isWhisper = (model || "").toLowerCase().includes("whisper");
-          const autoWindow = !segSource.length;
-
-          if (autoWindow) {
-            // ── WHOLE-CLIP fast path (no VAD/Diar): ONE call, engine does long-form ──
-            // Both STT engines now decode compressed audio directly (faster-whisper via the
-            // harveyff image, Qwen3-ASR via PyAV), so we send the working audio AS-IS — mp3/
-            // m4a/etc. flow straight through, no client-side decode-to-WAV (that old "force
-            // WAV" step is the MP3 protection we're removing). edgeSafe() only transcodes a
-            // huge RAW-WAV upload (e.g. video-extracted 1h ≈ 115 MB) down to mp3 so it clears
-            // the edge body limit. The engine chunks >30s internally and batches on the GPU,
-            // so a 4-min clip returns in ~5s and a 1h5m clip in well under the 600s gateway.
-            const fmt = isWhisper ? "verbose_json" : "json";
-            const dur = upload!.durationSec || 0;
-            const t0 = Date.now();
-            setProgress({ cap: "stt", phase: "整段转写中(引擎内部分块)", done: 0, total: 0 });
-            const res = await callRetry(
-              () => audioMultipart(settings, "transcriptions", workingAudio, model, { response_format: fmt }, false, false),
-              2
-            );
-            const segs = asSegments(res.json).filter((s) => (s.text || "").trim());
-            if (segs.length) fused = segs.map((s) => ({ start: s.start, end: s.end, text: s.text }));
-            else {
-              const text = (res.json?.text ?? res.text ?? "").toString().trim();
-              fused = text ? [{ start: 0, end: dur, text }] : [];
-            }
-            out.stt = { text: fused.map((f) => f.text).join(" "), segments: fused };
-            push({
-              cap: "stt",
-              invoked: true,
-              endpoint: "/v1/audio/transcriptions",
-              method: "POST ×1(整段)",
-              model,
-              params: { 模式: "整段(引擎内部自动分块,直接送原始音频)", 输入: workingLabel, response_format: fmt },
-              status: res.status,
-              ok: res.ok,
-              durationMs: Date.now() - t0,
-              responseSummary: res.ok
-                ? `整段转写 1 次调用(引擎内部自动分块); 合计 ${out.stt.text.length} 字、${fused.length} 段` +
-                  (isWhisper ? "" : " · 非 whisper:单段文本(引擎可能不支持 verbose_json)")
-                : isEdgeTimeout(res)
-                  ? `失败 ${res.status}: 公网边缘截断,非引擎故障。`
-                  : `失败 ${res.status}: ${errBody(res)}`,
-              rawResponse: JSON.stringify(fused.slice(0, 8), null, 2),
-            });
-          } else {
-            // ── per-segment path (VAD/Diar present) — preserves speaker alignment ──
+          const dur = upload!.durationSec || 0;
+          if (sttPerSeg && segSource.length) {
+            // ── PER-SEGMENT FAN-OUT (quality path; requires VAD/Diarize) ──
             const dec = await getDecoded();
-            // Coalesce raw VAD/diar bits into far fewer ~30s windows (maxDur=30 = whisper's
-            // native window; maxGap=10 bridges instrumental breaks), THEN split any still-
-            // oversized turn back to <=30s with ~1s overlap (whisper loops on >30s inputs).
+            // Coalesce raw VAD/diar bits into far fewer ~30s windows (maxGap=10 bridges
+            // instrumental breaks), then split any still-oversized turn back to <=30s with
+            // ~1s overlap (whisper loops on >30s inputs); dedupOverlap strips the seam later.
             const sttSlices = splitLong(coalesceSegments(segSource, 30, 10), 30, 1);
             const sliceSrc = segHasSpeaker ? "Diarize" : "VAD";
-            // CONCURRENT fan-out: serial STT runs at ~1× realtime; vLLM does continuous
-            // batching, so firing several at once multiplies throughput. mapLimit preserves
-            // order; `aborted` short-circuits if the breaker opens; tries=2 rescues a drop.
             const STT_CONCURRENCY = sttConc;
             const t0 = Date.now();
             let okCount = 0,
@@ -839,23 +595,31 @@ export default function App() {
               return (res.json?.text ?? res.text ?? "").toString().trim();
             });
             const wallMs = Date.now() - t0;
-            // build segments, then strip the overlapped text from split-continuation pieces
+            // build segments, then strip overlapped text from split-continuation pieces
             const raw = sttSlices.map((s, i) => ({ start: s.start, end: s.end, speaker: s.speaker, cont: s.cont, text: texts[i] || "" }));
             for (let i = 1; i < raw.length; i++) {
               if (raw[i].cont && raw[i].text.trim() && raw[i - 1].text.trim()) {
                 raw[i].text = dedupOverlap(raw[i - 1].text, raw[i].text);
               }
             }
-            // drop slices that transcribed to nothing (silence/noise → empty 1s segments)
+            // drop slices that transcribed to nothing (silence/noise)
             fused = raw.filter((f) => f.text.trim()).map((f) => ({ start: f.start, end: f.end, speaker: f.speaker, text: f.text }));
-            out.stt = { text: fused.map((f) => f.text).join(" "), segments: fused };
+            const tsSource = `逐段转写 (按 ${sliceSrc} 切片,引擎原生分段)`;
+            out.stt = { text: fused.map((f) => f.text).join(" "), segments: fused, tsSource };
             push({
               cap: "stt",
               invoked: true,
               endpoint: "/v1/audio/transcriptions",
               method: `POST ×${sttSlices.length}(并发${STT_CONCURRENCY})`,
               model,
-              params: { 模式: "逐段转写(精细)", 切片来源: sliceSrc, 合并: `${segSource.length} 碎片→${sttSlices.length} 窗口(≤30s)`, 并发: STT_CONCURRENCY, response_format: "json" },
+              params: {
+                模式: "逐段转写(精细)",
+                切片来源: sliceSrc,
+                合并: `${segSource.length} 碎片→${sttSlices.length} 窗口(≤30s)`,
+                并发: STT_CONCURRENCY,
+                response_format: "json",
+                时间戳来源: tsSource,
+              },
               status: lastStatus,
               ok: okCount === sttSlices.length,
               durationMs: wallMs,
@@ -865,6 +629,123 @@ export default function App() {
                 (okCount < sttSlices.length && errSample ? ` · 首个错误 ${errSample}` : ""),
               rawResponse: JSON.stringify(fused.slice(0, 8), null, 2),
             });
+          } else {
+          const fmt = isWhisper ? "verbose_json" : "json";
+          const t0 = Date.now();
+          setProgress({ cap: "stt", phase: "整段转写中(模型原生用法)", done: 0, total: 0 });
+          // Send the working audio AS-IS (mp3/m4a/wav). edgeSafe() only transcodes a huge
+          // RAW-WAV upload (e.g. video-extracted 1h ≈ 115 MB) down to mp3 to clear the edge.
+          const res = await callRetry(
+            () => audioMultipart(settings, "transcriptions", workingAudio, model, { response_format: fmt }, false, false),
+            2
+          );
+          let nativeSegs = asSegments(res.json).filter((s) => (s.text || "").trim());
+          let fullText = (res.json?.text ?? res.text ?? "").toString().trim();
+
+          // Long-audio fallback: if the whole-clip call failed or came back empty (a very long
+          // clip can exceed the engine's single-request limit), window the clip and concatenate
+          // — this still mirrors how the engine chunks internally, and timestamps are derived
+          // the same way afterwards. Rare; short/medium clips never hit this.
+          let fellBack = false;
+          if (!res.ok || (!nativeSegs.length && !fullText)) {
+            const dec = await getDecoded();
+            const wins = windowSegs(dur || dec.duration, 600);
+            let done = 0;
+            setProgress({ cap: "stt", phase: "整段未果→分窗转写中", done: 0, total: wins.length });
+            const texts = await mapLimit(wins, isWhisper ? 4 : 2, async (w) => {
+              const clip = sliceWav(dec, w.start, w.end);
+              const r = await callRetry(
+                () => audioMultipart(settings, "transcriptions", clip, model, { response_format: "json" }, false, true),
+                2
+              );
+              setProgress({ cap: "stt", phase: "整段未果→分窗转写中", done: ++done, total: wins.length });
+              return (r.json?.text ?? r.text ?? "").toString().trim();
+            });
+            fullText = texts.filter(Boolean).join(" ");
+            nativeSegs = [];
+            fellBack = true;
+          }
+
+          // EXPLICIT segmentation the user enabled drives the fused output: Diarize
+          // (carries speaker) > VAD. When present it segments the transcript for EVERY
+          // engine (one segment per run) — this is what "fusion" means and why VAD/Diarize
+          // visibly change the STT result. silencedetect is only a STT-only Qwen fallback.
+          const modelRuns: Seg[] = diarSegs.length ? diarSegs : vadSegs;
+          let tlSource = diarSegs.length ? "Diarize" : vadSegs.length ? "VAD" : "";
+
+          // The "时间戳后处理对齐" toggle ONLY governs the timestamp-less engine (Qwen) when
+          // there is NO VAD/Diarize. Whenever VAD/Diarize IS selected the transcript is
+          // ALWAYS fused onto that segmentation (that's the whole point of choosing it) —
+          // the toggle is irrelevant there. Whisper carries native timestamps, so the
+          // toggle never affects it either.
+          let tsSource: string;
+          if (modelRuns.length) {
+            // VAD/Diarize selected → ALWAYS fuse, regardless of the toggle. Segment by the
+            // run timeline and fill each run with its share of the whole-clip text. Works
+            // even for Whisper's punctuation-less zh output (sentence-splitting can't, so
+            // slice by run duration). Coalesce the raw runs into fewer ~28s windows first
+            // (same optimisation the per-segment path used) so the view isn't too choppy.
+            const coalesced = coalesceSegments(modelRuns);
+            const textForRuns = fullText || nativeSegs.map((s) => s.text).join("");
+            fused = distributeTextOverRuns(textForRuns, coalesced);
+            tsSource = `非 AI 后处理 (整段文本按 ${tlSource} 分段对齐)`;
+          } else if (isWhisper && nativeSegs.length) {
+            // No VAD/Diarize, Whisper: keep the engine's native verbose_json segments.
+            fused = nativeSegs.map((s) => ({ start: s.start, end: s.end, text: s.text }));
+            tsSource = "引擎原生 (Whisper verbose_json)";
+            tlSource = "";
+          } else if (!alignTs) {
+            // No VAD/Diarize, Qwen, post-processing OFF → show the raw whole-clip transcript
+            // as one untimed block (the model's pure output, no fabricated timestamps).
+            const whole = fullText || nativeSegs.map((s) => s.text).join("");
+            fused = whole ? [{ start: 0, end: dur || 0, text: whole }] : [];
+            tsSource = "关闭后处理 (整段原文,无分段时间戳)";
+            tlSource = "";
+          } else {
+            // No VAD/Diarize, Qwen, post-processing ON → sentence-split and spread over
+            // ffmpeg silencedetect speech runs (or the whole clip) as a best-effort timeline.
+            let runs: Seg[] = [];
+            try {
+              const sil = await fetchSilences(upload!.id);
+              if (sil.speech?.length) {
+                runs = sil.speech.map((r) => ({ start: r.start, end: r.end }));
+                tlSource = "silencedetect";
+              }
+            } catch {
+              /* no timeline available → align over the whole clip as a single run */
+            }
+            fused = alignTextToTimeline(fullText, runs.length ? runs : [{ start: 0, end: dur || 0 }], dur);
+            tsSource = runs.length
+              ? `非 AI 后处理 (整段文本按 ${tlSource} 匀速对齐)`
+              : "非 AI 后处理 (整段文本按总时长匀速断句)";
+          }
+          const joined = fused.map((f) => (f.text || "").trim()).filter(Boolean).join(" ") || fullText;
+          out.stt = { text: joined, segments: fused, tsSource };
+
+          push({
+            cap: "stt",
+            invoked: true,
+            endpoint: "/v1/audio/transcriptions",
+            method: fellBack ? "POST ×N(整段未果→分窗)" : "POST ×1(整段)",
+            model,
+            params: {
+              模式: fellBack ? "分窗兜底(整段一次未果)" : "整段一次(模型原生用法)",
+              输入: workingLabel,
+              response_format: fmt,
+              时间戳来源: tsSource,
+              时间轴: tlSource || "(无,按总时长匀速)",
+            },
+            status: res.status,
+            ok: (res.ok || fellBack) && fused.length > 0,
+            durationMs: Date.now() - t0,
+            responseSummary:
+              res.ok || fellBack
+                ? `${fellBack ? "整段一次未果,已分窗兜底" : "整段 1 次调用"}; 合计 ${joined.length} 字、${fused.length} 段 · 时间戳:${tsSource}`
+                : isEdgeTimeout(res)
+                  ? `失败 ${res.status}: 公网边缘截断,非引擎故障。`
+                  : `失败 ${res.status}: ${errBody(res)}`,
+            rawResponse: JSON.stringify(fused.slice(0, 10), null, 2),
+          });
           }
         } catch (e: any) {
           push({ cap: "stt", invoked: true, model, error: String(e.message || e) });
@@ -878,7 +759,7 @@ export default function App() {
       // Fine mode: translate each segment so the fused view shows per-segment
       // translation (the nice part). Each call is fail-fast (tries=1) so it degrades
       // gracefully instead of stacking gateway timeouts. Whole-text otherwise.
-      const lines = segSource.length ? fused.filter((f) => (f.text || "").trim()) : [];
+      const lines = translatePerSeg ? fused.filter((f) => (f.text || "").trim()) : [];
       const wholeText = out.stt?.text || (fused.length ? fused.map((f) => f.text || "").join(" ").trim() : "");
       // Source language: explicit pick, or auto-detect. The document-level guess
       // (over the whole transcript) is the stable fallback for short per-line text.
@@ -1238,7 +1119,7 @@ export default function App() {
                     <span className="font-medium">{CAP_LABEL[cap]}</span>
                   </label>
                   <select
-                    className="input max-w-xs flex-1"
+                    className="input min-w-[20rem] max-w-md flex-1"
                     disabled={!enabled[cap]}
                     value={selModel[cap] || ""}
                     onChange={(e) => setSelModel({ ...selModel, [cap]: e.target.value })}
@@ -1250,9 +1131,19 @@ export default function App() {
                       </option>
                     ))}
                   </select>
-                  {cap === "translate" && (
-                    <div className="flex items-center gap-1" title="源语言:自动检测或手动指定;若源(含自动检测结果)与目标相同则跳过翻译">
-                      <select className="input w-28" disabled={!enabled.translate} value={source} onChange={(e) => setSource(e.target.value)}>
+                  {cap === "translate" &&
+                    (() => {
+                      const sttIsWhisper = (selModel.stt || "").toLowerCase().includes("whisper");
+                      const fuseOn = enabled.vad || enabled.diar;
+                      // Per-line translation only yields per-segment output when STT actually
+                      // produces segments: VAD/Diarize on, OR Whisper (native timestamps), OR
+                      // Qwen with the non-AI post-processing toggle on. Otherwise the transcript
+                      // is one whole block and "分段翻译" degrades to a single whole-text call.
+                      const segsAvailable = enabled.stt && (fuseOn || sttIsWhisper || alignTs);
+                      const perSegWarn = translatePerSeg && !segsAvailable;
+                      return (
+                        <div className="flex w-full basis-full flex-wrap items-center gap-2 border-t border-neutral-800/60 pt-2" title="源语言:自动检测或手动指定;若源(含自动检测结果)与目标相同则跳过翻译">
+                      <select className="input !w-36" disabled={!enabled.translate} value={source} onChange={(e) => setSource(e.target.value)}>
                         {SOURCE_LANGS.map((l) => (
                           <option key={l.code} value={l.code}>
                             {l.label}
@@ -1260,57 +1151,140 @@ export default function App() {
                         ))}
                       </select>
                       <span className="text-xs text-neutral-500">→</span>
-                      <select className="input w-28" disabled={!enabled.translate} value={target} onChange={(e) => setTarget(e.target.value)}>
+                      <select className="input !w-36" disabled={!enabled.translate} value={target} onChange={(e) => setTarget(e.target.value)}>
                         {TARGET_LANGS.map((l) => (
                           <option key={l.code} value={l.code}>
                             {l.label}
                           </option>
                         ))}
                       </select>
-                      <label className="flex shrink-0 items-center gap-1.5 whitespace-nowrap text-xs text-neutral-400" title="逐行翻译的并发路数(NLLB 较轻,可适当高)。">
+                      <label
+                        className={`flex shrink-0 items-center gap-1.5 whitespace-nowrap text-xs ${enabled.translate ? "text-neutral-300" : "text-neutral-600"}`}
+                        title="开:按转写的每一段(行)分别翻译,融合视图逐段显示译文;关:整段文本一次翻译。注意:分段翻译需要转写有分段时间戳(VAD/DIAR、或 Whisper 原生、或 Qwen 开启非AI后处理),否则等同整段翻译。"
+                      >
+                        <input
+                          type="checkbox"
+                          disabled={!enabled.translate}
+                          checked={translatePerSeg}
+                          onChange={(e) => setTranslatePerSeg(e.target.checked)}
+                        />
+                        分段翻译
+                      </label>
+                      <label
+                        className={`flex shrink-0 items-center gap-1.5 whitespace-nowrap text-xs ${enabled.translate && translatePerSeg ? "text-neutral-400" : "text-neutral-600"}`}
+                        title="逐行翻译的并发路数(NLLB 较轻,可适当高)。"
+                      >
                         并发
                         <input
                           type="range"
                           min={1}
                           max={TRANSLATE_CONC_MAX}
                           step={1}
-                          disabled={!enabled.translate}
+                          disabled={!enabled.translate || !translatePerSeg}
                           value={translateConc}
                           onChange={(e) => setTranslateConc(Number(e.target.value))}
                           className="w-24"
                         />
-                        <span className="w-10 tabular-nums text-neutral-200">
+                        <span className="w-10 tabular-nums text-neutral-300">
                           {translateConc}/{TRANSLATE_CONC_MAX}
                         </span>
                       </label>
-                    </div>
-                  )}
-                  {cap === "stt" && (
-                    <>
-                      <span className="text-xs text-neutral-500" title="有 VAD 或 Diarize 分段时自动逐段转写(并逐段翻译);两者都没有时自动整段一次转写。">
-                        {enabled.stt ? (enabled.vad || enabled.diar ? "自动逐段(有 VAD/Diar)" : "自动整段(无 VAD/Diar)") : ""}
-                      </span>
-                      <label
-                        className="flex shrink-0 items-center gap-1.5 whitespace-nowrap text-xs text-neutral-400"
-                        title="逐段转写的并发路数。Whisper 可承受更高并发,Qwen3-ASR 较低;切换模型会重置为推荐默认值。"
-                      >
-                        并发
-                        <input
-                          type="range"
-                          min={1}
-                          max={sttConcMax}
-                          step={1}
-                          disabled={!enabled.stt}
-                          value={sttConc}
-                          onChange={(e) => setSttConc(Number(e.target.value))}
-                          className="w-24"
-                        />
-                        <span className="w-10 tabular-nums text-neutral-200">
-                          {sttConc}/{sttConcMax}
+                      {enabled.translate && (perSegWarn || translatePerSeg) && (
+                        <span
+                          className={`ml-auto shrink-0 text-xs ${perSegWarn ? "text-amber-400" : "text-neutral-500"}`}
+                          title="分段翻译需要转写存在分段时间戳:勾选 VAD/DIAR、或用 Whisper(原生时间戳)、或 Qwen 开启“时间戳后处理对齐”;否则只能整段翻译。"
+                        >
+                          {perSegWarn ? "⚠ 需分段时间戳,否则=整段翻译" : "按 STT 分段逐行"}
                         </span>
-                      </label>
-                    </>
-                  )}
+                      )}
+                        </div>
+                      );
+                    })()}
+                  {cap === "stt" &&
+                    (() => {
+                      const sttIsWhisper = (selModel.stt || "").toLowerCase().includes("whisper");
+                      const fuseOn = enabled.vad || enabled.diar; // VAD/Diarize selected
+                      // Per-segment fan-out needs a segmentation source (VAD/Diarize).
+                      const perSegActive = enabled.stt && fuseOn;
+                      const perSegOn = perSegActive && sttPerSeg;
+                      // The align toggle is only meaningful for a timestamp-less engine (Qwen)
+                      // when there is NO VAD/Diarize (and not in per-segment mode).
+                      const alignActive = enabled.stt && !fuseOn && !sttIsWhisper;
+                      const status = !enabled.stt
+                        ? ""
+                        : perSegOn
+                          ? `逐段发送 · 按 ${enabled.diar ? "Diarize" : "VAD"} 切片转写(并发${sttConc})`
+                          : fuseOn
+                            ? `整段一次 · 按 ${enabled.diar ? "Diarize" : "VAD"} 分段协同(必融合)`
+                            : sttIsWhisper
+                              ? "整段一次 · Whisper 引擎原生分段"
+                              : alignTs
+                                ? "整段一次 · 按静音检测/匀速对齐(造时间戳)"
+                                : "整段一次 · 整段原文(不造时间戳)";
+                      return (
+                        <div className="flex w-full basis-full flex-wrap items-center gap-3 border-t border-neutral-800/60 pt-2">
+                          {/* Interactive controls are anchored left with constant-width labels
+                              so they DON'T shift when switching models; the variable status
+                              text floats to the right (ml-auto) and never moves the controls. */}
+                          <label
+                            className={`flex shrink-0 items-center gap-1.5 whitespace-nowrap text-xs ${perSegActive ? "text-neutral-300" : "text-neutral-600"}`}
+                            title={
+                              perSegActive
+                                ? "开:按 VAD/Diarize 窗口逐段切音频分别转写(N 次调用),上下文更完整、质量更稳;关:整段一次调用。"
+                                : "需先勾选 VAD 或 Diarize 才能按段切片转写(本项当前不生效)。"
+                            }
+                          >
+                            <input
+                              type="checkbox"
+                              disabled={!perSegActive}
+                              checked={sttPerSeg}
+                              onChange={(e) => setSttPerSeg(e.target.checked)}
+                            />
+                            分段发送转写请求
+                          </label>
+                          <label
+                            className={`flex shrink-0 items-center gap-1.5 whitespace-nowrap text-xs ${perSegOn ? "text-neutral-400" : "text-neutral-600"}`}
+                            title="逐段转写的并发路数。Whisper 可较高,Qwen3-ASR 较低;切换模型会重置为推荐默认值。"
+                          >
+                            并发
+                            <input
+                              type="range"
+                              min={1}
+                              max={sttConcMax}
+                              step={1}
+                              disabled={!perSegOn}
+                              value={sttConc}
+                              onChange={(e) => setSttConc(Number(e.target.value))}
+                              className="w-24"
+                            />
+                            <span className="w-10 tabular-nums text-neutral-300">
+                              {sttConc}/{sttConcMax}
+                            </span>
+                          </label>
+                          <label
+                            className={`flex shrink-0 items-center gap-1.5 whitespace-nowrap text-xs ${alignActive ? "text-neutral-300" : "text-neutral-600"}`}
+                            title={
+                              fuseOn
+                                ? "已选 VAD/Diarize,STT 必与之协同融合,本开关不生效"
+                                : sttIsWhisper
+                                  ? "Whisper 自带时间戳,本开关只对 Qwen 等无时间戳引擎生效"
+                                  : "开:整段文本按静音检测/总时长匀速对齐出时间戳。关:显示 Qwen 整段原文,不造分段时间戳"
+                            }
+                          >
+                            <input
+                              type="checkbox"
+                              disabled={!alignActive}
+                              checked={alignTs}
+                              onChange={(e) => setAlignTs(e.target.checked)}
+                            />
+                            时间戳后处理对齐
+                          </label>
+                          <span className="ml-auto shrink-0 text-xs text-neutral-500" title="STT 的调用方式与分段来源;详见执行面板。">
+                            {status}
+                          </span>
+                        </div>
+                      );
+                    })()}
                   {cap === "enhance" && (
                     <label className="flex items-center gap-1.5 text-xs text-neutral-400" title="语音降噪会把音乐当噪声抹掉;处理歌曲时建议关闭,仅做前后对比">
                       <input
@@ -1478,7 +1452,14 @@ function SttView({ data }: { data: any }) {
   const segs = asSegments(data);
   return (
     <div className="mb-4">
-      <h3 className="mb-1 font-medium">转写</h3>
+      <h3 className="mb-1 flex items-center gap-2 font-medium">
+        转写
+        {data.tsSource && (
+          <span className="rounded bg-neutral-800 px-1.5 py-0.5 text-[10px] font-normal text-neutral-400">
+            时间戳来源:{data.tsSource}
+          </span>
+        )}
+      </h3>
       <p className="whitespace-pre-wrap rounded bg-black/40 p-2 text-sm text-neutral-200">{data.text || "(空)"}</p>
       {segs.length > 0 && (
         <div className="mt-2 max-h-56 overflow-auto text-xs">

@@ -296,7 +296,7 @@ data:
     # entai2965/nllb-200-distilled-600M-ctranslate2), read from the shared HF cache.
     # Exposes: GET /healthz, GET /readyz, GET /v1/models,
     # POST /v1/translate {text, target, source?} with FLORES-200 codes.
-    import os, sys, subprocess, threading, logging
+    import os, re, sys, subprocess, threading, logging
     from typing import Optional
     from fastapi import FastAPI, HTTPException
     from pydantic import BaseModel
@@ -363,6 +363,32 @@ data:
         target: str                 # FLORES-200 code, e.g. zho_Hans
         source: Optional[str] = None  # FLORES-200 code; default DEFAULT_SOURCE_LANG
 
+    # NLLB is a SENTENCE-level model: feeding a whole multi-sentence paragraph in one go makes
+    # it translate only the first sentence(s) and drop the rest (looks "truncated"). So we
+    # split the input into sentences with a NON-AI splitter (punctuation only — no model, no
+    # interface change), translate them as ONE ctranslate2 batch (the idiomatic NLLB usage),
+    # then join. Languages that don't separate words with spaces get a "" joiner.
+    _SENT_RE = re.compile(r"[^。！？!?；;…\n]*[。！？!?；;…\n]+|[^。！？!?；;…\n]+")
+    _NOSPACE_TGT = ("zho", "jpn", "yue", "tha", "lao", "mya", "khm", "wuu", "bod")
+
+    def _split_sentences(text, max_chars=220):
+        sents = []
+        for m in _SENT_RE.findall(text):
+            s = m.strip()
+            if not s:
+                continue
+            if len(s) <= max_chars:
+                sents.append(s)
+            else:  # hard-wrap a delimiter-less run so a single huge "sentence" can't truncate
+                sents.extend(s[i:i + max_chars] for i in range(0, len(s), max_chars))
+        return sents or [text.strip()]
+
+    def _decode_hyp(tok, hyp, tgt):
+        out = [t for t in hyp if t not in (tgt, "</s>", "<pad>", "<s>")]
+        ids = [tok.token_to_id(t) for t in out]
+        ids = [i for i in ids if i is not None]
+        return tok.decode(ids).strip()
+
     @app.post("/v1/translate")
     def translate(req: Req):
         if not _state["ready"]:
@@ -372,21 +398,19 @@ data:
         src = req.source or DEFAULT_SRC
         tgt = req.target
         tok = _state["tok"]; tr = _state["translator"]
-        # NLLB encoder input = [src_lang] + subwords + </s>; decoder target_prefix = [tgt_lang].
-        enc = tok.encode(req.text, add_special_tokens=False)
-        source = [src] + enc.tokens + ["</s>"]
+        # NLLB encoder input per sentence = [src_lang] + subwords + </s>; decoder prefix = [tgt].
+        sents = _split_sentences(req.text)
+        sources = [[src] + tok.encode(s, add_special_tokens=False).tokens + ["</s>"] for s in sents]
         try:
-            res = tr.translate_batch([source], target_prefix=[[tgt]], beam_size=4,
+            res = tr.translate_batch(sources, target_prefix=[[tgt]] * len(sources), beam_size=4,
                                      max_input_length=1024, max_decoding_length=1024)
         except Exception as e:
             raise HTTPException(status_code=500, detail="translation failed: %s" % e)
-        hyp = res[0].hypotheses[0]
-        out = [t for t in hyp if t not in (tgt, "</s>", "<pad>", "<s>")]
-        ids = [tok.token_to_id(t) for t in out]
-        ids = [i for i in ids if i is not None]
-        translation = tok.decode(ids)
+        hyps = [_decode_hyp(tok, r.hypotheses[0], tgt) for r in res]
+        joiner = "" if tgt[:3] in _NOSPACE_TGT else " "
+        translation = joiner.join(h for h in hyps if h)
         return {"model": MODEL_NAME, "mode": "translate", "source": src, "target": tgt,
-                "translation": translation}
+                "sentences": len(sents), "translation": translation}
 
     if __name__ == "__main__":
         uvicorn.run(app, host="0.0.0.0", port=PORT, log_level=LOG_LEVEL)
@@ -631,6 +655,31 @@ data:
     def models():
         return {"object": "list", "data": [{"id": MODEL_NAME, "object": "model", "mode": "enhance"}]}
 
+    # Long audio handled SERVER-SIDE: whole-clip enhance loads the entire waveform onto the
+    # GPU (a 1h clip OOMs at ~15 GiB), so past ENHANCE_CHUNK_S we slide a fixed window over
+    # the clip, enhance each window, and overlap-add with a linear crossfade so seams are
+    # inaudible. Peak VRAM is bounded by ONE window, not the whole file — the client can
+    # therefore always send the whole clip in one request.
+    CHUNK_S = float(os.environ.get("ENHANCE_CHUNK_S", "120") or 120)   # window length (s)
+    OVERLAP_S = float(os.environ.get("ENHANCE_OVERLAP_S", "1") or 1)   # crossfade overlap (s)
+
+    def _run(noisy):
+        # Enhance one (1, time) tensor -> 1-D float32 numpy of the same length.
+        import torch
+        model = _state["model"]
+        if _state["kind"] == "sepformer":
+            est = model.separate_batch(noisy)        # (batch, time, n_src)
+            enhanced = est[..., 0]
+        else:
+            lengths = torch.ones(noisy.shape[0])
+            enhanced = model.enhance_batch(noisy, lengths=lengths)
+        arr = enhanced.detach().cpu().numpy().reshape(-1)
+        try:
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+        return arr
+
     @app.post("/v1/audio/enhance")
     async def enhance(file: UploadFile = File(...)):
         if not _state["ready"]:
@@ -641,18 +690,43 @@ data:
             f.write(data)
             path = f.name
         try:
-            import torch, numpy as np, soundfile as sf
+            import numpy as np, soundfile as sf
             wav = _decode(path)  # (1, time) @ 16k
-            noisy = wav  # already (batch=1, time)
-            model = _state["model"]
-            if _state["kind"] == "sepformer":
-                # separate_batch -> (batch, time, n_src); enhancement = source 0.
-                est = model.separate_batch(noisy)
-                enhanced = est[..., 0]
+            total = int(wav.shape[-1])
+            chunk = int(CHUNK_S * SR)
+            ov = int(OVERLAP_S * SR)
+            if chunk <= 0 or total <= chunk:
+                # Short clip: single pass (identical to the pre-chunking behaviour).
+                out = _run(wav)
             else:
-                lengths = torch.ones(noisy.shape[0])
-                enhanced = model.enhance_batch(noisy, lengths=lengths)
-            out = enhanced.detach().cpu().numpy().reshape(-1)
+                # Long clip: sliding window + overlap-add crossfade, one window on the GPU
+                # at a time so peak VRAM is bounded regardless of total duration.
+                hop = max(1, chunk - ov)
+                out = np.zeros(total, dtype="float32")
+                wsum = np.zeros(total, dtype="float32")
+                pos = 0
+                while pos < total:
+                    end = min(total, pos + chunk)
+                    n = end - pos
+                    enh = _run(wav[:, pos:end])
+                    if enh.shape[0] >= n:
+                        enh = enh[:n]
+                    else:
+                        enh = np.pad(enh, (0, n - enh.shape[0]))
+                    w = np.ones(n, dtype="float32")
+                    if pos > 0 and ov > 0:
+                        r = min(ov, n)
+                        w[:r] = np.linspace(0.0, 1.0, r, dtype="float32")  # fade in
+                    if end < total and ov > 0:
+                        r = min(ov, n)
+                        w[-r:] = np.minimum(w[-r:], np.linspace(1.0, 0.0, r, dtype="float32"))  # fade out
+                    out[pos:end] += enh * w
+                    wsum[pos:end] += w
+                    if end >= total:
+                        break
+                    pos += hop
+                nz = wsum > 1e-6
+                out[nz] = out[nz] / wsum[nz]
             peak = float(np.max(np.abs(out))) if out.size else 0.0
             if peak > 1.0:
                 out = out / peak  # guard against clipping

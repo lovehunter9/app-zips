@@ -112,6 +112,18 @@ olares-cli market clone audiolabxv3 -s upload \
 | `MODEL_MODE` | `diar` |
 | `AUDIO_REQUIRED_GPU_MEMORY` | `4Gi` |
 
+### Enhance（2026-06-29 起上 GPU）
+> `enhance.py` 已做**服务端内部分块**（滑窗逐块 + overlap-add 交叉淡入，`ENHANCE_CHUNK_S` 默认 120s、`ENHANCE_OVERLAP_S` 默认 1s），长音频峰值显存只受单窗约束 → Demo 端不再分块、整段一次调用即可。模型 `mtl-mimic-voicebank` 很小，给 `2Gi` 足够（实测 `loaded as 'waveform' on cuda:0`）。GPU 引擎的 `GPU_CORE_UTILIZATION_POLICY=disable` 由 chart 自动写死，无需传。
+
+| Env | 值 |
+|---|---|
+| `MODEL_SOURCE` | `hf://speechbrain/mtl-mimic-voicebank` |
+| `MODEL_NAME` | `mtl-mimic-voicebank` |
+| `MODEL_MODE` | `enhance` |
+| `AUDIO_REQUIRED_GPU_MEMORY` | `2Gi`（周五是 CPU `0`；要省卡可改回 `0`） |
+
+> **GPU 配额提醒**：整卡 ~24Gi。当前 GPU 实例 = Qwen 12 + STT-fw 6 + Diar 4 + Enhance 2 = **24Gi 刚好顶满**。再要给别的音频实例上 GPU 得先腾。
+
 ## 三、当前实例台账(单入口版)
 
 > **重要:实例 public URL 用 `olares-cli` 查不到**(`settings apps entrances list` 的 `url` 字段恒为空),只能问用户/查本表。**别再空搜**。详见 skill `.cursor/skills/audiolabxv3-instances/`。
@@ -120,13 +132,21 @@ olares-cli market clone audiolabxv3 -s upload \
 
 | 能力 | title(照抄) | clone 名 | NS | public URL |
 |---|---|---|---|---|
-| STT(**faster-whisper**) | `Audio Lab X V3 STT` | `audiolabxv30b0d85` | `audiolabxv30b0d85-shared` | **(待用户提供)** |
-| STT(qwen3-asr/vLLM) | `Audio Lab X V3 Qwen3-ASR` | (待重建) | — | — |
-| VAD | `Audio Lab X VAD` | (待重建) | — | — |
-| Diar | `Audio Lab X V3 Diar` | (待重建) | — | — |
-| Translate | `Audio Lab X V3 Translate` | (待重建) | — | — |
-| Embed | `Audio Lab X V3 Embed` | (待重建) | — | — |
-| Enhance | `AudioLabX Enhance` | (待重建) | — | — |
+| STT(**faster-whisper**) | `Audio Lab X V3 STT` | `audiolabxv3b2b539` | `audiolabxv3b2b539-shared` | **(待用户提供)** |
+| STT(qwen3-asr/vLLM) | `Audio Lab X V3 Qwen3-ASR` | `audiolabxv3a0bbb6` | `audiolabxv3a0bbb6-shared` | **(待用户提供)** |
+| Diar | `Audio Lab X V3 Diar` | `audiolabxv34c7e4e` | `audiolabxv34c7e4e-shared` | **(待用户提供)** |
+| VAD | `Audio Lab X VAD` | `audiolabxv306a333` | `audiolabxv306a333-shared` | **(待用户提供)** |
+| Translate | `Audio Lab X V3 Translate` | `audiolabxv38ab6b2` | `audiolabxv38ab6b2-shared` | **(待用户提供)** |
+| Embed | `Audio Lab X V3 Embed` | `audiolabxv35db0f3` | `audiolabxv35db0f3-shared` | **(待用户提供)** |
+| Enhance | `AudioLabX Enhance` | `audiolabxv3d616f5`（原 `1c4d10`） | `audiolabxv3d616f5-shared` | **(新→待用户提供)** |
+
+> 2026-06-29（translate.py 按句切分，再次全量重建）：`translate.py` 改为整段输入**非AI按句切分 → ctranslate2 批量翻译 → 拼回**（修 NLLB 句子级模型对整段只翻第一句的"截断"问题；接口不变）。按老规矩全量重建一遍——**7 个 title+env 全未变（Enhance 仍 2Gi），7 个 clone 名/URL 全部原样复现，网关零改动**（VAD `06a333`、Translate `8ab6b2`、Embed `5db0f3`、STT `b2b539`、Diar `4c7e4e`、Enhance `d616f5`、Qwen `a0bbb6`）。再次印证：title+env 不变 ⇒ URL 不变。
+
+> 2026-06-29（enhance.py 服务端分块 + Enhance 上 GPU，全量重建）：因改了 `enhance.py`（服务端滑窗分块），按老规矩**卸载全部 7 实例 → 删 chart 1.0.0 → 重传新 tgz → 7 个全部重新 clone（title 照抄）**。**重大发现：title + env 完全一致 ⇒ clone 名/hash 完全复现**——本轮 6 个能力（VAD `06a333`、Translate `8ab6b2`、Embed `5db0f3`、STT `b2b539`、Diar `4c7e4e`、Qwen `a0bbb6`）名字**一字不差地复现**，所以这 6 个的 public URL 不变、网关 provider 无需动；**只有 Enhance 因把 `AUDIO_REQUIRED_GPU_MEMORY` 从 `0` 改成 `2Gi`（env 变了），hash 从 `1c4d10` 变成 `d616f5`** → 仅 Enhance 需要新 URL + 网关重注册。结论修正：以前"同 title 也变 URL"是因为当时连带改了 env/chart 内容；**只要 title 与 env 都不动，URL 就能保持不变**。
+
+> 2026-06-26（周五收尾）：clone 了 Translate(`8ab6b2`)、Embed(`5db0f3`)、Enhance(`1c4d10`)、VAD(`06a333`) 四个（均 `AUDIO_REQUIRED_GPU_MEMORY=0` → CPU）。**7 个实例已全部齐**。VAD 中文歌曲分段质量差，silero 参数留待周一调（调好需先删后 clone，URL 会变）。四个新实例的 base_url 待网关手动注册。Demo 镜像同时升到 `lovehunter9/audiostudioxdemo:1.0.1`（去 MP3 转码保护 + DIAR 整段化）。
+
+> 2026-06-26（chart 改动后重建）：MODEL_ENGINE 改为**按模型名自动选**(不再传 `--env MODEL_ENGINE`)、`GPU_CORE_UTILIZATION_POLICY=disable` 写死(不再传)。删除 `CUDA_DEVICE_SM_LIMIT`/`CUDA_DISABLE_CONTROL`。同版本 chart 删后重传重 clone，**clone 名/URL 又变了**(STT `0b0d85`→`b2b539`、Qwen `2124b8`→`a0bbb6`)→ 网关 provider 的 base_url 需手动更新。新建 DIAR `4c7e4e`(GPU 4Gi，pod 内已确认带 disable)。
 
 > 2026-06-26（重置）:为换 STT 引擎,7 个旧实例全部卸载、chart 1.0.0 删后重传(同版本 upload 不刷新 manifest,实测确认),只先重建 STT。新 STT 走 **faster-whisper**(`MODEL_ENGINE=faster-whisper` + `Systran/faster-whisper-large-v3`,harveyff 镜像,cuda/float16 已确认)。clone 名变为 `0b0d85`(title 没变但 clone 名/URL 仍变了→**URL 用 clone 名 hash,不是 title**),新 URL 待用户提供。STT 速度达标后再逐个重建其余 6 个。
 

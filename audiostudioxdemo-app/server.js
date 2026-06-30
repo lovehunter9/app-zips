@@ -84,6 +84,43 @@ function toMp3_16kMono(input, output) {
   });
 }
 
+const round3 = (n) => Math.round(n * 1000) / 1000;
+
+// ffmpeg silencedetect → voiced ("speech") runs. Pure DSP, no model. Lets whole-clip
+// STT (used without VAD/Diarize) get a timeline for non-AI timestamp post-processing.
+function detectSilences(file, durationSec, noise = "-30dB", d = 0.4) {
+  return new Promise((resolve, reject) => {
+    const ff = spawn("ffmpeg", ["-hide_banner", "-i", file, "-af", `silencedetect=noise=${noise}:d=${d}`, "-f", "null", "-"]);
+    let err = "";
+    ff.stderr.on("data", (x) => (err += x.toString()));
+    ff.on("close", () => {
+      const sil = [];
+      let curStart = null;
+      for (const ln of err.split("\n")) {
+        const ms = ln.match(/silence_start:\s*(-?[0-9.]+)/);
+        const me = ln.match(/silence_end:\s*([0-9.]+)/);
+        if (ms) curStart = Math.max(0, parseFloat(ms[1]));
+        else if (me && curStart != null) {
+          sil.push({ start: round3(curStart), end: round3(parseFloat(me[1])) });
+          curStart = null;
+        }
+      }
+      const dur = durationSec || (sil.length ? sil[sil.length - 1].end : 0);
+      if (curStart != null) sil.push({ start: round3(curStart), end: round3(dur || curStart) });
+      // invert the silences into speech runs over [0, duration]
+      const speech = [];
+      let cursor = 0;
+      for (const s of sil) {
+        if (s.start > cursor + 0.05) speech.push({ start: round3(cursor), end: round3(s.start) });
+        cursor = Math.max(cursor, s.end);
+      }
+      if (dur > cursor + 0.05) speech.push({ start: round3(cursor), end: round3(dur) });
+      resolve({ duration: round3(dur), speech, silence: sil });
+    });
+    ff.on("error", reject);
+  });
+}
+
 const upload = multer({
   storage: multer.diskStorage({
     destination: UPLOAD_DIR,
@@ -132,6 +169,20 @@ app.get("/api/upload/:id/audio", (req, res) => {
   const meta = uploads.get(req.params.id);
   if (!meta) return res.status(404).json({ error: "not found" });
   res.sendFile(path.resolve(meta.audioPath));
+});
+
+// Voiced timeline (ffmpeg silencedetect) for non-AI STT timestamp post-processing.
+app.get("/api/upload/:id/silences", async (req, res) => {
+  const meta = uploads.get(req.params.id);
+  if (!meta) return res.status(404).json({ error: "not found" });
+  if (!hasFfmpeg()) return res.status(503).json({ error: "ffmpeg not available" });
+  const noise = (req.query.noise || "-30dB").toString();
+  const d = parseFloat(req.query.d) || 0.4;
+  try {
+    res.json(await detectSilences(meta.audioPath, meta.durationSec, noise, d));
+  } catch (e) {
+    res.status(500).json({ error: String(e.message || e) });
+  }
 });
 
 // Original uploaded media (for in-browser preview of audio/video). sendFile

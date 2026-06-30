@@ -69,19 +69,23 @@ provider manually — tell them the new URL.
 
 | Cap | Title (exact, hash input) | App name | Namespace | Public URL | Internal URL |
 |---|---|---|---|---|---|
-| STT faster-whisper | `Audio Lab X V3 STT` | `audiolabxv30b0d85` | `audiolabxv30b0d85-shared` | `https://b7c85290.olarestest003.olares.com` | `http://audio-engine.audiolabxv30b0d85-shared:8000` |
-| STT Qwen3-ASR | `Audio Lab X V3 Qwen3-ASR` | (待重建) | — | — | — |
-| VAD | `Audio Lab X VAD` | (待重建) | — | — | — |
-| Diar | `Audio Lab X V3 Diar` | (待重建) | — | — | — |
-| Translate | `Audio Lab X V3 Translate` | (待重建) | — | — | — |
-| Embed | `Audio Lab X V3 Embed` | (待重建) | — | — | — |
-| Enhance | `AudioLabX Enhance` | (待重建) | — | — | — |
+| STT faster-whisper | `Audio Lab X V3 STT` | `audiolabxv3b2b539` | `audiolabxv3b2b539-shared` | (ask user — unchanged) | `http://audio-engine.audiolabxv3b2b539-shared:8000` |
+| STT Qwen3-ASR | `Audio Lab X V3 Qwen3-ASR` | `audiolabxv3a0bbb6` | `audiolabxv3a0bbb6-shared` | (ask user — unchanged) | `http://audio-engine.audiolabxv3a0bbb6-shared:8000` |
+| VAD | `Audio Lab X VAD` | `audiolabxv306a333` | `audiolabxv306a333-shared` | (ask user — unchanged) | `http://audio-engine.audiolabxv306a333-shared:8000` |
+| Diar | `Audio Lab X V3 Diar` | `audiolabxv34c7e4e` | `audiolabxv34c7e4e-shared` | (ask user — unchanged) | `http://audio-engine.audiolabxv34c7e4e-shared:8000` |
+| Translate | `Audio Lab X V3 Translate` | `audiolabxv38ab6b2` | `audiolabxv38ab6b2-shared` | (ask user — unchanged) | `http://audio-engine.audiolabxv38ab6b2-shared:8000` |
+| Embed | `Audio Lab X V3 Embed` | `audiolabxv35db0f3` | `audiolabxv35db0f3-shared` | (ask user — unchanged) | `http://audio-engine.audiolabxv35db0f3-shared:8000` |
+| Enhance (GPU 2Gi) | `AudioLabX Enhance` | `audiolabxv3d616f5` (was `1c4d10`) | `audiolabxv3d616f5-shared` | **NEW → ask user** | `http://audio-engine.audiolabxv3d616f5-shared:8000` |
 
-> 2026-06-26 RESET: all 7 instances uninstalled to swap the STT engine; only STT
-> rebuilt so far, now on **faster-whisper** (`MODEL_ENGINE=faster-whisper`,
-> `Systran/faster-whisper-large-v3`, harveyff image, BatchedInferencePipeline).
-> URL changed to `b7c85290` even with the same title (clone name `0b0d85`); Gateway
-> STT provider re-registered against it. Other 6 to be rebuilt after STT speed passes.
+> 2026-06-29 FULL REBUILD (enhance.py server-side chunking + Enhance → GPU): changed
+> `enhance.py` so per RULE 1 all 7 were uninstalled → chart 1.0.0 deleted → new tgz
+> re-uploaded → all 7 re-cloned with EXACT titles. **KEY FINDING that corrects the old
+> "URL always changes" claim: identical title + identical env reproduces the SAME
+> clone-name/hash.** 6 of 7 reproduced byte-identical app names (URLs unchanged, Gateway
+> providers untouched); **only Enhance changed** (`1c4d10` → `d616f5`) **because its env
+> changed** (`AUDIO_REQUIRED_GPU_MEMORY` 0 → 2Gi). So the URL only moves when the title
+> OR an env actually changes — reuse both verbatim to keep it stable. Enhance verified
+> `loaded as 'waveform' on cuda:0`. Only the Enhance Gateway provider needs re-pointing.
 
 ## Re-clone recipes
 
@@ -96,16 +100,21 @@ olares-cli market clone audiolabxv3 -s upload --title "<EXACT TITLE>" \
   --env AUDIO_REQUIRED_GPU_MEMORY=<...> [--env MODEL_ENGINE=qwen3-asr] --watch
 ```
 
+> **Do NOT pass `MODEL_ENGINE`** — the chart auto-selects the stt engine from MODEL_NAME
+> (`qwen*`→qwen3-asr, `Systran/`/`*faster-whisper*`/`*ctranslate2*`→faster-whisper, else
+> Whisper-on-vLLM). And `GPU_CORE_UTILIZATION_POLICY=disable` is force-set for any GPU
+> engine by the chart. So the only clone-form envs are the 4 below.
+
 | Cap | MODEL_SOURCE | MODEL_NAME | MODEL_MODE | GPU mem | extra |
 |---|---|---|---|---|---|
-| STT faster-whisper | `hf://Systran/faster-whisper-large-v3` | `Systran/faster-whisper-large-v3` | `stt` | `6Gi` | `MODEL_ENGINE=faster-whisper` (BatchedInferencePipeline; fast under time-slicing) |
-| STT Whisper (vLLM) | `hf://openai/whisper-large-v3` | `openai/whisper-large-v3` | `stt` | `8Gi` | slow under time-slicing |
-| STT Qwen3-ASR | `hf://Qwen/Qwen3-ASR-1.7B` | `Qwen/Qwen3-ASR-1.7B` | `stt` | `12Gi` | `MODEL_ENGINE=qwen3-asr` |
+| STT faster-whisper | `hf://Systran/faster-whisper-large-v3` | `Systran/faster-whisper-large-v3` | `stt` | `6Gi` | engine auto = faster-whisper (fast under time-slicing) |
+| STT Whisper (vLLM) | `hf://openai/whisper-large-v3` | `openai/whisper-large-v3` | `stt` | `8Gi` | engine auto = vLLM Whisper (slow under time-slicing) |
+| STT Qwen3-ASR | `hf://Qwen/Qwen3-ASR-1.7B` | `Qwen/Qwen3-ASR-1.7B` | `stt` | `12Gi` | engine auto = qwen3-asr (vLLM) |
 | VAD | `hf://onnx-community/silero-vad` | `silero-v5` | `vad` | `0` | — |
 | Diar | `hf://pyannote/speaker-diarization-community-1` | `pyannote-community-1` | `diar` | `4Gi` | HF token + ToS |
 | Translate | `hf://entai2965/nllb-200-distilled-600M-ctranslate2` | `nllb-200-distilled-600M` | `translate` | `0` | — |
 | Embed | `hf://pyannote/embedding` | `pyannote-embedding` | `embed` | `0` | — |
-| Enhance | `hf://speechbrain/mtl-mimic-voicebank` | `mtl-mimic-voicebank` | `enhance` | `0` | — |
+| Enhance | `hf://speechbrain/mtl-mimic-voicebank` | `mtl-mimic-voicebank` | `enhance` | `2Gi` (server-side chunking bounds VRAM; `0`=CPU still works) | — |
 
 ## ConfigMap (wrapper) edits → delete + re-clone (see RULE 1)
 

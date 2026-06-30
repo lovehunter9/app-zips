@@ -211,3 +211,24 @@ export async function fetchUploadAudio(id: string): Promise<Blob> {
   if (!r.ok) throw new Error(`fetch audio ${r.status}`);
   return r.blob();
 }
+
+export interface SilenceResult {
+  duration: number;
+  speech: { start: number; end: number }[];
+  silence: { start: number; end: number }[];
+}
+
+// Non-AI voiced-timeline detection via the app server's ffmpeg `silencedetect` filter.
+// Used only to give whole-clip STT (no VAD/Diarize) a timeline for timestamp
+// post-processing — no model involved.
+export async function fetchSilences(
+  id: string,
+  opts: { noise?: string; d?: number } = {}
+): Promise<SilenceResult> {
+  const q = new URLSearchParams();
+  if (opts.noise) q.set("noise", opts.noise);
+  if (opts.d != null) q.set("d", String(opts.d));
+  const r = await fetch(`/api/upload/${id}/silences${q.toString() ? "?" + q.toString() : ""}`);
+  if (!r.ok) throw new Error(`silences ${r.status}`);
+  return r.json();
+}
