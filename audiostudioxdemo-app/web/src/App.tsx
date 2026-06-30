@@ -271,6 +271,10 @@ export default function App() {
   // — like every other default, it minimises the number of gateway calls.
   const [translatePerSeg, setTranslatePerSeg] = useState(false);
   const [translateConc, setTranslateConc] = useState(4);
+  // Manual text → translate WITHOUT audio. Only used when no audio is uploaded; when audio
+  // IS present this box is ignored (audio transcript drives translation). Lets the Demo also
+  // act as a plain text translator.
+  const [manualText, setManualText] = useState("");
   const [upload, setUpload] = useState<UploadInfo | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadPct, setUploadPct] = useState(0);
@@ -368,6 +372,58 @@ export default function App() {
     }
   }
 
+  // Text-only translate: no audio uploaded, translate the manual text box content directly.
+  // All audio-dependent capabilities are reported as skipped. Whole-text only (the gateway
+  // splits long input into sentences server-side, so pasted paragraphs won't truncate).
+  async function runTextTranslate(manual: string) {
+    const model = selModel.translate;
+    setRunning(true);
+    setExec([]);
+    setResults({});
+    setEnhanceUrl("");
+    setProgress(null);
+    const records: ExecRecord[] = [];
+    const out: Record<string, any> = {};
+    const push = (r: ExecRecord) => {
+      records.push(r);
+      setExec([...records]);
+    };
+    const skip = (cap: CapId, reason: string) => push({ cap, invoked: false, skippedReason: reason });
+    // Everything except translate needs audio.
+    (["enhance", "vad", "diar", "stt", "embed"] as CapId[]).forEach((c) => skip(c, "纯文本翻译模式(未上传音频)"));
+    try {
+      const docLang = source === "auto" ? detectLang(manual, "eng_Latn") : source;
+      const srcMode = source === "auto" ? `自动(${langLabel(docLang)})` : langLabel(source);
+      if (!model) {
+        skip("translate", "无可用模型");
+      } else if (docLang === target) {
+        skip("translate", `源(${langLabel(docLang)})与目标(${langLabel(target)})相同,跳过翻译`);
+      } else {
+        const res = await callRetry(() => translate(settings, model, manual, target, docLang));
+        out.translate = res.json;
+        push({
+          cap: "translate",
+          invoked: true,
+          endpoint: "/v1/translate",
+          method: "POST",
+          model,
+          params: { 模式: "纯文本(无音频)", text: manual.slice(0, 80) + (manual.length > 80 ? "…" : ""), 源语言: srcMode, target: langLabel(target) },
+          status: res.status,
+          ok: res.ok,
+          durationMs: res.durationMs,
+          responseSummary: res.ok ? summarize("translate", res) : `失败 ${res.status}: ${errBody(res)}`,
+          rawResponse: JSON.stringify(res.json ?? res.text, null, 2)?.slice(0, 4000),
+        });
+      }
+      setResults(out);
+    } catch (e: any) {
+      push({ cap: "translate", invoked: true, model, error: String(e.message || e) });
+      setResults(out);
+    } finally {
+      setRunning(false);
+    }
+  }
+
   // Run the selected capabilities as a dependency-ordered workflow (not in isolation):
   //   enhance(preprocess) -> vad/diar(segmentation) -> stt(segment-wise) -> translate(per-line) -> embed(per-speaker)
   async function run() {
@@ -376,7 +432,12 @@ export default function App() {
       return;
     }
     if (!upload) {
-      alert("请先上传音频/视频");
+      const manual = manualText.trim();
+      if (manual && enabled.translate) {
+        await runTextTranslate(manual);
+        return;
+      }
+      alert("请先上传音频/视频(或在『翻译』下方文本框输入文字做纯文本翻译)");
       return;
     }
     if (!settings.key) {
@@ -1197,6 +1258,23 @@ export default function App() {
                           {perSegWarn ? "⚠ 需分段时间戳,否则=整段翻译" : "按 STT 分段逐行"}
                         </span>
                       )}
+                      <div className="flex w-full basis-full flex-col gap-1 pt-1">
+                        <textarea
+                          className="input min-h-[120px] w-full"
+                          rows={5}
+                          disabled={!enabled.translate || !!upload}
+                          value={manualText}
+                          onChange={(e) => setManualText(e.target.value)}
+                          placeholder="纯文本翻译:未上传音频时,在此输入/粘贴文字可直接翻译(已上传音频时本框被忽略)"
+                        />
+                        <span className={`text-xs ${upload ? "text-neutral-600" : manualText.trim() ? "text-emerald-400" : "text-neutral-500"}`}>
+                          {upload
+                            ? "已上传音频 → 忽略此文本框(以音频转写结果为翻译源)"
+                            : manualText.trim()
+                              ? "将翻译此文本框内容(纯文本模式,无需音频)"
+                              : "未上传音频:可在此输入文字做纯文本翻译"}
+                        </span>
+                      </div>
                         </div>
                       );
                     })()}
@@ -1301,11 +1379,16 @@ export default function App() {
             })}
           </div>
           <div className="mt-4 flex items-center gap-3">
-            <button className="btn" disabled={running || !upload || !hasGateway} onClick={run}>
-              {running ? "执行中…" : "▶ 运行所选能力"}
+            <button className="btn" disabled={running || !hasGateway || (!upload && !(manualText.trim() && enabled.translate))} onClick={run}>
+              {running ? "执行中…" : !upload && manualText.trim() ? "▶ 翻译文本框内容" : "▶ 运行所选能力"}
             </button>
             {!hasGateway && <span className="text-sm text-amber-400">⚠ 未配置 Gateway URL，已禁用调用(见①)。</span>}
-            {hasGateway && !upload && <span className="text-sm text-neutral-500">先上传音频/视频(见②)。</span>}
+            {hasGateway && !upload && !(manualText.trim() && enabled.translate) && (
+              <span className="text-sm text-neutral-500">先上传音频/视频(见②),或在『翻译』文本框输入文字做纯文本翻译。</span>
+            )}
+            {hasGateway && !upload && manualText.trim() && enabled.translate && (
+              <span className="text-sm text-emerald-400">纯文本翻译模式:将翻译文本框内容(无需音频)。</span>
+            )}
           </div>
           {running && progress && (
             <div className="mt-3 rounded border border-blue-900/60 bg-blue-950/30 px-3 py-2">
