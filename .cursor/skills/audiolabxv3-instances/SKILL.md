@@ -80,8 +80,15 @@ template edit) — it does NOT count as a per-clone `--env` override.
 
 ## Live ledger (update after any re-clone)
 
+> **2026-07-01 STATE: the 8 offline clones below are currently UNINSTALLED.** To ship the new
+> `stt_stream` mode (a chart change) the full rebuild ran (uninstall all 8 → delete chart →
+> upload → clone stt_stream). Only `stt_stream` is live now; the 8 are pending rebuild (their
+> recipes below are unchanged, so re-clone reproduces the same hashes/URLs). Rebuild when the
+> user says stt_stream is stable.
+
 | Cap | Title (exact, hash input) | App name | Namespace | Public URL | Internal URL |
 |---|---|---|---|---|---|
+| **STT Stream (Qwen3-ASR, WS)** | `Audio Lab X V3 STT Stream` | `audiolabxv30f9f88` | `audiolabxv30f9f88-shared` | `https://d123f7e6.olarestest003.olares.com` | `http://audio-engine.audiolabxv30f9f88-shared:8000` (WS `/v1/audio/stream`) |
 | STT faster-whisper | `Audio Lab X V3 STT` | `audiolabxv3b2b539` | `audiolabxv3b2b539-shared` | (ask user — unchanged) | `http://audio-engine.audiolabxv3b2b539-shared:8000` |
 | STT Qwen3-ASR | `Audio Lab X V3 Qwen3-ASR` | `audiolabxv3a0bbb6` | `audiolabxv3a0bbb6-shared` | (ask user — unchanged) | `http://audio-engine.audiolabxv3a0bbb6-shared:8000` |
 | VAD | `Audio Lab X VAD` | `audiolabxv306a333` | `audiolabxv306a333-shared` | (ask user — unchanged) | `http://audio-engine.audiolabxv306a333-shared:8000` |
@@ -91,6 +98,67 @@ template edit) — it does NOT count as a per-clone `--env` override.
 | Enhance (GPU 2Gi) | `AudioLabX Enhance` | `audiolabxv3d616f5` (was `1c4d10`) | `audiolabxv3d616f5-shared` | **NEW → ask user** | `http://audio-engine.audiolabxv3d616f5-shared:8000` |
 | Align (GPU 4Gi) | `Audio Lab X V3 Align` | `audiolabxv3396efb` | `audiolabxv3396efb-shared` | `https://3276066a.olarestest003.olares.com` | `http://audio-engine.audiolabxv3396efb-shared:8000` |
 
+> 2026-07-01 STT STREAM (mode=stt_stream, Qwen3-ASR-1.7B, WebSocket): NEW capability, VERIFIED
+> end-to-end via a WS client (中文 asr_zh.wav + 英文 asr_en.wav → correct incremental partials +
+> final). Separate app clone (`Audio Lab X V3 STT Stream`, `audiolabxv30f9f88`,
+> `https://d123f7e6.olarestest003.olares.com`), NOT merged with offline stt — Qwen streaming runs
+> a DIFFERENT process (qwen-asr in-process vLLM) than offline `vllm serve`, so they can't share
+> one instance. Engine = same **vLLM cu129** image, wrapper `/wrappers/stream.py` bridges
+> qwen-asr's `Qwen3ASRModel.LLM` streaming API (`init_streaming_state` / `streaming_transcribe` /
+> `finish_streaming_transcribe`) to a WebSocket `/v1/audio/stream` (simple JSON+PCM16 protocol:
+> client sends `{"type":"start"}` + binary PCM16 16k mono + `{"type":"stop"}`; server sends
+> `ready`/`partial`/`final`). Streaming returns NO timestamps (by design) → rolling-caption, not
+> timeline. **Path decision:** `vllm serve` has NO realtime/WS endpoint for Qwen3-ASR (its serve
+> = offline /v1/chat/completions + /v1/audio/transcriptions only); streaming ONLY lives in the
+> qwen-asr package's in-process vLLM backend → the WS wrapper is the only path (confirmed from
+> QwenLM/Qwen3-ASR README + example_qwen3_asr_vllm_streaming.py).
+> **TWO install/config gotchas (cost 2 rebuild iterations, both fixed in the chart):**
+> (1) **Do NOT `pip install qwen-asr[vllm]`** — the `[vllm]` extra makes pip re-resolve/redownload
+>     the whole vLLM stack and HANGS the container (30min+, silent under `-q`). vLLM is ALREADY in
+>     the cu129 image, so install PLAIN `qwen-asr` (align.py does the same). ~2min, reuses image vLLM.
+> (2) **Must pass `max_model_len` to `Qwen3ASRModel.LLM(...)`** — Qwen3-ASR defaults to 65536 →
+>     needs ~7GiB KV cache, but the 12Gi HAMI quota leaves only ~2.41GiB after weights → vLLM
+>     `EngineCore` ValueError-crashes at init ("estimated maximum model length is 22544"). Wrapper
+>     now passes `max_model_len=16384` (env `STREAM_MAX_LEN`; plenty for 2s streaming chunks; the
+>     offline qwen serve does the equivalent via `--max-model-len`). `gpu_memory_utilization` +
+>     `max_model_len` ARE forwarded by qwen-asr's LLM wrapper to vllm.LLM.
+> **Startup visibility:** the wrapper block-loads the vLLM engine on the MAIN thread BEFORE uvicorn
+> (vLLM `LLM()` needs the main thread for signal handlers), so /healthz 503s until ready and there
+> is NO health during load. It prints `[stream] ...` breadcrumbs (pip → constructing LLM → READY)
+> to stdout. When debugging a 0/1 pod, `container logs --tail 0` (default tail=200 gets buried by
+> the 10s /healthz 503 spam). Cold start ≈ pip ~2.5min + vLLM load ~1.5min ≈ 4–5min to 1/1.
+> **WS test recipe (no gateway needed — the openresty entrance already passes WS upgrades):**
+> `venv: pip install websockets soundfile numpy`; connect `wss://<public>/v1/audio/stream`; send
+> `{"type":"start","sample_rate":16000,"step_ms":500}` then PCM16LE 16k-mono chunks then
+> `{"type":"stop"}`; read `partial`/`final`. Client script kept at `/tmp/ws_client.py`.
+> NOTE: while the engine pod is 0/1 (loading/failed) the k8s Service excludes it → openresty
+> `proxy_pass audio-engine:8000` returns **502** on the WS handshake (not the wrapper's error).
+>
+> 2026-07-01 PERSISTENT DEPS — restart never re-installs (engine.yaml, ALL modes): the base
+> image is `latest`-tag-only + on-demand pip means a POD RESTART used to re-`pip install`
+> everything into the ephemeral container FS (network-dead users hang; qwen-asr modes eat
+> ~2.5min each restart). FIX (no new image, no llm-init change): all cmd/wrapper pip now
+> installs into a **hostPath venv at `/pydeps`** (`appData/pydeps`, mounted `/pydeps`), created
+> `python3 -m venv --system-site-packages` so the image's torch/vLLM/CUDA build is reused (only
+> the missing extras — qwen-asr/librosa/silero-vad/speechbrain/ctranslate2/fastapi — land in the
+> venv). `$pydepsPrelude` (prepended to EVERY engine cmd) makes/reuses the venv and prepends its
+> bin to PATH, so the UNCHANGED cmds transparently use it: `python3`/`pip`→venv (installs persist,
+> wrapper `try import` succeeds on restart → no pip), while `vllm` (system console script, not in
+> venv bin) still runs the image build with venv audio-extras visible via PYTHONPATH. Cmd-level
+> pip is gated by per-mode sentinels `/pydeps/.{stt,stt_stream,align,fw}.ok` → skipped entirely on
+> restart (NO PyPI hit). Contract honored: **first install / uninstall+reinstall** repopulate
+> (model download happens anyway); **restart re-installs NOTHING**. Falls back to ephemeral system
+> installs if venv can't be created (no worse than before). `/pydeps` is per-instance (appData) so
+> each clone downloads once on first start; not shared across clones (kept simple, race-free).
+> **VERIFIED 2026-07-01** on the rebuilt stt_stream clone (`audiolabxv30f9f88`, re-uploaded new
+> tgz + re-cloned): first install ran pip into the venv normally; a `cluster pod restart` then came
+> back 1/1 with **ZERO pip activity** in logs (no Collecting/Downloading/Successfully installed, no
+> "creating persistent venv") — first `[stream]` line post-restart was `constructing ...LLM`, i.e.
+> sentinel `/pydeps/.stt_stream.ok` hit + venv reused, pip fully skipped. Restart→ready ≈ 1m46s of
+> pure vLLM load (vs first install's +~2.5min pip). Re-clone reused the SAME hash
+> `audiolabxv30f9f88` → public URL likely unchanged (`https://d123f7e6.olarestest003.olares.com`,
+> confirm with user per RULE 0).
+>
 > 2026-07-01 Qwen3-ASR OOM FIX (full rebuild, all 8, URLs unchanged): Qwen3-ASR pod was
 > periodically `OOMKilled` (exit 137) at the 18Gi container RAM limit → K8s restart → 502
 > window (vLLM slow to boot). Root cause = host-RAM peak under concurrent long-audio load,
@@ -148,6 +216,7 @@ olares-cli market clone audiolabxv3 -s upload --title "<EXACT TITLE>" \
 | STT faster-whisper | `hf://Systran/faster-whisper-large-v3` | `Systran/faster-whisper-large-v3` | `stt` | `6Gi` | engine auto = faster-whisper (fast under time-slicing) |
 | STT Whisper (vLLM) | `hf://openai/whisper-large-v3` | `openai/whisper-large-v3` | `stt` | `8Gi` | engine auto = vLLM Whisper (slow under time-slicing) |
 | STT Qwen3-ASR | `hf://Qwen/Qwen3-ASR-1.7B` | `Qwen/Qwen3-ASR-1.7B` | `stt` | `12Gi` | engine auto = qwen3-asr (vLLM) |
+| STT Stream (Qwen3-ASR, WS) | `hf://Qwen/Qwen3-ASR-1.7B` | `Qwen/Qwen3-ASR-1.7B` | `stt_stream` | `12Gi` | title `Audio Lab X V3 STT Stream`; WS `/v1/audio/stream`; wrapper stream.py |
 | VAD | `hf://onnx-community/silero-vad` | `silero-v5` | `vad` | `0` | — |
 | Diar | `hf://pyannote/speaker-diarization-community-1` | `pyannote-community-1` | `diar` | `4Gi` | HF token + ToS |
 | Translate | `hf://entai2965/nllb-200-distilled-600M-ctranslate2` | `nllb-200-distilled-600M` | `translate` | `0` | — |

@@ -1094,3 +1094,233 @@ data:
 
     if __name__ == "__main__":
         uvicorn.run(app, host="0.0.0.0", port=PORT, log_level=LOG_LEVEL)
+  stream.py: |
+    # Streaming STT (mode=stt_stream) for Qwen3-ASR, reusing the SAME vLLM cu129 image as
+    # offline stt/align (NO new image). Qwen3-ASR's streaming does NOT live in `vllm serve`
+    # (its serve only exposes offline /v1/chat/completions + /v1/audio/transcriptions); it
+    # lives in the official qwen-asr[vllm] package's IN-PROCESS API
+    # (Qwen3ASRModel.LLM + init_streaming_state / streaming_transcribe /
+    # finish_streaming_transcribe). So this wrapper loads that engine in-process and bridges
+    # it to a WebSocket. qwen-asr[vllm] is pip-installed on first load (engine cmd); the
+    # model is read from the shared HF cache (HF_HUB_OFFLINE=1).
+    #
+    # WebSocket contract (client <-> this wrapper) — a deliberately SIMPLE JSON+binary
+    # protocol (the gateway just tunnels frames; the client is our own Demo):
+    #   (upgrade) GET /v1/audio/stream
+    #   client -> server:
+    #     - optional first TEXT frame: {"type":"start","language":<str|null>,
+    #        "sample_rate":16000,"step_ms":500}
+    #     - BINARY frames: raw PCM16LE mono @ sample_rate audio chunks
+    #     - TEXT frame {"type":"stop"} (or socket close) to finalize
+    #   server -> client:
+    #     - {"type":"ready"}                              # per-connection stream armed
+    #     - {"type":"partial","text":...,"language":...}  # after each processed step
+    #     - {"type":"final","text":...,"language":...}    # after finish
+    #     - {"type":"error","detail":...}
+    # Also exposes GET /healthz, GET /readyz, GET /health, GET /v1/models for k8s probes +
+    # the gateway model registry. NOTE: Qwen streaming returns NO timestamps (by design), so
+    # this mode is a rolling-caption surface, not a timeline one.
+    import os, sys, json, asyncio, logging, subprocess
+    from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+    import uvicorn
+
+    LOG_LEVEL = os.environ.get("LOG_LEVEL", "info").lower()
+    logging.basicConfig(level=getattr(logging, LOG_LEVEL.upper(), logging.INFO))
+    log = logging.getLogger("audio-stt-stream")
+
+    MODEL_NAME = os.environ.get("MODEL_NAME", "Qwen/Qwen3-ASR-1.7B")
+    _src = os.environ.get("MODEL_SOURCE", "")
+    MODEL_REPO = _src[5:] if _src.startswith("hf://") else (_src or MODEL_NAME)
+    PORT = int(os.environ.get("WRAPPER_PORT", "8000"))
+    GPU_UTIL = float(os.environ.get("VLLM_GPU_UTIL", "0.45") or 0.45)
+    MAX_NEW_TOKENS = int(os.environ.get("STREAM_MAX_NEW_TOKENS", "32") or 32)
+    # Qwen3-ASR's default max_model_len is 65536 -> needs ~7GiB KV cache, which does NOT fit
+    # in the KV budget left after weights under the 12GiB HAMI quota (only ~2.4GiB free), so
+    # the vLLM engine ValueError-crashes at init. Streaming only processes tiny 2s chunks, so
+    # a small window is plenty. Cap it (well under the ~22.5k the engine reports as feasible).
+    # Mirrors what the offline qwen `vllm serve` does with --max-model-len. Override via
+    # STREAM_MAX_LEN. (Do NOT reuse VLLM_MAX_LEN=32768 — still too big for the KV budget here.)
+    MAX_MODEL_LEN = int(os.environ.get("STREAM_MAX_LEN", "16384") or 16384)
+    # Streaming state knobs mirror the official example defaults (2s chunks, keep the last
+    # few chunks/tokens "unfixed" so they can still change as more audio arrives).
+    UNFIXED_CHUNK_NUM = int(os.environ.get("STREAM_UNFIXED_CHUNK_NUM", "2") or 2)
+    UNFIXED_TOKEN_NUM = int(os.environ.get("STREAM_UNFIXED_TOKEN_NUM", "5") or 5)
+    CHUNK_SIZE_SEC = float(os.environ.get("STREAM_CHUNK_SIZE_SEC", "2.0") or 2.0)
+    DEFAULT_STEP_MS = int(os.environ.get("STREAM_STEP_MS", "500") or 500)
+
+    app = FastAPI(title="audio-stt-stream (Qwen3-ASR streaming)")
+    _state = {"ready": False, "error": None, "asr": None}
+    # vLLM's offline LLM.generate is blocking and not safe for concurrent calls; serialize
+    # all inference across connections behind one lock (fine for a base/PoC instance).
+    _infer_lock = asyncio.Lock()
+
+    def _p(msg):
+        # Startup breadcrumbs to stdout (flushed) so `container logs` shows load progress
+        # even before the logging handler / uvicorn are up (the engine block-loads first).
+        print("[stream] " + msg, flush=True)
+
+    def _load_blocking():
+        # Load the qwen-asr vLLM streaming engine IN THE MAIN PROCESS/THREAD (before uvicorn
+        # starts). vLLM's offline LLM() installs signal handlers + spawns worker procs at
+        # construction, so it MUST be built on the main thread (a daemon thread raises
+        # "signal only works in main thread"). Health endpoints only come up AFTER this
+        # returns — same behaviour as `vllm serve` (the k8s probe just retries until then).
+        # NOTE: we install PLAIN `qwen-asr` (NOT the [vllm] extra) — vLLM is ALREADY in this
+        # cu129 image, and the [vllm] extra makes pip try to re-resolve/re-download the whole
+        # vLLM stack (observed hanging the container). The streaming API only needs vllm
+        # importable, which it is. (align.py uses plain qwen-asr on this same image.)
+        _p("importing qwen_asr ...")
+        try:
+            from qwen_asr import Qwen3ASRModel
+        except Exception as e:
+            _p("qwen_asr import failed (%s); pip-installing ..." % e)
+            subprocess.run([sys.executable, "-m", "pip", "install", "-q",
+                            "--ignore-installed", "blinker"], check=False)
+            subprocess.run([sys.executable, "-m", "pip", "install",
+                            "qwen-asr", "soundfile"], check=False)
+            from qwen_asr import Qwen3ASRModel
+        _p("constructing Qwen3ASRModel.LLM(model=%s, gpu_util=%.2f, max_model_len=%d) ..."
+           % (MODEL_REPO, GPU_UTIL, MAX_MODEL_LEN))
+        # gpu_memory_utilization + max_model_len are vLLM LLM kwargs the qwen-asr wrapper
+        # forwards (that's how gpu_memory_utilization already works). If a given qwen-asr
+        # build doesn't forward max_model_len, retry without it (will need a smaller quota).
+        _kw = dict(model=MODEL_REPO, gpu_memory_utilization=GPU_UTIL, max_new_tokens=MAX_NEW_TOKENS)
+        try:
+            asr = Qwen3ASRModel.LLM(max_model_len=MAX_MODEL_LEN, **_kw)
+        except TypeError as e:
+            _p("LLM() rejected max_model_len (%s); retrying without it" % e)
+            asr = Qwen3ASRModel.LLM(**_kw)
+        _state["asr"] = asr
+        _state["ready"] = True
+        _p("engine READY: %s (gpu_util=%.2f)" % (MODEL_REPO, GPU_UTIL))
+        log.info("qwen-asr streaming engine loaded: %s (gpu_util=%.2f)", MODEL_REPO, GPU_UTIL)
+
+    @app.get("/healthz")
+    def healthz():
+        if _state["ready"]:
+            return {"status": "ok"}
+        raise HTTPException(status_code=503, detail=_state["error"] or "loading model")
+
+    @app.get("/readyz")
+    def readyz():
+        return healthz()
+
+    @app.get("/health")
+    def health():
+        return healthz()
+
+    @app.get("/v1/models")
+    def models():
+        return {"object": "list",
+                "data": [{"id": MODEL_NAME, "object": "model", "mode": "stt_stream"}]}
+
+    def _pcm16_to_f32(buf):
+        import numpy as np
+        if not buf:
+            return np.zeros((0,), dtype="float32")
+        return np.frombuffer(buf, dtype="<i2").astype("float32") / 32768.0
+
+    def _resample_linear(seg, src_sr):
+        import numpy as np
+        if src_sr == 16000 or seg.shape[0] == 0:
+            return seg.astype("float32", copy=False)
+        dur = seg.shape[0] / float(src_sr)
+        n16 = int(round(dur * 16000))
+        if n16 <= 0:
+            return np.zeros((0,), dtype="float32")
+        xo = np.linspace(0.0, dur, num=seg.shape[0], endpoint=False)
+        xn = np.linspace(0.0, dur, num=n16, endpoint=False)
+        return np.interp(xn, xo, seg).astype("float32")
+
+    @app.websocket("/v1/audio/stream")
+    async def stream(ws: WebSocket):
+        import numpy as np
+        await ws.accept()
+        if not _state["ready"]:
+            await ws.send_text(json.dumps({"type": "error",
+                                           "detail": _state["error"] or "model not ready"}))
+            await ws.close()
+            return
+        asr = _state["asr"]
+        sample_rate = 16000
+        step_ms = DEFAULT_STEP_MS
+        language = None
+        st = asr.init_streaming_state(
+            unfixed_chunk_num=UNFIXED_CHUNK_NUM,
+            unfixed_token_num=UNFIXED_TOKEN_NUM,
+            chunk_size_sec=CHUNK_SIZE_SEC,
+        )
+        pending = np.zeros((0,), dtype="float32")
+        await ws.send_text(json.dumps({"type": "ready"}))
+
+        async def _emit_partial():
+            await ws.send_text(json.dumps({
+                "type": "partial",
+                "text": getattr(st, "text", "") or "",
+                "language": getattr(st, "language", None),
+            }))
+
+        try:
+            while True:
+                msg = await ws.receive()
+                if msg.get("type") == "websocket.disconnect":
+                    break
+                text = msg.get("text")
+                if text is not None:
+                    try:
+                        obj = json.loads(text)
+                    except Exception:
+                        obj = {}
+                    t = obj.get("type")
+                    if t == "start":
+                        language = obj.get("language") or None
+                        sample_rate = int(obj.get("sample_rate") or 16000)
+                        step_ms = int(obj.get("step_ms") or DEFAULT_STEP_MS)
+                        continue
+                    if t in ("stop", "done", "finish"):
+                        break
+                    continue
+                data = msg.get("bytes")
+                if not data:
+                    continue
+                seg = _resample_linear(_pcm16_to_f32(data), sample_rate)
+                pending = np.concatenate([pending, seg]) if pending.size else seg
+                step = max(1, int(round(step_ms / 1000.0 * 16000)))
+                while pending.shape[0] >= step:
+                    cur, pending = pending[:step], pending[step:]
+                    async with _infer_lock:
+                        await asyncio.to_thread(asr.streaming_transcribe, cur, st)
+                    await _emit_partial()
+            # flush tail + finalize
+            if pending.size:
+                async with _infer_lock:
+                    await asyncio.to_thread(asr.streaming_transcribe, pending, st)
+            async with _infer_lock:
+                await asyncio.to_thread(asr.finish_streaming_transcribe, st)
+            await ws.send_text(json.dumps({
+                "type": "final",
+                "text": getattr(st, "text", "") or "",
+                "language": getattr(st, "language", None),
+            }))
+            await ws.close()
+        except WebSocketDisconnect:
+            pass
+        except Exception as e:
+            log.exception("stream error: %s", e)
+            try:
+                await ws.send_text(json.dumps({"type": "error", "detail": str(e)}))
+                await ws.close()
+            except Exception:
+                pass
+
+    if __name__ == "__main__":
+        # Block-load the vLLM engine on the MAIN thread BEFORE serving (see _load_blocking).
+        _p("stream.py starting; model=%s port=%s" % (MODEL_REPO, PORT))
+        try:
+            _load_blocking()
+        except Exception as e:
+            _state["error"] = str(e)
+            _p("engine load FAILED: %s" % e)
+            log.exception("engine load failed: %s", e)
+        _p("starting uvicorn on :%s (ready=%s)" % (PORT, _state["ready"]))
+        uvicorn.run(app, host="0.0.0.0", port=PORT, log_level=LOG_LEVEL)

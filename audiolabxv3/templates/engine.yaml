@@ -23,13 +23,24 @@
        here. ENGINE_IMAGE / ENGINE_PORT / ENGINE_HEALTH_PATH stay as OPTIONAL post-
        install overrides (empty = use the mapped value). All images are converted
        (beclab/, no latest). */ -}}
-{{- /* Only stt/vad/diar/translate/embed/enhance are WIRED. Other modes are reserved in the
-       MODEL_MODE enum; selecting one points at an obviously-unbuilt placeholder
+{{- /* Only stt/stt_stream/vad/diar/translate/embed/enhance/align are WIRED. Other modes are
+       reserved in the MODEL_MODE enum; selecting one points at an obviously-unbuilt placeholder
        image (voice-engine-<mode>:notbuilt) so it's clear the engine isn't ready yet.
+       stt_stream (streaming ASR) rides the SAME vLLM cu129 image as offline stt/align but runs
+       /wrappers/stream.py: Qwen3-ASR streaming lives in the qwen-asr[vllm] package's IN-PROCESS
+       API (Qwen3ASRModel.LLM + init/streaming/finish_streaming_transcribe) — `vllm serve` has NO
+       realtime/WS endpoint for it — so the wrapper loads that engine and bridges it to a
+       WebSocket (/v1/audio/stream). Plain qwen-asr is pip-installed on first load (NO [vllm]
+       extra — vLLM is already in this image; the extra re-resolves the whole vLLM stack and
+       hangs the container). NO new image.
        An entry may carry "cmd": that mode REUSES an image but overrides the container
        command to run an injected wrapper script (templates/wrappers.yaml), so we don't
        build a new image. EVERY non-stt capability rides the ONE pyannote/torch image and
        pip-installs any missing dep on first load (same on-demand pattern throughout).
+       PERSISTENCE: those first-load installs go into a hostPath venv at /pydeps (see the
+       $pydepsPrelude below), so ONLY the first install (or an uninstall+reinstall) downloads
+       — a POD RESTART reuses the venv and re-installs NOTHING (no network). This keeps the
+       on-demand model workable even on the `latest`-only base image and flaky networks.
        vad runs /wrappers/vad.py: soundfile decode + the `silero-vad` pip pkg on the
        image's torch (it bundles its own model). CPU-ok.
        translate (text->text MT, the boss's "translate" = e.g. NLLB) runs
@@ -63,13 +74,14 @@
        qwen-asr toolkit's end-to-end aligner — timestamps come from the model itself, no
        external CTC/Viterbi), pip-installing qwen-asr on first load. Still NO new image. */ -}}
 {{- $engines := dict
-      "stt"  (dict "image" "docker.io/beclab/vllm-vllm-openai:v0.23.0-cu129" "port" "8000" "health" "/health" "cmd" "export HF_HUB_OFFLINE=1; python3 -m pip install -q librosa soundfile av 2>/dev/null || true; exec vllm serve $MODEL_NAME --host 0.0.0.0 --port $WRAPPER_PORT --gpu-memory-utilization ${VLLM_GPU_UTIL:-0.45} --mm-processor-cache-gb ${VLLM_MM_CACHE_GB:-1}")
+      "stt"  (dict "image" "docker.io/beclab/vllm-vllm-openai:v0.23.0-cu129" "port" "8000" "health" "/health" "cmd" "export HF_HUB_OFFLINE=1; [ -f /pydeps/.stt.ok ] || { python3 -m pip install -q librosa soundfile av && touch /pydeps/.stt.ok; }; exec vllm serve $MODEL_NAME --host 0.0.0.0 --port $WRAPPER_PORT --gpu-memory-utilization ${VLLM_GPU_UTIL:-0.45} --mm-processor-cache-gb ${VLLM_MM_CACHE_GB:-1}")
+      "stt_stream" (dict "image" "docker.io/beclab/vllm-vllm-openai:v0.23.0-cu129" "port" "8000" "health" "/healthz" "cmd" "export HF_HUB_OFFLINE=1; export PYTHONUNBUFFERED=1; [ -f /pydeps/.stt_stream.ok ] || { echo '[stream] first-run: installing qwen-asr + audio/ws deps into /pydeps (reusing image vLLM, NO [vllm] extra)'; python3 -m pip install -q --root-user-action=ignore --ignore-installed blinker || true; python3 -m pip install --root-user-action=ignore qwen-asr soundfile librosa av websockets && touch /pydeps/.stt_stream.ok; }; echo '[stream] launching stream.py'; exec $(command -v python3 || command -v python) /wrappers/stream.py")
       "vad"  (dict "image" "docker.io/beclab/maximsachs-pyannote_fastapi:4.0.4" "port" "8000" "health" "/healthz" "cmd" "exec $(command -v python3 || command -v python) /wrappers/vad.py")
       "diar" (dict "image" "docker.io/beclab/maximsachs-pyannote_fastapi:4.0.4" "port" "8000" "health" "/healthz" "cmd" "exec $(command -v python3 || command -v python) /wrappers/diar.py")
       "translate" (dict "image" "docker.io/beclab/maximsachs-pyannote_fastapi:4.0.4" "port" "8000" "health" "/healthz" "cmd" "exec $(command -v python3 || command -v python) /wrappers/translate.py")
       "embed" (dict "image" "docker.io/beclab/maximsachs-pyannote_fastapi:4.0.4" "port" "8000" "health" "/healthz" "cmd" "exec $(command -v python3 || command -v python) /wrappers/embed.py")
       "enhance" (dict "image" "docker.io/beclab/maximsachs-pyannote_fastapi:4.0.4" "port" "8000" "health" "/healthz" "cmd" "exec $(command -v python3 || command -v python) /wrappers/enhance.py")
-      "align" (dict "image" "docker.io/beclab/vllm-vllm-openai:v0.23.0-cu129" "port" "8000" "health" "/healthz" "cmd" "export HF_HUB_OFFLINE=1; python3 -m pip install -q --ignore-installed blinker || true; python3 -m pip install -q qwen-asr librosa soundfile av || true; exec $(command -v python3 || command -v python) /wrappers/align.py") -}}
+      "align" (dict "image" "docker.io/beclab/vllm-vllm-openai:v0.23.0-cu129" "port" "8000" "health" "/healthz" "cmd" "export HF_HUB_OFFLINE=1; [ -f /pydeps/.align.ok ] || { python3 -m pip install -q --ignore-installed blinker || true; python3 -m pip install -q qwen-asr librosa soundfile av && touch /pydeps/.align.ok; }; exec $(command -v python3 || command -v python) /wrappers/align.py") -}}
 {{- $sel := index $engines $modelMode -}}
 {{- if not $sel -}}
 {{- $sel = dict "image" (printf "docker.io/beclab/voice-engine-%s:notbuilt" $modelMode) "port" "8000" "health" "/healthz" -}}
@@ -131,8 +143,8 @@
        must be a CT2 whisper repo, e.g. Systran/faster-whisper-large-v3. fastapi/uvicorn are
        pip-installed if missing WITHOUT --deps so the image's ctranslate2 is never replaced. */ -}}
 {{- $engineAlts := dict
-      "qwen3-asr" (dict "image" "docker.io/beclab/vllm-vllm-openai:v0.23.0-cu129" "port" "8000" "health" "/health" "cmd" "export HF_HUB_OFFLINE=1; python3 -m pip install -q librosa soundfile av 2>/dev/null || true; exec vllm serve $MODEL_NAME --host 0.0.0.0 --port $WRAPPER_PORT --gpu-memory-utilization ${VLLM_GPU_UTIL:-0.45} --max-model-len ${VLLM_MAX_LEN:-32768} --mm-processor-cache-gb ${VLLM_MM_CACHE_GB:-1}")
-      "faster-whisper" (dict "image" "docker.io/beclab/harveyff-whisper-webui:v1.0.7" "port" "8000" "health" "/health" "cmd" "export HF_HUB_OFFLINE=1; python3 -m pip install -q fastapi uvicorn 2>/dev/null || true; exec $(command -v python3 || command -v python) /wrappers/stt_fw.py") -}}
+      "qwen3-asr" (dict "image" "docker.io/beclab/vllm-vllm-openai:v0.23.0-cu129" "port" "8000" "health" "/health" "cmd" "export HF_HUB_OFFLINE=1; [ -f /pydeps/.stt.ok ] || { python3 -m pip install -q librosa soundfile av && touch /pydeps/.stt.ok; }; exec vllm serve $MODEL_NAME --host 0.0.0.0 --port $WRAPPER_PORT --gpu-memory-utilization ${VLLM_GPU_UTIL:-0.45} --max-model-len ${VLLM_MAX_LEN:-32768} --mm-processor-cache-gb ${VLLM_MM_CACHE_GB:-1}")
+      "faster-whisper" (dict "image" "docker.io/beclab/harveyff-whisper-webui:v1.0.7" "port" "8000" "health" "/health" "cmd" "export HF_HUB_OFFLINE=1; [ -f /pydeps/.fw.ok ] || { python3 -m pip install -q fastapi uvicorn && touch /pydeps/.fw.ok; }; exec $(command -v python3 || command -v python) /wrappers/stt_fw.py") -}}
 {{- if $engineSel -}}
 {{- $alt := index $engineAlts $engineSel -}}
 {{- if $alt -}}{{- $sel = $alt -}}{{- end -}}
@@ -141,6 +153,19 @@
 {{- $enginePort := int ($oe.ENGINE_PORT | default (index $sel "port")) -}}
 {{- $healthPath := $oe.ENGINE_HEALTH_PATH | default (index $sel "health") -}}
 {{- $engineCmd := index $sel "cmd" | default "" -}}
+{{- /* PERSISTENT-DEPS PRELUDE (prepended to every engine cmd). Any pip-installed extra
+       (qwen-asr, librosa, silero-vad, speechbrain, ctranslate2, fastapi, ...) is installed
+       into a hostPath venv at /pydeps (appData/pydeps) instead of the ephemeral container FS,
+       so a POD RESTART reuses it and NEVER re-installs (no network hit — critical for the
+       `latest`-only base image + flaky-network users). --system-site-packages keeps the
+       image's own torch/vLLM/CUDA build (no heavy re-pull); only the missing extras land in
+       the venv. Prepending the venv bin to PATH makes the UNCHANGED cmds transparently use it:
+       `python3`/`pip` resolve to the venv (installs persist + wrapper `try import` succeeds on
+       restart), while `vllm` (a system console script, absent from the venv bin) still runs the
+       image's build with the venv's audio extras visible via PYTHONPATH. If venv creation fails
+       we fall back to ephemeral system installs (no worse than before). Per-mode `.ok` sentinels
+       (below) let cmd-level pip skip entirely on restart. */ -}}
+{{- $pydepsPrelude := "mkdir -p /pydeps; VENV=/pydeps/venv; if [ ! -x $VENV/bin/python ]; then echo '[pydeps] creating persistent venv (first run)'; python3 -m venv --system-site-packages $VENV || echo '[pydeps] WARN: venv unavailable, using ephemeral system installs'; fi; if [ -x $VENV/bin/python ]; then export PATH=$VENV/bin:$PATH; export PYTHONPATH=$(ls -d $VENV/lib/python*/site-packages 2>/dev/null | head -n1):${PYTHONPATH:-}; fi;" -}}
 {{- $engineArgs := $oe.ENGINE_ARGS | default "" -}}
 {{- $hfEndpoint := $oe.HF_ENDPOINT | default "" -}}
 {{- $hfToken := $oe.HF_TOKEN | default "" -}}
@@ -225,6 +250,12 @@ spec:
           hostPath:
             path: "{{ .Values.userspace.appData }}/data"
             type: DirectoryOrCreate
+        # Persistent pip target (a --system-site-packages venv) so a POD RESTART never
+        # re-installs deps (no network); only first install / uninstall+reinstall repopulates it.
+        - name: pydeps
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/pydeps"
+            type: DirectoryOrCreate
         # Wrapper scripts for capabilities that reuse an image via command override.
         - name: wrappers
           configMap:
@@ -254,7 +285,7 @@ spec:
 {{- if $engineCmd }}
           # Capability reuses this image but runs an injected wrapper instead of the
           # image's native entrypoint (see templates/wrappers.yaml).
-          command: ["/bin/sh", "-c", "{{ $engineCmd }}"]
+          command: ["/bin/sh", "-c", "{{ $pydepsPrelude }} {{ $engineCmd }}"]
 {{- end }}
 {{- if $engineArgs }}
           args:
@@ -333,6 +364,8 @@ spec:
               mountPath: /cache/hf/hub
             - name: data
               mountPath: /tmp
+            - name: pydeps
+              mountPath: /pydeps
             - name: wrappers
               mountPath: /wrappers
               readOnly: true

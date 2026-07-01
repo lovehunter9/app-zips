@@ -47,14 +47,14 @@ spec:
     **Clone form (4 required envs)**
     - `MODEL_SOURCE` — `hf://<repo>` (llm-init download spec).
     - `MODEL_NAME` — model id advertised to clients.
-    - `MODEL_MODE` — `stt` / `vad` / `diar` / `translate` / `embed` / `enhance` / `align` (engine auto-derived from mode).
+    - `MODEL_MODE` — `stt` / `stt_stream` / `vad` / `diar` / `translate` / `embed` / `enhance` / `align` (engine auto-derived from mode).
     - The stt ENGINE is AUTO-SELECTED from `MODEL_NAME` (NOT a clone field): a Qwen name ->
       Qwen3-ASR on vLLM; a CTranslate2 / Systran faster-whisper name -> faster-whisper
       (harveyff image, must use that engine since vLLM can't load CT2); otherwise -> Whisper
       on vLLM. All expose the same `/v1/audio/transcriptions` contract. GPU engines also force
       `GPU_CORE_UTILIZATION_POLICY=disable` (drop HAMi compute throttle, keep memory isolation)
       so they run full-speed under the time-sliced vGPU.
-    - `AUDIO_REQUIRED_GPU_MEMORY` — `"0"` for CPU-only (VAD, Translate, Embed, Enhance); STT: `8Gi`; Diar: `4Gi`; STT(qwen3-asr, 1.7B): `12Gi`; Align(Qwen3-ForcedAligner-0.6B): `4Gi`.
+    - `AUDIO_REQUIRED_GPU_MEMORY` — `"0"` for CPU-only (VAD, Translate, Embed, Enhance); STT: `8Gi`; Diar: `4Gi`; STT(qwen3-asr, 1.7B): `12Gi`; STT Stream(Qwen3-ASR 1.7B, streaming): `12Gi`; Align(Qwen3-ForcedAligner-0.6B): `4Gi`.
 
     **Engine images** — vLLM cu129 serves stt (Whisper / Qwen3-ASR) AND align
     (Qwen3-ForcedAligner via /wrappers/align.py — needs recent transformers + cu129 torch);
@@ -67,6 +67,8 @@ spec:
       MODEL_NAME=openai/whisper-large-v3  MODEL_MODE=stt  AUDIO_REQUIRED_GPU_MEMORY=8Gi
     - STT (Qwen3-ASR, vLLM engine): MODEL_SOURCE=hf://Qwen/Qwen3-ASR-1.7B
       MODEL_NAME=Qwen/Qwen3-ASR-1.7B  MODEL_MODE=stt  MODEL_ENGINE=qwen3-asr  AUDIO_REQUIRED_GPU_MEMORY=12Gi
+    - STT Stream (Qwen3-ASR, WebSocket): MODEL_SOURCE=hf://Qwen/Qwen3-ASR-1.7B
+      MODEL_NAME=Qwen/Qwen3-ASR-1.7B  MODEL_MODE=stt_stream  AUDIO_REQUIRED_GPU_MEMORY=12Gi
     - VAD:  MODEL_SOURCE=hf://onnx-community/silero-vad
       MODEL_NAME=silero-v5  MODEL_MODE=vad  AUDIO_REQUIRED_GPU_MEMORY=0
     - Diar: MODEL_SOURCE=hf://pyannote/speaker-diarization-community-1
@@ -149,6 +151,8 @@ envs:
     options:
     - title: STT (offline)
       value: stt
+    - title: STT Stream (Qwen3-ASR, WebSocket)
+      value: stt_stream
     - title: VAD
       value: vad
     - title: Diarize
