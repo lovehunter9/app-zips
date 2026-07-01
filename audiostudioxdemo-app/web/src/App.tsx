@@ -287,6 +287,10 @@ function punctLineBreaks(refText: string, c0: number, c1: number, maxLen: number
     while (j < c1 && /["'”’」』）)\]\s]/.test(refText[j])) j++;
     return j;
   };
+  // A comma-less clause is only force-wrapped once it runs this long, so English lines
+  // break at punctuation (comma / sentence end) rather than at an arbitrary mid-clause
+  // space (which produced orphan fragments like ".../ do" + "it myself.").
+  const hardCap = Math.max(maxLen * 2, 160);
   const cuts: number[] = [];
   let lineStart = c0;
   let lastComma = -1;
@@ -298,9 +302,16 @@ function punctLineBreaks(refText: string, c0: number, c1: number, maxLen: number
     let cutAt = -1;
     if (sentEnd) cutAt = swallow(i);
     else if (comma) lastComma = swallow(i);
+    // Past the soft cap, prefer a natural CLAUSE break (comma/、；: etc.) for BOTH scripts.
     if (cutAt < 0 && i - lineStart + 1 >= maxLen) {
       if (lastComma > lineStart) cutAt = lastComma;
-      else if (isCJK(ch) || nxt === "" || /\s/.test(nxt)) cutAt = i + 1;
+      else if (isCJK(ch)) cutAt = i + 1; // CJK has no spaces → wrap at a char (unchanged)
+      // Latin with NO clause mark yet: do NOT wrap mid-clause at a space — respect the
+      // punctuation and read on to the next comma / sentence end. The hardCap below is
+      // the only space-wrap fallback, so one comma-less run can't swallow the screen.
+    }
+    if (cutAt < 0 && !isCJK(ch) && (nxt === "" || /\s/.test(nxt)) && i - lineStart + 1 >= hardCap) {
+      cutAt = i + 1;
     }
     if (cutAt > lineStart) {
       cuts.push(cutAt);
@@ -897,7 +908,10 @@ export default function App() {
         // speakers for the full clip in a single call, which is cleaner than chunk-and-stitch
         // (that over-fragmented long audio into many tiny turns). The gateway allows up to
         // 600s for the round-trip, covering long clips.
-        const res = await callRetry(() => audioMultipart(settings, "diarization", workingAudio, model, {}), 1);
+        // Retry transient 5xx like VAD (its sibling segmentation op). A transient edge/gateway
+        // 502 returns fast so the retries are cheap; callRetry still short-circuits an open
+        // circuit breaker so we never hammer a genuinely-down provider.
+        const res = await callRetry(() => audioMultipart(settings, "diarization", workingAudio, model, {}), 3);
         out.diar = res.json;
         diarSegs = asSegments(res.json);
         push({
@@ -1592,7 +1606,7 @@ export default function App() {
     <div className="min-h-screen bg-neutral-950 text-neutral-100">
       <header className="border-b border-neutral-800 px-6 py-4">
         <h1 className="text-xl font-semibold">Audio Studio X Demo</h1>
-        <p className="text-sm text-neutral-400">上传音频/视频 → 经 LLM Gateway 调用 M1 音频能力(STT / 翻译 / VAD / 分离 / 增强 / 声纹)</p>
+        <p className="text-sm text-neutral-400">上传音频/视频 → 经 LLM Gateway 调用 M1 音频能力(STT / 对齐 / 翻译 / VAD / 分离 / 增强 / 声纹)</p>
       </header>
 
       <main className="mx-auto max-w-5xl space-y-6 px-6 py-6">

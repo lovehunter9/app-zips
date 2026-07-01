@@ -27,12 +27,35 @@ function throwIfAuthRedirect(r: Response) {
   }
 }
 
+// The public Olares edge/tunnel intermittently resets the connection (ECONNRESET / 502 /
+// 530 before TLS was even established) — an INFRA blip, unrelated to any model. The app
+// server surfaces it as a 502 JSON response, so retry idempotent console GETs a few times
+// with backoff (mirrors the data-plane callRetry) so a single edge hiccup doesn't fail the
+// whole "refresh models / test connection". Auth redirects (status 0 / 3xx) are NOT retried.
+async function consoleGetRetry(url: string, s: Settings, tries = 3): Promise<Response> {
+  let lastErr: unknown;
+  for (let i = 0; i < tries; i++) {
+    try {
+      const r = await fetch(url, { headers: gwHeaders(s), credentials: "include", redirect: "manual" });
+      if (r.status >= 500 && i < tries - 1) {
+        await new Promise((res) => setTimeout(res, 600 * Math.pow(2, i)));
+        continue;
+      }
+      return r;
+    } catch (e) {
+      lastErr = e;
+      if (i < tries - 1) {
+        await new Promise((res) => setTimeout(res, 600 * Math.pow(2, i)));
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw lastErr ?? new Error("fetch failed");
+}
+
 export async function fetchProviderModels(s: Settings): Promise<ProviderModel[]> {
-  const r = await fetch("/api/gw/console/api/provider-models?limit=1000", {
-    headers: gwHeaders(s),
-    credentials: "include",
-    redirect: "manual",
-  });
+  const r = await consoleGetRetry("/api/gw/console/api/provider-models?limit=1000", s);
   throwIfAuthRedirect(r);
   const body = await readBody(r);
   if (!r.ok) throw new Error(`provider-models ${r.status}: ${JSON.stringify(body).slice(0, 300)}`);
@@ -55,11 +78,7 @@ export async function fetchProviderModels(s: Settings): Promise<ProviderModel[]>
 
 export async function fetchDefaultModels(s: Settings): Promise<Record<string, string>> {
   try {
-    const r = await fetch("/api/gw/console/api/default-models", {
-      headers: gwHeaders(s),
-      credentials: "include",
-      redirect: "manual",
-    });
+    const r = await consoleGetRetry("/api/gw/console/api/default-models", s);
     if (!r.ok || r.type === "opaqueredirect" || r.status === 0) return {};
     const body = await readBody(r);
     const out: Record<string, string> = {};
