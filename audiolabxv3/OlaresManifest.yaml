@@ -245,7 +245,7 @@ envs:
     applyOnChange: true
   - envName: AUDIO_MEMORY_LIMIT
     required: true
-    default: "18Gi"
+    default: "24Gi"
     type: string
     editable: true
     applyOnChange: true

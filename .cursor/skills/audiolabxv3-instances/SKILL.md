@@ -65,6 +65,19 @@ maximize the chance of reproducing the same hash/URL on re-clone, **reuse the
 EXACT recorded title.** If the URL still changes, the user re-points the Gateway
 provider manually — tell them the new URL.
 
+## GOTCHA — OlaresManifest env `default` OVERRIDES the chart template default
+
+A clone-form env declared in `OlaresManifest.yaml` (`spec.options.appScope`/env list with
+`default: "X"`) is **injected into `olaresEnv` at clone time**, so inside templates
+`{{ $oe.FOO | default "Y" }}` sees the MANIFEST default "X", NOT the template default "Y".
+Local `helm template` (which doesn't set `olaresEnv.FOO`) falls through to "Y" and **hides
+the discrepancy**. So to change a resolved value you must edit BOTH the template default AND
+the `OlaresManifest.yaml` `default:` (the manifest one is what actually lands). Confirmed
+2026-07-01: bumping only the engine.yaml `AUDIO_MEMORY_LIMIT` template default 18Gi→24Gi
+left the deployed pod at 18Gi because `OlaresManifest.yaml` still declared `default: "18Gi"`.
+Editing a manifest `default:` is chart content ⇒ hash/URL stable on re-clone (same as a
+template edit) — it does NOT count as a per-clone `--env` override.
+
 ## Live ledger (update after any re-clone)
 
 | Cap | Title (exact, hash input) | App name | Namespace | Public URL | Internal URL |
@@ -77,6 +90,18 @@ provider manually — tell them the new URL.
 | Embed | `Audio Lab X V3 Embed` | `audiolabxv35db0f3` | `audiolabxv35db0f3-shared` | (ask user — unchanged) | `http://audio-engine.audiolabxv35db0f3-shared:8000` |
 | Enhance (GPU 2Gi) | `AudioLabX Enhance` | `audiolabxv3d616f5` (was `1c4d10`) | `audiolabxv3d616f5-shared` | **NEW → ask user** | `http://audio-engine.audiolabxv3d616f5-shared:8000` |
 | Align (GPU 4Gi) | `Audio Lab X V3 Align` | `audiolabxv3396efb` | `audiolabxv3396efb-shared` | `https://3276066a.olarestest003.olares.com` | `http://audio-engine.audiolabxv3396efb-shared:8000` |
+
+> 2026-07-01 Qwen3-ASR OOM FIX (full rebuild, all 8, URLs unchanged): Qwen3-ASR pod was
+> periodically `OOMKilled` (exit 137) at the 18Gi container RAM limit → K8s restart → 502
+> window (vLLM slow to boot). Root cause = host-RAM peak under concurrent long-audio load,
+> NOT GPU VRAM (no CUDA error). Fix, all URL-stable (chart-content only, no clone-env change):
+> (a) `AUDIO_MEMORY_LIMIT` default 18Gi→**24Gi** — in BOTH engine.yaml AND OlaresManifest.yaml
+> (the manifest default is the one that lands; see GOTCHA above); (b) vLLM stt/qwen cmd adds
+> `--mm-processor-cache-gb ${VLLM_MM_CACHE_GB:-1}` (caps the multimodal processor cache 4Gi→1Gi;
+> the OLD `--disable-mm-preprocessor-cache` is REMOVED in vLLM ≥0.13, must use the new flag);
+> (c) Demo lowers the Qwen fan-out default (def 4→2, max 8→6). Node has ~94GiB RAM, so 24Gi cap
+> is cheap. Verified Qwen pod: 24Gi limit + mm-cache flag live + 1/1 Running. Two rebuild passes
+> were needed (first pass only edited the engine.yaml default and silently kept 18Gi).
 
 > 2026-06-30 ALIGN (forced alignment, Qwen3-ForcedAligner-0.6B): NEW capability. Wrapper
 > `align.py` (qwen-asr `Qwen3ForcedAligner.align()`, end-to-end timestamps). Engine = reuses

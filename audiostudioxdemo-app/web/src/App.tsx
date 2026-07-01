@@ -512,7 +512,11 @@ function speakerColor(spk: string, list: string[]): string {
 function sttConcBounds(model: string): { def: number; max: number } {
   const m = (model || "").toLowerCase();
   if (m.includes("whisper")) return { def: 8, max: 16 };
-  if (m.includes("qwen")) return { def: 4, max: 8 };
+  // Qwen3-ASR on vLLM: each concurrent request holds host-RAM audio-decode + KV
+  // buffers; too many at once spikes RAM past the container limit → OOMKilled →
+  // restart → 502 window (vLLM is slow to boot). Keep the default conservative
+  // (user can still drag up) so the base instance stays stable under long-audio load.
+  if (m.includes("qwen")) return { def: 2, max: 6 };
   return { def: 4, max: 8 };
 }
 const TRANSLATE_CONC_MAX = 12;
