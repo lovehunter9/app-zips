@@ -157,7 +157,35 @@ template edit) — it does NOT count as a per-clone `--env` override.
 > sentinel `/pydeps/.stt_stream.ok` hit + venv reused, pip fully skipped. Restart→ready ≈ 1m46s of
 > pure vLLM load (vs first install's +~2.5min pip). Re-clone reused the SAME hash
 > `audiolabxv30f9f88` → public URL likely unchanged (`https://d123f7e6.olarestest003.olares.com`,
-> confirm with user per RULE 0).
+> confirm with user per RULE 0). **URL confirmed unchanged by user 2026-07-01.**
+>
+> 2026-07-01 GATEWAY STT-STREAM WS ROUTE (in progress — see WORK_LOG_2026-07-01.md for full detail):
+> added `GET /v1/audio/stream` to the gateway (mode=stt_stream) — a WebSocket proxy: resolve
+> stt_stream provider (`?model=`, empty=default) → dial upstream `ws(s)://<base>/audio/stream` →
+> pump frames both ways; meter by audio seconds. Decisions: gorilla/websocket, Bearer-header-only
+> auth (browser WS can't set headers → e2e test needs a non-browser client), spend by audio_seconds.
+> Backend image `lovehunter9/llm-gateway-backend:v2.0.6-test7` built+pushed, user rolled it live,
+> provider registered (`stt-stream-audiolabxv3`, base_url `https://d123f7e6.../v1`, model
+> `Qwen/Qwen3-ASR-1.7B`, mode stt_stream; via DevTools script `audiolabxv3-docs/register-stt-stream-provider.js`).
+> **BLOCKED on a frontend-nginx bug:** the frontend `location /v1/` did NOT forward the WS
+> `Upgrade/Connection` headers (only `/console/api/` did) → handshake 400 "Bad Request". Fixed in
+> `llm-gateway/deploy/frontend.nginx.conf.template` (config is image-baked → needs a FRONTEND image
+> rebuild). Next: build `lovehunter9/llm-gateway-frontend:v2.0.6-test1` (chart already bumped), roll
+> it, then WS e2e test via `/tmp/ws_gw_client.py` (needs a fresh SSO cookie + gateway key). Gateway
+> code (5 files + nginx template) is NOT committed yet ("试好了再说").
+>
+> 2026-07-02 GATEWAY STT-STREAM WS — **VERIFIED END-TO-END + COMMITTED**: built+pushed frontend
+> image `lovehunter9/llm-gateway-frontend:v2.0.6-test1` (nginx `/v1/` now forwards WS
+> `Upgrade/Connection`); user rolled frontend live (backend already `v2.0.6-test7`, provider
+> `stt-stream-audiolabxv3` still in DB). WS e2e through the gateway PASSED on the English sample
+> (`ready → partials → final`: "…ask not what your country can do for you; ask what you can do for
+> your country."). First attempt hit a clean `502` because the stt_stream instance was paused —
+> confirms the handler's "dial-upstream-first" design (paused/cold upstream → 502, not a hung
+> upgrade). Resumed instance → passed. Gateway code committed as `llm-gateway` `aaa594e`
+> (feat: stt_stream WebSocket data plane passthrough — the 5 backend files + nginx template).
+> Test client rewritten to take `GW_URL/GW_KEY/GW_COOKIE` from env (no hard-coded creds):
+> `GW_URL=… GW_KEY=… GW_COOKIE='auth_token=…' /tmp/wsvenv/bin/python /tmp/ws_gw_client.py /tmp/asr_en.wav`.
+> NOTE: `/tmp` assets (venv/client/wav) are wiped on host reboot — recreate from this recipe.
 >
 > 2026-07-01 Qwen3-ASR OOM FIX (full rebuild, all 8, URLs unchanged): Qwen3-ASR pod was
 > periodically `OOMKilled` (exit 137) at the 18Gi container RAM limit → K8s restart → 502
