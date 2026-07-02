@@ -23,9 +23,16 @@
        here. ENGINE_IMAGE / ENGINE_PORT / ENGINE_HEALTH_PATH stay as OPTIONAL post-
        install overrides (empty = use the mapped value). All images are converted
        (beclab/, no latest). */ -}}
-{{- /* Only stt/stt_stream/vad/diar/translate/embed/enhance/align are WIRED. Other modes are
-       reserved in the MODEL_MODE enum; selecting one points at an obviously-unbuilt placeholder
+{{- /* Only stt/stt_stream/vad/diar/translate/embed/enhance/align/diar_stream are WIRED. Other modes
+       are reserved in the MODEL_MODE enum; selecting one points at an obviously-unbuilt placeholder
        image (voice-engine-<mode>:notbuilt) so it's clear the engine isn't ready yet.
+       diar_stream (streaming/online speaker diarization) is the ONLY capability on a NEW, heavy
+       engine image (beclab/nvidia-nemo:26.02, ~23GB): NVIDIA Streaming Sortformer is a .nemo
+       checkpoint needing the NeMo runtime — it CANNOT ride the pyannote or vLLM images. It runs
+       /wrappers/diar_stream.py (a WebSocket at /v1/audio/diarize/stream emitting speaker-turn
+       segments WITH the model's NATIVE frame timestamps). fastapi/uvicorn/websockets are
+       pip-installed into /pydeps on first load (torch + nemo.collections.asr are already in the
+       image). This is the one image the "reuse existing engines" rule doesn't cover.
        stt_stream (streaming ASR) rides the SAME vLLM cu129 image as offline stt/align but runs
        /wrappers/stream.py: Qwen3-ASR streaming lives in the qwen-asr[vllm] package's IN-PROCESS
        API (Qwen3ASRModel.LLM + init/streaming/finish_streaming_transcribe) — `vllm serve` has NO
@@ -81,7 +88,8 @@
       "translate" (dict "image" "docker.io/beclab/maximsachs-pyannote_fastapi:4.0.4" "port" "8000" "health" "/healthz" "cmd" "exec $(command -v python3 || command -v python) /wrappers/translate.py")
       "embed" (dict "image" "docker.io/beclab/maximsachs-pyannote_fastapi:4.0.4" "port" "8000" "health" "/healthz" "cmd" "exec $(command -v python3 || command -v python) /wrappers/embed.py")
       "enhance" (dict "image" "docker.io/beclab/maximsachs-pyannote_fastapi:4.0.4" "port" "8000" "health" "/healthz" "cmd" "exec $(command -v python3 || command -v python) /wrappers/enhance.py")
-      "align" (dict "image" "docker.io/beclab/vllm-vllm-openai:v0.23.0-cu129" "port" "8000" "health" "/healthz" "cmd" "export HF_HUB_OFFLINE=1; [ -f /pydeps/.align.ok ] || { python3 -m pip install -q --ignore-installed blinker || true; python3 -m pip install -q qwen-asr librosa soundfile av && touch /pydeps/.align.ok; }; exec $(command -v python3 || command -v python) /wrappers/align.py") -}}
+      "align" (dict "image" "docker.io/beclab/vllm-vllm-openai:v0.23.0-cu129" "port" "8000" "health" "/healthz" "cmd" "export HF_HUB_OFFLINE=1; [ -f /pydeps/.align.ok ] || { python3 -m pip install -q --ignore-installed blinker || true; python3 -m pip install -q qwen-asr librosa soundfile av && touch /pydeps/.align.ok; }; exec $(command -v python3 || command -v python) /wrappers/align.py")
+      "diar_stream" (dict "image" "docker.io/beclab/nvidia-nemo:26.02" "port" "8000" "health" "/healthz" "cmd" "export HF_HUB_OFFLINE=1; export PYTHONUNBUFFERED=1; [ -f /pydeps/.diar_stream.ok ] || { echo '[diar_stream] first-run: installing ws/http deps into /pydeps (reusing NeMo image torch+nemo.asr)'; python3 -m pip install -q --root-user-action=ignore fastapi uvicorn websockets || true; touch /pydeps/.diar_stream.ok; }; echo '[diar_stream] launching diar_stream.py'; exec $(command -v python3 || command -v python) /wrappers/diar_stream.py") -}}
 {{- $sel := index $engines $modelMode -}}
 {{- if not $sel -}}
 {{- $sel = dict "image" (printf "docker.io/beclab/voice-engine-%s:notbuilt" $modelMode) "port" "8000" "health" "/healthz" -}}

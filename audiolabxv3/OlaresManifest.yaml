@@ -47,26 +47,30 @@ spec:
     **Clone form (4 required envs)**
     - `MODEL_SOURCE` — `hf://<repo>` (llm-init download spec).
     - `MODEL_NAME` — model id advertised to clients.
-    - `MODEL_MODE` — `stt` / `stt_stream` / `vad` / `diar` / `translate` / `embed` / `enhance` / `align` (engine auto-derived from mode).
+    - `MODEL_MODE` — `stt` / `stt_stream` / `vad` / `diar` / `translate` / `embed` / `enhance` / `align` / `diar_stream` (engine auto-derived from mode).
     - The stt ENGINE is AUTO-SELECTED from `MODEL_NAME` (NOT a clone field): a Qwen name ->
       Qwen3-ASR on vLLM; a CTranslate2 / Systran faster-whisper name -> faster-whisper
       (harveyff image, must use that engine since vLLM can't load CT2); otherwise -> Whisper
       on vLLM. All expose the same `/v1/audio/transcriptions` contract. GPU engines also force
       `GPU_CORE_UTILIZATION_POLICY=disable` (drop HAMi compute throttle, keep memory isolation)
       so they run full-speed under the time-sliced vGPU.
-    - `AUDIO_REQUIRED_GPU_MEMORY` — `"0"` for CPU-only (VAD, Translate, Embed, Enhance); STT: `8Gi`; Diar: `4Gi`; STT(qwen3-asr, 1.7B): `12Gi`; STT Stream(Qwen3-ASR 1.7B, streaming): `12Gi`; Align(Qwen3-ForcedAligner-0.6B): `4Gi`.
+    - `AUDIO_REQUIRED_GPU_MEMORY` — `"0"` for CPU-only (VAD, Translate, Embed, Enhance); STT: `8Gi`; Diar: `4Gi`; STT(qwen3-asr, 1.7B): `12Gi`; STT Stream(Qwen3-ASR 1.7B, streaming): `12Gi`; Align(Qwen3-ForcedAligner-0.6B): `4Gi`; Diar Stream(Streaming Sortformer 4spk): `6Gi`.
 
     **Engine images** — vLLM cu129 serves stt (Whisper / Qwen3-ASR) AND align
     (Qwen3-ForcedAligner via /wrappers/align.py — needs recent transformers + cu129 torch);
     the harveyff Whisper-WebUI image serves stt via faster-whisper/ctranslate2 (its ct2 IS
     Blackwell-built, used via wrapper, fast under time-slicing); the pyannote/torch
-    image hosts vad/diar/translate/embed/enhance via wrappers.
+    image hosts vad/diar/translate/embed/enhance via wrappers. diar_stream is the ONE
+    capability on a NEW heavy image (nvidia-nemo:26.02, ~23GB): Streaming Sortformer is a
+    .nemo checkpoint needing the NeMo runtime, run via /wrappers/diar_stream.py (WebSocket,
+    native frame timestamps).
 
     **Example clone sets**
     - STT (Whisper, vLLM engine): MODEL_SOURCE=hf://openai/whisper-large-v3
       MODEL_NAME=openai/whisper-large-v3  MODEL_MODE=stt  AUDIO_REQUIRED_GPU_MEMORY=8Gi
     - STT (Qwen3-ASR, vLLM engine): MODEL_SOURCE=hf://Qwen/Qwen3-ASR-1.7B
-      MODEL_NAME=Qwen/Qwen3-ASR-1.7B  MODEL_MODE=stt  MODEL_ENGINE=qwen3-asr  AUDIO_REQUIRED_GPU_MEMORY=12Gi
+      MODEL_NAME=Qwen/Qwen3-ASR-1.7B  MODEL_MODE=stt  AUDIO_REQUIRED_GPU_MEMORY=12Gi
+      (engine auto-selected from MODEL_NAME → qwen3-asr; do NOT set MODEL_ENGINE at clone)
     - STT Stream (Qwen3-ASR, WebSocket): MODEL_SOURCE=hf://Qwen/Qwen3-ASR-1.7B
       MODEL_NAME=Qwen/Qwen3-ASR-1.7B  MODEL_MODE=stt_stream  AUDIO_REQUIRED_GPU_MEMORY=12Gi
     - VAD:  MODEL_SOURCE=hf://onnx-community/silero-vad
@@ -81,6 +85,9 @@ spec:
       MODEL_NAME=mtl-mimic-voicebank  MODEL_MODE=enhance  AUDIO_REQUIRED_GPU_MEMORY=0
     - Align (forced alignment, Qwen3-ForcedAligner): MODEL_SOURCE=hf://Qwen/Qwen3-ForcedAligner-0.6B
       MODEL_NAME=Qwen/Qwen3-ForcedAligner-0.6B  MODEL_MODE=align  AUDIO_REQUIRED_GPU_MEMORY=4Gi
+    - Diar Stream (streaming diarization, Sortformer, WebSocket): MODEL_SOURCE=hf://nvidia/diar_streaming_sortformer_4spk-v2.1
+      MODEL_NAME=diar-streaming-sortformer  MODEL_MODE=diar_stream  AUDIO_REQUIRED_GPU_MEMORY=6Gi
+      (NEW heavy engine image beclab/nvidia-nemo:26.02, ~23GB; NVIDIA Open Model License; HF repo is PUBLIC/ungated -> no HF_TOKEN needed)
 
   upgradeDescription: |
     v1.0.0: initial generic audio-model base. llm-init (download-only) + mode-mapped
@@ -165,6 +172,8 @@ envs:
       value: enhance
     - title: Align (forced alignment, Qwen3-ForcedAligner)
       value: align
+    - title: Diarize Stream (Streaming Sortformer, WebSocket)
+      value: diar_stream
   - envName: MODEL_ENGINE
     required: false
     type: string

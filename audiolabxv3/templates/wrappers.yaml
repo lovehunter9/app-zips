@@ -1385,3 +1385,270 @@ data:
         # so we rely on WebSocketDisconnect/TCP reset instead of keepalive.
         uvicorn.run(app, host="0.0.0.0", port=PORT, log_level=LOG_LEVEL,
                     ws_ping_interval=None, ws_ping_timeout=None)
+  diar_stream.py: |
+    # Streaming / online speaker diarization (mode=diar_stream) via NVIDIA Streaming
+    # Sortformer, on the NeMo runtime image (beclab/nvidia-nemo:26.02). This is the ONE
+    # capability that needs a NEW heavy image: Sortformer is a .nemo checkpoint whose
+    # inference code lives in nemo.collections.asr — it cannot ride the pyannote or vLLM
+    # images. The model is downloaded by llm-init into the shared HF cache and loaded
+    # offline (HF_HUB_OFFLINE=1) from the cached .nemo file.
+    #
+    # WHY diar_stream is its own capability (NOT diar + a flag): offline diar (diar.py)
+    # sees the whole clip and clusters globally; streaming diar must keep speaker labels
+    # CONSISTENT across time at bounded latency. Sortformer solves this end-to-end with an
+    # Arrival-Order Speaker Cache (AOSC): speakers are numbered by arrival time, which is
+    # DETERMINISTIC on a given audio PREFIX. That property is what makes the skeleton below
+    # correct: we keep the session's audio in a buffer and re-run the model's documented
+    # `.diarize()` on the growing buffer each step; because the shared prefix's arrival
+    # order never changes, spk_0/spk_1/... stay stable across steps (no relabeling churn).
+    #
+    # This is a faithful, version-robust SKELETON. It uses ONLY the model card's public,
+    # stable API (`SortformerEncLabelModel` + `.diarize(audio=[np], sample_rate=16000)` +
+    # the `sortformer_modules` streaming knobs). A future optimization is the true
+    # incremental step API (forward_streaming_step + a persistent streaming state, as in
+    # NeMo's Voice Agent) to avoid re-processing the buffer — but its private signature
+    # varies by NeMo version, so we wire that only after introspecting the mirrored image.
+    #
+    # WebSocket contract (client <-> this wrapper) — mirrors stream.py's shape but the
+    # payload is speaker SEGMENTS (with the model's NATIVE frame timestamps), not text:
+    #   (upgrade) GET /v1/audio/diarize/stream
+    #   client -> server:
+    #     - optional first TEXT frame: {"type":"start","sample_rate":16000}
+    #     - BINARY frames: raw PCM16LE mono @ sample_rate audio chunks
+    #     - TEXT frame {"type":"stop"} (or socket close) to finalize
+    #   server -> client:
+    #     - {"type":"ready"}
+    #     - {"type":"partial","segments":[{"start","end","speaker"}],"speakers":[...]}
+    #     - {"type":"final","segments":[...],"speakers":[...]}
+    #     - {"type":"error","detail":...}
+    # Fusion of these speaker turns with ASR text (stt_stream) is the CONSUMER's job (the
+    # Demo holds one audio clock and feeds both streams) — the base stays single-purpose.
+    # Also exposes GET /healthz, /readyz, /health, /v1/models for probes + registry.
+    import os, sys, json, glob, asyncio, logging, threading
+    from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+    import uvicorn
+
+    LOG_LEVEL = os.environ.get("LOG_LEVEL", "info").lower()
+    logging.basicConfig(level=getattr(logging, LOG_LEVEL.upper(), logging.INFO))
+    log = logging.getLogger("audio-diar-stream")
+
+    MODEL_NAME = os.environ.get("MODEL_NAME", "diar-streaming-sortformer")
+    _src = os.environ.get("MODEL_SOURCE", "")
+    MODEL_REPO = _src[5:] if _src.startswith("hf://") else (_src or "nvidia/diar_streaming_sortformer_4spk-v2.1")
+    PORT = int(os.environ.get("WRAPPER_PORT", "8000"))
+
+    # Streaming knobs (frames = 80ms). Defaults follow the card's LOW-LATENCY preset
+    # (~1.04s input latency, RTF~0.09) — right for live captions/meetings. Override per
+    # host via DIAR_* env. The "very high latency" preset (chunk_len=340,...) trades 30s
+    # latency for RTF~0.002 if throughput ever matters more than responsiveness.
+    CHUNK_LEN = int(os.environ.get("DIAR_CHUNK_LEN", "6") or 6)
+    RIGHT_CONTEXT = int(os.environ.get("DIAR_RIGHT_CONTEXT", "7") or 7)
+    FIFO_LEN = int(os.environ.get("DIAR_FIFO_LEN", "188") or 188)
+    UPDATE_PERIOD = int(os.environ.get("DIAR_UPDATE_PERIOD", "144") or 144)
+    SPKCACHE_LEN = int(os.environ.get("DIAR_SPKCACHE_LEN", "188") or 188)
+    # Re-diarize cadence: emit an update every this many seconds of NEW audio.
+    STEP_SEC = float(os.environ.get("DIAR_STREAM_STEP_SEC", "2.0") or 2.0)
+    # Need a little audio before the first pass produces anything meaningful.
+    MIN_SEC = float(os.environ.get("DIAR_STREAM_MIN_SEC", "1.0") or 1.0)
+
+    app = FastAPI(title="audio-diar-stream (Streaming Sortformer)")
+    _state = {"ready": False, "error": None, "model": None, "device": "cpu"}
+    # Sortformer's diarize() is blocking and not concurrency-safe; serialize inference.
+    _infer_lock = asyncio.Lock()
+
+    def _p(msg):
+        print("[diar_stream] " + msg, flush=True)
+
+    def _find_nemo():
+        # Locate the llm-init-downloaded .nemo in the shared HF cache (offline load).
+        cache = (os.environ.get("HF_HUB_CACHE") or os.environ.get("HUGGINGFACE_HUB_CACHE")
+                 or "/cache/hf/hub")
+        repo = "models--" + MODEL_REPO.replace("/", "--")
+        for pat in (os.path.join(cache, repo, "snapshots", "*", "*.nemo"),
+                    os.path.join(cache, "**", "*.nemo")):
+            hits = sorted(glob.glob(pat, recursive=True))
+            if hits:
+                return hits[0]
+        return None
+
+    def _load():
+        try:
+            import torch
+            from nemo.collections.asr.models import SortformerEncLabelModel
+            dev = "cuda" if torch.cuda.is_available() else "cpu"
+            path = _find_nemo()
+            if path:
+                _p("restoring Sortformer from cached .nemo: %s" % path)
+                model = SortformerEncLabelModel.restore_from(
+                    restore_path=path, map_location=dev, strict=False)
+            else:
+                _p("no cached .nemo found; from_pretrained(%s) (needs network/token)" % MODEL_REPO)
+                model = SortformerEncLabelModel.from_pretrained(MODEL_REPO, map_location=dev)
+            model.eval()
+            # Configure the streaming behaviour (see card "Setting up Streaming Configuration").
+            sm = model.sortformer_modules
+            sm.chunk_len = CHUNK_LEN
+            sm.chunk_right_context = RIGHT_CONTEXT
+            sm.fifo_len = FIFO_LEN
+            sm.spkcache_update_period = UPDATE_PERIOD
+            sm.spkcache_len = SPKCACHE_LEN
+            try:
+                sm._check_streaming_parameters()
+            except Exception as e:
+                log.warning("streaming-parameter check skipped: %s", e)
+            _state["model"], _state["device"], _state["ready"] = model, dev, True
+            _p("engine READY: %s on %s (chunk=%d rc=%d fifo=%d up=%d cache=%d)"
+               % (MODEL_REPO, dev, CHUNK_LEN, RIGHT_CONTEXT, FIFO_LEN, UPDATE_PERIOD, SPKCACHE_LEN))
+        except Exception as e:
+            _state["error"] = str(e)
+            _p("engine load FAILED: %s" % e)
+            log.exception("engine load failed: %s", e)
+
+    @app.on_event("startup")
+    def _startup():
+        threading.Thread(target=_load, daemon=True).start()
+
+    @app.get("/healthz")
+    def healthz():
+        if _state["ready"]:
+            return {"status": "ok", "device": _state["device"]}
+        raise HTTPException(status_code=503, detail=_state["error"] or "loading model")
+
+    @app.get("/readyz")
+    def readyz():
+        return healthz()
+
+    @app.get("/health")
+    def health():
+        return healthz()
+
+    @app.get("/v1/models")
+    def models():
+        return {"object": "list",
+                "data": [{"id": MODEL_NAME, "object": "model", "mode": "diar_stream"}]}
+
+    def _spk_name(spk):
+        # Normalize speaker labels to spk_<n> ("speaker_2" / 2 / "2" -> "spk_2").
+        s = str(spk).strip()
+        digits = "".join(ch for ch in s if ch.isdigit())
+        return ("spk_" + digits) if digits else (s or "spk_0")
+
+    def _parse_segments(raw):
+        # The card's diarize() yields items like "start end speaker" (str) across versions;
+        # tolerate tuples/objects too so a NeMo minor bump can't break the wire format.
+        out = []
+        for seg in (raw or []):
+            s = e = spk = None
+            if isinstance(seg, str):
+                parts = seg.split()
+                if len(parts) >= 3:
+                    s, e, spk = parts[0], parts[1], " ".join(parts[2:])
+            elif isinstance(seg, (list, tuple)) and len(seg) >= 3:
+                s, e, spk = seg[0], seg[1], seg[2]
+            else:
+                s = getattr(seg, "start", None)
+                e = getattr(seg, "end", None)
+                spk = getattr(seg, "speaker", None) or getattr(seg, "label", None)
+            if s is None or e is None:
+                continue
+            try:
+                out.append({"start": round(float(s), 3), "end": round(float(e), 3),
+                            "speaker": _spk_name(spk)})
+            except Exception:
+                continue
+        return out
+
+    def _diarize(buf):
+        # buf: float32 mono @ 16k. Returns parsed segments over the WHOLE buffer.
+        model = _state["model"]
+        res = model.diarize(audio=[buf], batch_size=1, sample_rate=16000)
+        return _parse_segments(res[0] if res else [])
+
+    def _pcm16_to_f32(data):
+        import numpy as np
+        if not data:
+            return np.zeros((0,), dtype="float32")
+        return np.frombuffer(data, dtype="<i2").astype("float32") / 32768.0
+
+    def _resample_linear(seg, src_sr):
+        import numpy as np
+        if src_sr == 16000 or seg.shape[0] == 0:
+            return seg.astype("float32", copy=False)
+        dur = seg.shape[0] / float(src_sr)
+        n16 = int(round(dur * 16000))
+        if n16 <= 0:
+            return np.zeros((0,), dtype="float32")
+        xo = np.linspace(0.0, dur, num=seg.shape[0], endpoint=False)
+        xn = np.linspace(0.0, dur, num=n16, endpoint=False)
+        return np.interp(xn, xo, seg).astype("float32")
+
+    @app.websocket("/v1/audio/diarize/stream")
+    async def diarize_stream(ws: WebSocket):
+        import numpy as np
+        await ws.accept()
+        if not _state["ready"]:
+            await ws.send_text(json.dumps({"type": "error",
+                                           "detail": _state["error"] or "model not ready"}))
+            await ws.close()
+            return
+        sample_rate = 16000
+        buf = np.zeros((0,), dtype="float32")   # whole-session audio @ 16k
+        since = 0                                # samples fed since last diarize
+        step_samples = max(16000, int(STEP_SEC * 16000))
+        min_samples = max(8000, int(MIN_SEC * 16000))
+        await ws.send_text(json.dumps({"type": "ready"}))
+
+        async def _emit(kind):
+            segs = []
+            if buf.shape[0] >= min_samples:
+                async with _infer_lock:
+                    segs = await asyncio.to_thread(_diarize, buf)
+            speakers = sorted({s["speaker"] for s in segs})
+            await ws.send_text(json.dumps({"type": kind, "segments": segs, "speakers": speakers}))
+
+        try:
+            while True:
+                msg = await ws.receive()
+                if msg.get("type") == "websocket.disconnect":
+                    break
+                text = msg.get("text")
+                if text is not None:
+                    try:
+                        obj = json.loads(text)
+                    except Exception:
+                        obj = {}
+                    t = obj.get("type")
+                    if t == "start":
+                        sample_rate = int(obj.get("sample_rate") or 16000)
+                        continue
+                    if t in ("stop", "done", "finish"):
+                        break
+                    continue
+                data = msg.get("bytes")
+                if not data:
+                    continue
+                seg = _resample_linear(_pcm16_to_f32(data), sample_rate)
+                buf = np.concatenate([buf, seg]) if buf.size else seg
+                since += int(seg.shape[0])
+                if since >= step_samples:
+                    since = 0
+                    await _emit("partial")
+            await _emit("final")
+            await ws.close()
+        except WebSocketDisconnect:
+            pass
+        except Exception as e:
+            log.exception("diar_stream error: %s", e)
+            try:
+                await ws.send_text(json.dumps({"type": "error", "detail": str(e)}))
+                await ws.close()
+            except Exception:
+                pass
+
+    if __name__ == "__main__":
+        _p("diar_stream.py starting; model=%s port=%s" % (MODEL_REPO, PORT))
+        _p("starting uvicorn on :%s" % PORT)
+        # Same rationale as stream.py: bursty offloaded inference + client-paced feed, so
+        # disable server-initiated WS keepalive to avoid dropping a healthy session on 1011.
+        uvicorn.run(app, host="0.0.0.0", port=PORT, log_level=LOG_LEVEL,
+                    ws_ping_interval=None, ws_ping_timeout=None)

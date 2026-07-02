@@ -11,6 +11,51 @@ description: >-
 
 # audiolabxv3 instances
 
+## SOP — the per-capability delivery pipeline (follow IN ORDER; do NOT skip ahead)
+
+Every new capability ships through these steps, in this order. Each gate must pass
+before the next starts — in particular the gateway/provider work (5–7) does NOT begin
+until the clone itself is verified (4), and the clone (3) can't start until the engine
+image exists (2). Don't "parallelize" downstream steps to save wall-clock while an
+upstream gate is red; it just creates rework.
+
+1. **选定能力 + 调研方案** — pick the capability, research engines/models, write the
+   selection doc (e.g. `audiolabxv3-docs/<cap>能力_选型调研.md`).
+2. **选引擎（可能转镜像）** — choose the engine; if it needs a new image, mirror it to
+   `beclab/` via the image-locker and WAIT for `dstImageExist:true`. Reuse an existing
+   image whenever possible (only diar_stream broke this, needing NeMo).
+   → also write the chart SKELETON here: `engine.yaml` `$engines` entry + `wrappers/<cap>.py`
+     + `OlaresManifest.yaml` MODEL_MODE enum. (Skeleton is pure-addition; verify with
+     `helm template`/`lint` that existing modes render byte-identical.)
+3. **CLONE** — `market clone audiolabxv3` with the capability's env set (per RULE 1 cycle
+   if templates changed: uninstall clones → delete app → upload tgz → clone). The clone
+   passes ONLY the 5 UI inputs (RULE 2): title + MODEL_SOURCE/NAME/MODE + AUDIO_REQUIRED_GPU_MEMORY.
+   Gated repo? ensure the user's Olares HuggingFace integration token is set — it auto-injects
+   as HF_TOKEN; NEVER `--env HF_TOKEN`.
+4. **检验 CLONE 有效** — hit the clone's own entrance directly (engine `/v1/...`), confirm
+   the model loads + the capability responds. GATE for step 5.
+5. **改网关** — add the mode/route to the LLM Gateway (copy the closest existing mode).
+6. **建 provider** — register the clone as a Gateway provider (ask user for the public
+   URL + gateway key per RULE 0).
+7. **检验网关有效** — same capability call, but THROUGH the gateway (auth + routing +
+   metering). GATE for step 8.
+8. **DEMO 新增能力演示** — add the capability's UI to `audiostudioxdemo`.
+9. **联调 DEMO** — end-to-end through gateway; user tests.
+10. **打 DEMO 镜像** — bump `audiostudioxdemo` Chart/values version, build+push image.
+11. **选下一个能力** — pick the next capability, back to step 1.
+
+### diar_stream — current position in the pipeline (2026-07-02)
+- ✅ 1 研 (Sortformer 选定，`diar_stream能力_选型调研.md`)
+- ✅ 2 选引擎 + 骨架 written (engine.yaml/wrappers/manifest；`helm template` 既有模式零回归；
+  `audiolabxv3-1.0.0.tgz` 重打)。镜像 `docker.io/beclab/nvidia-nemo:26.02` mirror **landed**.
+- 🔧 3 CLONE — IN PROGRESS. Recipe: title `Audio Lab X V3 Diar Stream`,
+  `MODEL_SOURCE=hf://nvidia/diar_streaming_sortformer_4spk-v2.1`,
+  `MODEL_NAME=diar-streaming-sortformer`, `MODEL_MODE=diar_stream`,
+  `AUDIO_REQUIRED_GPU_MEMORY=6Gi`. Repo is **public/ungated** (`gated:false`, verified) → no
+  HF_TOKEN needed. Per RULE 1: uninstall the live STT Stream clone (`audiolabxv30f9f88`) →
+  delete audiolabxv3 → upload tgz → clone.
+- ⏳ 4 验证 / 5–10 网关·provider·DEMO — pending. After verify, re-clone STT Stream to restore it.
+
 ## RULE 1 (IRON LAW) — olares-cli can NEVER edit in place: delete + reinstall, always
 
 There is **no** in-place edit path for a deployed Olares app. Do **NOT** waste the
@@ -55,6 +100,38 @@ What you CAN read from olares-cli (do NOT ask the user for these):
 - per-instance model env (`MODEL_MODE/MODEL_NAME/MODEL_SOURCE`):
   `cluster container env <ns>/<pod>`
 - pods / logs: `cluster pod list -n <ns>`, `cluster container logs <ns>/<pod>/<container>`
+
+## RULE 2 (IRON LAW) — the CLONE form is EXACTLY 5 inputs; NEVER `--env` anything else
+
+The "创建新实例 / Create instance" UI exposes **exactly five** inputs, and a `market clone`
+MUST pass **only** these (mirror the UI byte-for-byte — one extra `--env` is a violation):
+
+1. **title** (`--title "<EXACT TITLE>"`) — the desktop/app title (hash input)
+2. `--env MODEL_SOURCE=hf://<repo>`
+3. `--env MODEL_NAME=<id>`
+4. `--env MODEL_MODE=<mode>`
+5. `--env AUDIO_REQUIRED_GPU_MEMORY=<n>Gi|0`
+
+That is the WHOLE allowed set. **Do NOT pass any other `--env`** — not `MODEL_ENGINE`,
+not `HF_TOKEN`/`HF_ENDPOINT`, not `MODEL_MAX_AUDIO_MB`, not `ENGINE_IMAGE`, not
+`AUDIO_*_REQUEST/LIMIT`, not `STREAM_*`/`DIAR_*`, nothing.
+
+**Why exactly these five** (derivable from `OlaresManifest.yaml`): the clone form shows only
+envs that are `required: true` AND have **no `default:`** AND **no `valueFrom:`**. Everything
+else is one of:
+- **auto-injected** via `valueFrom` — `HF_TOKEN` ← `OLARES_USER_HUGGINGFACE_TOKEN`,
+  `HF_ENDPOINT` ← `OLARES_USER_HUGGINGFACE_SERVICE`. So a **gated repo** (pyannote diar/embed,
+  NVIDIA Sortformer) needs the user's **Olares → Settings → Integrations → HuggingFace** token
+  set (and its license/ToS accepted on HF); it then flows in automatically. **Never pass it at
+  clone.** This is how diar/embed gated downloads have always worked.
+- **has a `default:`** (e.g. `MODEL_ENGINE=""`, `AUDIO_CPU_REQUEST=500m`, `AUDIO_MEMORY_LIMIT`,
+  `MODEL_MAX_AUDIO_MB`) — the chart resolves it; to change it you edit the manifest `default:`
+  (chart content, hash-stable), NOT a per-clone `--env`.
+- **`MODEL_ENGINE` is AUTO-SELECTED from `MODEL_NAME`** (qwen*→qwen3-asr, Systran/ct2→faster-whisper,
+  else Whisper-on-vLLM). It is NOT a clone field even though it exists as an advanced option.
+
+If a value truly must differ per-instance and isn't one of the 5, that's a chart/manifest change
+(RULE 1 rebuild), not a clone `--env`.
 
 ## Hash / URL stability
 
@@ -252,13 +329,14 @@ for GPU instances, and same-version upload alone does not refresh the manifest.)
 ```bash
 olares-cli market clone audiolabxv3 -s upload --title "<EXACT TITLE>" \
   --env MODEL_SOURCE=<...> --env MODEL_NAME=<...> --env MODEL_MODE=<...> \
-  --env AUDIO_REQUIRED_GPU_MEMORY=<...> [--env MODEL_ENGINE=qwen3-asr] --watch
+  --env AUDIO_REQUIRED_GPU_MEMORY=<...> --watch
 ```
 
-> **Do NOT pass `MODEL_ENGINE`** — the chart auto-selects the stt engine from MODEL_NAME
-> (`qwen*`→qwen3-asr, `Systran/`/`*faster-whisper*`/`*ctranslate2*`→faster-whisper, else
-> Whisper-on-vLLM). And `GPU_CORE_UTILIZATION_POLICY=disable` is force-set for any GPU
-> engine by the chart. So the only clone-form envs are the 4 below.
+> **Exactly these 4 `--env` + `--title` — nothing else (see RULE 2).** No `MODEL_ENGINE`
+> (auto-selected from MODEL_NAME: `qwen*`→qwen3-asr, `Systran/`/`*faster-whisper*`/
+> `*ctranslate2*`→faster-whisper, else Whisper-on-vLLM), no `HF_TOKEN` (auto-injected from
+> the user's Olares HuggingFace integration for gated repos), no other env.
+> `GPU_CORE_UTILIZATION_POLICY=disable` is force-set for any GPU engine by the chart.
 
 | Cap | MODEL_SOURCE | MODEL_NAME | MODEL_MODE | GPU mem | extra |
 |---|---|---|---|---|---|

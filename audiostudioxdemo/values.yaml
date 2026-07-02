@@ -1,3 +1,3 @@
 # Platform values (userspace, domain, olaresEnv, ...) are injected by Olares at render.
 # Local-only knobs:
-image: docker.io/lovehunter9/audiostudioxdemo:1.0.6
+image: docker.io/lovehunter9/audiostudioxdemo:1.0.7

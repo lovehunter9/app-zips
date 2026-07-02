@@ -81,6 +81,16 @@ function splitSentences(text: string): { committed: string[]; tail: string } {
   return { committed: parts.filter(Boolean), tail: buf.trim() };
 }
 
+// mm:ss (or h:mm:ss past an hour) — caption-style timecode.
+function fmtTC(sec: number): string {
+  const s = Math.max(0, Math.floor(sec || 0));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const ss = s % 60;
+  const mm = h > 0 ? String(m).padStart(2, "0") : String(m);
+  return `${h > 0 ? h + ":" : ""}${mm}:${String(ss).padStart(2, "0")}`;
+}
+
 type Status = "idle" | "connecting" | "streaming" | "stopping" | "done" | "error";
 type Source = "file" | "mic";
 
@@ -118,6 +128,15 @@ export function StreamView({
   const [file, setFile] = useState<File | null>(null);
   const [mediaUrl, setMediaUrl] = useState<string>("");
   const [isVideo, setIsVideo] = useState<boolean>(false);
+  // Timecoded captions. DERIVED in the demo from the audio clock the demo itself
+  // drives (file = media.currentTime, mic = wall time since start) — the base
+  // stt_stream model has NO native timestamps, so we never fake one on the base;
+  // this stays a consumer-side convenience. (When diar_stream lands it will FORCE
+  // this on, since speaker fusion needs the ASR timeline.)
+  const [showTimecode, setShowTimecode] = useState<boolean>(true);
+  const [capTimes, setCapTimes] = useState<number[]>([]); // audio-sec per committed line
+  const capTimesRef = useRef<number[]>([]);
+  const t0Ref = useRef<number>(0); // performance.now() at stream start (mic clock base)
 
   const wsRef = useRef<WebSocket | null>(null);
   const acRef = useRef<AudioContext | null>(null);
@@ -173,8 +192,30 @@ export function StreamView({
     if (mediaUrl) { try { URL.revokeObjectURL(mediaUrl); } catch {} }
   }
 
+  // Demo-side audio clock (seconds): file follows the player head, mic uses wall
+  // time since the stream started. Same clock we'd feed a future diar_stream, so
+  // the two streams share a timeline for fusion.
+  function audioClock(): number {
+    const m = mediaRef.current;
+    if (source === "file" && m && isFinite(m.currentTime)) return m.currentTime;
+    return t0Ref.current ? (performance.now() - t0Ref.current) / 1000 : 0;
+  }
+
   function applyPartial(text: string, lang?: string | null) {
     const { committed: c, tail } = splitSentences(text);
+    // Stamp each NEWLY-settled sentence with the current audio clock (approx: the
+    // engine emits ~1–2s behind the audio; fine for a caption timecode / fusion).
+    const times = capTimesRef.current;
+    if (c.length > times.length) {
+      const now = audioClock();
+      for (let i = times.length; i < c.length; i++) times.push(now);
+      capTimesRef.current = times;
+      setCapTimes([...times]);
+    } else if (c.length < times.length) {
+      times.length = c.length;
+      capTimesRef.current = times;
+      setCapTimes([...times]);
+    }
     setCommitted(c);
     setInterim(tail);
     if (lang) setLanguage(lang);
@@ -213,6 +254,7 @@ export function StreamView({
 
   function startTimer() {
     const t0 = performance.now();
+    t0Ref.current = t0;
     setElapsed(0);
     timerRef.current = window.setInterval(() => setElapsed((performance.now() - t0) / 1000), 200);
   }
@@ -236,6 +278,7 @@ export function StreamView({
 
   function reset() {
     setCommitted([]); setInterim(""); setLanguage(""); setErr(""); setElapsed(0); setLevel(0);
+    capTimesRef.current = []; setCapTimes([]);
   }
 
   function sendStopOnce(ws: WebSocket) {
@@ -311,6 +354,7 @@ export function StreamView({
     if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
     try { wsRef.current?.close(); } catch {} // old ws; its handlers are ws-identity guarded
     setCommitted([]); setInterim("");
+    capTimesRef.current = []; setCapTimes([]); // timecodes belong to the old timeline
     setStatus("connecting");
     try {
       const ws = await openWs();
@@ -518,7 +562,7 @@ export function StreamView({
         )}
 
         {/* meters */}
-        <div className="mt-3 flex items-center gap-4 text-xs text-neutral-400">
+        <div className="mt-3 flex flex-wrap items-center gap-4 text-xs text-neutral-400">
           <span className="tabular-nums">⏱ {elapsed.toFixed(1)}s</span>
           {language && <span>🌐 {language}</span>}
           <div className="flex items-center gap-1">
@@ -527,6 +571,10 @@ export function StreamView({
               <div className="h-full bg-emerald-500 transition-[width] duration-100" style={{ width: `${Math.min(100, level * 140)}%` }} />
             </div>
           </div>
+          <label className="ml-auto flex cursor-pointer items-center gap-1.5 select-none" title="给每句已定字幕加上 mm:ss 时间码(勾选 diar_stream 时将自动开启)">
+            <input type="checkbox" className="accent-emerald-500" checked={showTimecode} onChange={(e) => setShowTimecode(e.target.checked)} />
+            <span>时间码字幕</span>
+          </label>
         </div>
 
         {err && <p className="mt-3 rounded bg-red-950/60 px-3 py-2 text-sm text-red-300">{err}</p>}
@@ -543,7 +591,14 @@ export function StreamView({
             <p className="text-sm text-neutral-600">{busy ? "等待识别结果…" : "选择输入源后点击开始,字幕会在这里逐句滚动。"}</p>
           )}
           {committed.map((line, i) => (
-            <p key={i} className="text-[15px] leading-relaxed text-neutral-100">{line}</p>
+            <p key={i} className="flex gap-2 text-[15px] leading-relaxed text-neutral-100">
+              {showTimecode && (
+                <span className="shrink-0 pt-px font-mono text-xs tabular-nums text-emerald-400/80">
+                  {fmtTC(capTimes[i] ?? 0)}
+                </span>
+              )}
+              <span>{line}</span>
+            </p>
           ))}
           {interim && (
             <p className="text-[15px] italic leading-relaxed text-neutral-400">
@@ -555,7 +610,12 @@ export function StreamView({
           <div className="mt-3 border-t border-neutral-800 pt-2 text-right">
             <button
               className="rounded-md bg-neutral-700 px-3 py-1.5 text-sm text-neutral-100 hover:bg-neutral-600"
-              onClick={() => navigator.clipboard?.writeText([...committed, interim].filter(Boolean).join(""))}
+              onClick={() => {
+                const body = showTimecode
+                  ? committed.map((l, i) => `[${fmtTC(capTimes[i] ?? 0)}] ${l}`).join("\n") + (interim ? `\n${interim}` : "")
+                  : [...committed, interim].filter(Boolean).join("");
+                navigator.clipboard?.writeText(body);
+              }}
             >复制全文</button>
           </div>
         )}
