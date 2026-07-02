@@ -1147,6 +1147,12 @@ data:
     UNFIXED_TOKEN_NUM = int(os.environ.get("STREAM_UNFIXED_TOKEN_NUM", "5") or 5)
     CHUNK_SIZE_SEC = float(os.environ.get("STREAM_CHUNK_SIZE_SEC", "2.0") or 2.0)
     DEFAULT_STEP_MS = int(os.environ.get("STREAM_STEP_MS", "500") or 500)
+    # A single streaming state accumulates this session's audio context; left
+    # unbounded it eventually overflows vLLM's audio encoder cache (~8192 tokens,
+    # observed to break a continuous session after ~10 min). We proactively "roll"
+    # the state (finalize + re-init) every STREAM_ROLL_SEC of audio so a session can
+    # run indefinitely with bounded memory. Kept safely under the observed cap.
+    ROLL_SEC = float(os.environ.get("STREAM_ROLL_SEC", "240") or 240)
 
     app = FastAPI(title="audio-stt-stream (Qwen3-ASR streaming)")
     _state = {"ready": False, "error": None, "asr": None}
@@ -1245,20 +1251,69 @@ data:
         sample_rate = 16000
         step_ms = DEFAULT_STEP_MS
         language = None
-        st = asr.init_streaming_state(
-            unfixed_chunk_num=UNFIXED_CHUNK_NUM,
-            unfixed_token_num=UNFIXED_TOKEN_NUM,
-            chunk_size_sec=CHUNK_SIZE_SEC,
-        )
+
+        def _new_state():
+            return asr.init_streaming_state(
+                unfixed_chunk_num=UNFIXED_CHUNK_NUM,
+                unfixed_token_num=UNFIXED_TOKEN_NUM,
+                chunk_size_sec=CHUNK_SIZE_SEC,
+            )
+
+        # Session state in a dict so the nested helpers can rebind `st` on a roll.
+        # prefix = text already finalized by previous rolled segments (keeps the
+        # emitted transcript monotonic across rolls); samples = audio fed to the
+        # CURRENT state (drives the proactive roll).
+        S = {"st": _new_state(), "prefix": "", "samples": 0}
+        roll_samples = max(16000, int(ROLL_SEC * 16000))
         pending = np.zeros((0,), dtype="float32")
         await ws.send_text(json.dumps({"type": "ready"}))
 
-        async def _emit_partial():
+        def _join(a, b):
+            if not a:
+                return b
+            if not b:
+                return a
+            # Add a space only between two ASCII words (CJK needs none).
+            if a[-1].isascii() and a[-1].isalnum() and b[0].isascii() and b[0].isalnum():
+                return a + " " + b
+            return a + b
+
+        def _full_text():
+            return _join(S["prefix"], getattr(S["st"], "text", "") or "")
+
+        async def _emit(kind):
             await ws.send_text(json.dumps({
-                "type": "partial",
-                "text": getattr(st, "text", "") or "",
-                "language": getattr(st, "language", None),
+                "type": kind,
+                "text": _full_text(),
+                "language": getattr(S["st"], "language", None) or language,
             }))
+
+        async def _roll():
+            # Finalize the current segment, fold its text into the committed prefix,
+            # then start a fresh state so the accumulated audio context (and vLLM's
+            # encoder-cache usage) resets to ~zero.
+            async with _infer_lock:
+                await asyncio.to_thread(asr.finish_streaming_transcribe, S["st"])
+            S["prefix"] = _join(S["prefix"], getattr(S["st"], "text", "") or "")
+            S["st"] = _new_state()
+            S["samples"] = 0
+
+        async def _feed(cur):
+            # Backstop: if the encoder cache overflows despite the proactive roll
+            # (ROLL_SEC too high / very dense audio), roll and retry the chunk once.
+            try:
+                async with _infer_lock:
+                    await asyncio.to_thread(asr.streaming_transcribe, cur, S["st"])
+            except Exception as e:
+                msg = str(e).lower()
+                if "encoder cache" in msg or "exceeds" in msg or "pre-allocated" in msg:
+                    log.warning("encoder-cache overflow; rolling session and retrying: %s", e)
+                    await _roll()
+                    async with _infer_lock:
+                        await asyncio.to_thread(asr.streaming_transcribe, cur, S["st"])
+                else:
+                    raise
+            S["samples"] += int(cur.shape[0])
 
         try:
             while True:
@@ -1288,20 +1343,19 @@ data:
                 step = max(1, int(round(step_ms / 1000.0 * 16000)))
                 while pending.shape[0] >= step:
                     cur, pending = pending[:step], pending[step:]
-                    async with _infer_lock:
-                        await asyncio.to_thread(asr.streaming_transcribe, cur, st)
-                    await _emit_partial()
+                    await _feed(cur)
+                    await _emit("partial")
+                    # Proactive roll at a safe point (between steps) so we never
+                    # approach the encoder-cache cap.
+                    if S["samples"] >= roll_samples:
+                        await _roll()
+                        await _emit("partial")
             # flush tail + finalize
             if pending.size:
-                async with _infer_lock:
-                    await asyncio.to_thread(asr.streaming_transcribe, pending, st)
+                await _feed(pending)
             async with _infer_lock:
-                await asyncio.to_thread(asr.finish_streaming_transcribe, st)
-            await ws.send_text(json.dumps({
-                "type": "final",
-                "text": getattr(st, "text", "") or "",
-                "language": getattr(st, "language", None),
-            }))
+                await asyncio.to_thread(asr.finish_streaming_transcribe, S["st"])
+            await _emit("final")
             await ws.close()
         except WebSocketDisconnect:
             pass
@@ -1323,4 +1377,11 @@ data:
             _p("engine load FAILED: %s" % e)
             log.exception("engine load failed: %s", e)
         _p("starting uvicorn on :%s (ready=%s)" % (PORT, _state["ready"]))
-        uvicorn.run(app, host="0.0.0.0", port=PORT, log_level=LOG_LEVEL)
+        # Disable server-initiated WS keepalive: this stream does bursty, near-
+        # continuous inference (offloaded via to_thread), and under heavy/bursty
+        # feeds a client can lag on Pong long enough to trip the default 20s ping
+        # timeout -> the server would drop a healthy captioning session with 1011.
+        # Captioning is client-driven (browser paces at 1x; explicit stop/close),
+        # so we rely on WebSocketDisconnect/TCP reset instead of keepalive.
+        uvicorn.run(app, host="0.0.0.0", port=PORT, log_level=LOG_LEVEL,
+                    ws_ping_interval=None, ws_ping_timeout=None)

@@ -23,6 +23,7 @@ import {
   type UploadInfo,
 } from "./types";
 import { decodeAudio, mapLimit, sliceWav, type DecodedAudio } from "./audio";
+import { StreamView } from "./stream";
 import { franc } from "franc-min";
 
 const LS_KEY = "audiostudioxdemo.settings";
@@ -560,6 +561,7 @@ function errBody(res: CallResult): string {
 }
 
 export default function App() {
+  const [view, setView] = useState<"file" | "stream">("file");
   const [settings, setSettings] = useState<Settings>(loadSettings());
   const [models, setModels] = useState<ProviderModel[]>([]);
   const [defaults, setDefaults] = useState<Record<string, string>>({});
@@ -657,7 +659,10 @@ export default function App() {
       }
       setSelModel(next);
       const counts = CAP_ORDER.map((c) => `${c}:${pm.filter((x) => x.mode === CAP_MODE[c]).length}`).join("  ");
-      setModelStatus(`✅ 模型 ${pm.length} 个 — ${counts}`);
+      // stt_stream is a standalone (real-time) capability, not part of the offline
+      // CAP_ORDER checkbox set — surface its count here so it's visible too.
+      const streamCount = pm.filter((x) => x.mode === "stt_stream").length;
+      setModelStatus(`✅ 模型 ${pm.length} 个 — ${counts}  stt_stream:${streamCount}`);
     } catch (e: any) {
       setModelStatus("❌ " + String(e.message || e));
     }
@@ -1606,7 +1611,17 @@ export default function App() {
     <div className="min-h-screen bg-neutral-950 text-neutral-100">
       <header className="border-b border-neutral-800 px-6 py-4">
         <h1 className="text-xl font-semibold">Audio Studio X Demo</h1>
-        <p className="text-sm text-neutral-400">上传音频/视频 → 经 LLM Gateway 调用 M1 音频能力(STT / 对齐 / 翻译 / VAD / 分离 / 增强 / 声纹)</p>
+        <p className="text-sm text-neutral-400">经 LLM Gateway 调用音频能力 · 文件分析(离线)与实时字幕(流式)</p>
+        <nav className="mt-3 flex gap-2">
+          <button
+            className={`rounded-md px-3 py-1.5 text-sm ${view === "file" ? "bg-neutral-100 text-neutral-900" : "bg-neutral-800 text-neutral-300 hover:bg-neutral-700"}`}
+            onClick={() => setView("file")}
+          >文件分析</button>
+          <button
+            className={`rounded-md px-3 py-1.5 text-sm ${view === "stream" ? "bg-neutral-100 text-neutral-900" : "bg-neutral-800 text-neutral-300 hover:bg-neutral-700"}`}
+            onClick={() => setView("stream")}
+          >实时字幕</button>
+        </nav>
       </header>
 
       <main className="mx-auto max-w-5xl space-y-6 px-6 py-6">
@@ -1656,6 +1671,11 @@ export default function App() {
           {modelStatus && <p className="mt-2 text-sm text-neutral-300">{modelStatus}</p>}
         </Card>
 
+        {view === "stream" && (
+          <StreamView settings={settings} models={models} defaults={defaults} />
+        )}
+
+        {view === "file" && (<>
         {/* upload */}
         <Card title="② 上传音频 / 视频">
           <input
@@ -2075,6 +2095,7 @@ export default function App() {
             {results.embed && <EmbedView data={results.embed} />}
           </Card>
         ) : null}
+        </>)}
       </main>
 
       <style>{`

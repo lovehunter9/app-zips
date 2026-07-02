@@ -186,6 +186,27 @@ template edit) — it does NOT count as a per-clone `--env` override.
 > Test client rewritten to take `GW_URL/GW_KEY/GW_COOKIE` from env (no hard-coded creds):
 > `GW_URL=… GW_KEY=… GW_COOKIE='auth_token=…' /tmp/wsvenv/bin/python /tmp/ws_gw_client.py /tmp/asr_en.wav`.
 > NOTE: `/tmp` assets (venv/client/wav) are wiped on host reboot — recreate from this recipe.
+> Client MUST pass `proxy=None` to `websockets.connect()` (sandbox injects `ALL_PROXY` → else
+> `ImportError: ... requires python-socks`).
+>
+> 2026-07-02 LONG-STREAM HARDENING (implement B: rolling reset) — chart change, full rebuild,
+> hash/URL stable (`audiolabxv30f9f88` / `https://d123f7e6…`, env unchanged). Problem: Qwen3-ASR
+> streaming state accumulates audio context → vLLM encoder cache (budget **8192 tokens**, logged
+> at boot) overflows after ~10min continuous stream → connection dies. Fix in `stream.py`
+> (`wrappers.yaml`): (a) **proactive rolling reset** every `STREAM_ROLL_SEC` (default 240s) —
+> `finish_streaming_transcribe` the current segment, fold its text into a committed `prefix`
+> (keeps the emitted transcript monotonic across rolls via `_join`, ASCII-word-spaced only), then
+> `init_streaming_state` a fresh state so encoder-cache usage resets to ~0; (b) a **backstop** that
+> catches `encoder cache/exceeds/pre-allocated` exceptions, forces a roll, retries the chunk once;
+> (c) inference already offloaded via `asyncio.to_thread` under a global `_infer_lock`. Also
+> **disabled server WS keepalive** (`uvicorn.run(..., ws_ping_interval=None, ws_ping_timeout=None)`):
+> under a bursty/flood feed the default 20s ping timeout dropped a healthy session with `CLOSE 1011
+> keepalive ping timeout`; captioning is client-driven so we rely on WebSocketDisconnect/TCP reset.
+> **VERIFIED** through the Gateway with a synthetic **720s (12min)** wav (JFK clip tiled, fed fast):
+> before the keepalive fix it died at ~560s with 1011 (but NO encoder-cache error → roll worked);
+> after the fix it ran **all 1443 partials → FINAL, zero errors** — i.e. cleanly past the old
+> ~10min/600s crash point. Rolling proven at 300s (one roll) and 720s (three rolls). No `8192`/
+> `encoder cache` overflow anywhere in engine logs.
 >
 > 2026-07-01 Qwen3-ASR OOM FIX (full rebuild, all 8, URLs unchanged): Qwen3-ASR pod was
 > periodically `OOMKilled` (exit 137) at the 18Gi container RAM limit → K8s restart → 502

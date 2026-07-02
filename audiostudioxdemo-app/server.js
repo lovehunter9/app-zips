@@ -14,6 +14,7 @@ import { createProxyMiddleware } from "http-proxy-middleware";
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
+import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -223,22 +224,66 @@ app.get("/healthz", (_req, res) => res.json({ status: "ok", ffmpeg: hasFfmpeg(),
 //   X-GW-Base   : gateway base URL (overrides env GATEWAY_URL)
 //   X-GW-Key    : data-plane API key (injected as Bearer for /v1/*)
 //   X-GW-BflUser: optional console identity (edge-bypass fallback)
-app.use(
-  "/api/gw",
-  createProxyMiddleware({
+// The WebSocket data plane (mode=stt_stream, GET /v1/audio/stream) can't use the
+// X-GW-* control headers the SPA sets on fetch() calls: a browser WebSocket API
+// cannot set request headers. So for WS the SPA smuggles the gateway base/key/
+// cookie as query params (__base/__key/__cookie); here we read them, inject the
+// real Authorization/Cookie headers on the UPSTREAM handshake, and strip the
+// control params from the forwarded URL. (Same reason the gateway WS auth is
+// Bearer-header-only: the header is added server-side, here, not by the browser.)
+function wsControl(req) {
+  const u = new URL(req.url, "http://x");
+  return {
+    base: (u.searchParams.get("__base") || GATEWAY_URL || "").replace(/\/+$/, ""),
+    key: u.searchParams.get("__key") || "",
+    cookie: u.searchParams.get("__cookie") || "",
+  };
+}
+
+const gwProxy = createProxyMiddleware({
     changeOrigin: true,
     secure: false,
+    ws: true,
     // Long audio jobs (enhance/diarize on multi-minute clips) legitimately take a
     // while; don't let the proxy itself abort the upstream connection.
     proxyTimeout: 600000,
     timeout: 600000,
     router: (req) => {
-      const base = (req.headers["x-gw-base"] || GATEWAY_URL || "").toString().replace(/\/+$/, "");
+      // WS upgrades carry the base in a query param (browser can't set headers);
+      // HTTP requests carry it in X-GW-Base. Fall back to env for both.
+      // req._wsctl is stashed at the raw 'upgrade' entry (before pathRewrite
+      // strips the __* params), so prefer it for WS.
+      const base =
+        (req.headers["x-gw-base"] || "").toString().replace(/\/+$/, "") ||
+        (req._wsctl && req._wsctl.base) ||
+        wsControl(req).base;
       if (!base) throw new Error("no gateway base configured");
       return base;
     },
-    pathRewrite: { "^/api/gw": "" },
+    pathRewrite: (pathAndQuery) => {
+      // Strip our mount prefix and any WS control params, keep the rest (e.g. ?model=).
+      let out = pathAndQuery.replace(/^\/api\/gw/, "");
+      const qIdx = out.indexOf("?");
+      if (qIdx >= 0) {
+        const sp = new URLSearchParams(out.slice(qIdx + 1));
+        sp.delete("__base");
+        sp.delete("__key");
+        sp.delete("__cookie");
+        const rest = sp.toString();
+        out = out.slice(0, qIdx) + (rest ? "?" + rest : "");
+      }
+      return out;
+    },
     on: {
+      // WS handshake: inject Bearer (data plane auth) + SSO cookie. Read from the
+      // stash captured at the raw 'upgrade' entry — by the time this fires,
+      // pathRewrite has already stripped the __* params off req.url.
+      proxyReqWs: (proxyReq, req) => {
+        const c = req._wsctl || wsControl(req);
+        if (c.key) proxyReq.setHeader("authorization", "Bearer " + c.key);
+        if (c.cookie) proxyReq.setHeader("cookie", c.cookie);
+        console.log(`[gw-proxy-ws] upgrade -> ${c.base} (key=${c.key ? "yes" : "no"} cookie=${c.cookie ? "yes" : "no"})`);
+      },
       proxyReq: (proxyReq, req) => {
         req._t0 = Date.now();
         req._target = (req.headers["x-gw-base"] || GATEWAY_URL || "").toString().replace(/\/+$/, "");
@@ -265,7 +310,7 @@ app.use(
         const ms = req._t0 ? Date.now() - req._t0 : -1;
         console.log(`[gw-proxy] ${req.method} ${req.url} -> ${req._target} ${proxyRes.statusCode} ${ms}ms`);
       },
-      error: (err, req, res) => {
+      error: (err, req, resOrSocket) => {
         const ms = req && req._t0 ? Date.now() - req._t0 : -1;
         // Log the hard signal: which path, which target, elapsed, error code.
         // Elapsed ~40s ≈ Olares public-edge cutting a long job (TCP RST seen as
@@ -274,15 +319,20 @@ app.use(
           `[gw-proxy-error] ${req?.method} ${req?.url} -> ${req?._target} after ${ms}ms` +
             ` code=${err?.code || "?"} msg=${String(err?.message || err)}`
         );
-        if (res && !res.headersSent && res.writeHead) {
-          res.writeHead(502, { "content-type": "application/json" });
+        // On a WS upgrade the third arg is a raw net.Socket (no writeHead/HTTP
+        // status), so we can't send a JSON body — just tear the socket down and
+        // let the browser see a failed handshake.
+        if (resOrSocket && typeof resOrSocket.writeHead === "function") {
+          if (!resOrSocket.headersSent) resOrSocket.writeHead(502, { "content-type": "application/json" });
+          resOrSocket.end(JSON.stringify({ error: "gateway proxy error: " + String(err.message || err), code: err?.code, afterMs: ms }));
+        } else if (resOrSocket && typeof resOrSocket.destroy === "function") {
+          resOrSocket.destroy();
         }
-        if (res && res.end)
-          res.end(JSON.stringify({ error: "gateway proxy error: " + String(err.message || err), code: err?.code, afterMs: ms }));
       },
     },
-  })
-);
+  });
+
+app.use("/api/gw", gwProxy);
 
 // ---- static SPA ----
 if (fs.existsSync(STATIC_DIR)) {
@@ -294,6 +344,15 @@ if (fs.existsSync(STATIC_DIR)) {
   );
 }
 
-app.listen(PORT, "0.0.0.0", () => {
+// Explicit http.Server so we can attach the WS upgrade handler (app.listen would
+// create the server for us but not wire 'upgrade' to the proxy).
+const server = http.createServer(app);
+// Capture the WS control params from the raw URL BEFORE http-proxy-middleware's
+// pathRewrite strips them, so proxyReqWs can still inject the auth headers.
+server.on("upgrade", (req, socket, head) => {
+  try { req._wsctl = wsControl(req); } catch { /* ignore */ }
+  gwProxy.upgrade(req, socket, head);
+});
+server.listen(PORT, "0.0.0.0", () => {
   console.log(`[audiostudioxdemo] listening on :${PORT}  gateway=${GATEWAY_URL || "(set via UI)"}  ffmpeg=${hasFfmpeg()}`);
 });
