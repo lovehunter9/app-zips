@@ -1397,17 +1397,22 @@ data:
     # sees the whole clip and clusters globally; streaming diar must keep speaker labels
     # CONSISTENT across time at bounded latency. Sortformer solves this end-to-end with an
     # Arrival-Order Speaker Cache (AOSC): speakers are numbered by arrival time, which is
-    # DETERMINISTIC on a given audio PREFIX. That property is what makes the skeleton below
-    # correct: we keep the session's audio in a buffer and re-run the model's documented
-    # `.diarize()` on the growing buffer each step; because the shared prefix's arrival
-    # order never changes, spk_0/spk_1/... stay stable across steps (no relabeling churn).
+    # DETERMINISTIC on a given audio PREFIX — so within one window spk_0/spk_1/... are
+    # stable across steps (no relabeling churn).
     #
-    # This is a faithful, version-robust SKELETON. It uses ONLY the model card's public,
-    # stable API (`SortformerEncLabelModel` + `.diarize(audio=[np], sample_rate=16000)` +
-    # the `sortformer_modules` streaming knobs). A future optimization is the true
-    # incremental step API (forward_streaming_step + a persistent streaming state, as in
-    # NeMo's Voice Agent) to avoid re-processing the buffer — but its private signature
-    # varies by NeMo version, so we wire that only after introspecting the mirrored image.
+    # UNBOUNDED LENGTH: we re-run the model's documented `.diarize()` but only over a
+    # bounded ROLLING WINDOW (the last WINDOW_SEC of audio), COMMIT older turns, and
+    # carry an OVERLAP_SEC tail so the next window's labels are remapped onto the prior
+    # window's by time overlap. That keeps compute AND memory bounded (a session can run
+    # for hours without falling behind or OOMing) while speaker numbering stays stable
+    # across the seam — same "roll instead of grow forever" strategy as stt_stream.
+    #
+    # This is a faithful, version-robust implementation using ONLY the model card's public
+    # API (`SortformerEncLabelModel` + `.diarize(audio=[np], sample_rate=16000)` + the
+    # `sortformer_modules` streaming knobs). A future optimization is the true incremental
+    # step API (init_streaming_state + forward_streaming_step + streaming_feat_loader, per
+    # NeMo's Streaming_Multitalker_ASR tutorial) to feed only new chunks and drop the
+    # per-step re-diarize entirely — wire that only after introspecting the mirrored image.
     #
     # WebSocket contract (client <-> this wrapper) — mirrors stream.py's shape but the
     # payload is speaker SEGMENTS (with the model's NATIVE frame timestamps), not text:
@@ -1450,6 +1455,18 @@ data:
     STEP_SEC = float(os.environ.get("DIAR_STREAM_STEP_SEC", "2.0") or 2.0)
     # Need a little audio before the first pass produces anything meaningful.
     MIN_SEC = float(os.environ.get("DIAR_STREAM_MIN_SEC", "1.0") or 1.0)
+    # UNBOUNDED-LENGTH ROLLING WINDOW (same idea as stream.py's STREAM_ROLL_SEC):
+    # re-running .diarize() on the WHOLE session buffer is O(n) per step -> O(n^2)
+    # over a session, and the buffer + GPU work grow without limit (a long meeting /
+    # audiobook eventually falls behind real time and OOMs). So we only ever diarize
+    # the last WINDOW_SEC of audio (bounded compute AND memory), COMMIT the older
+    # turns to a frozen list, and carry an OVERLAP_SEC tail across each roll so the
+    # NEW window's speaker labels can be remapped onto the previous window's by
+    # time-overlap -> spk_0/spk_1/... stay stable across the seam (no color churn).
+    # WINDOW big enough that seams are rare; small enough that one .diarize() keeps
+    # up. Lag is bounded by the window (self-correcting), never runaway.
+    WINDOW_SEC = float(os.environ.get("DIAR_STREAM_WINDOW_SEC", "60") or 60)
+    OVERLAP_SEC = float(os.environ.get("DIAR_STREAM_OVERLAP_SEC", "12") or 12)
 
     app = FastAPI(title="audio-diar-stream (Streaming Sortformer)")
     _state = {"ready": False, "error": None, "model": None, "device": "cpu"}
@@ -1558,8 +1575,22 @@ data:
                 continue
         return out
 
+    def _merge_segments(segs, gap=0.8):
+        # Collapse adjacent same-speaker turns (short gaps bridged) so the committed
+        # timeline and the seam between committed+live stay clean.
+        s2 = sorted(segs, key=lambda x: (x["start"], x["end"]))
+        out = []
+        for s in s2:
+            if out and out[-1]["speaker"] == s["speaker"] and s["start"] - out[-1]["end"] <= gap:
+                out[-1]["end"] = max(out[-1]["end"], s["end"])
+            else:
+                out.append({"start": round(float(s["start"]), 3),
+                            "end": round(float(s["end"]), 3), "speaker": s["speaker"]})
+        return out
+
     def _diarize(buf):
-        # buf: float32 mono @ 16k. Returns parsed segments over the WHOLE buffer.
+        # buf: float32 mono @ 16k. Returns parsed segments over the given buffer
+        # (times RELATIVE to buf[0]). Callers keep buf bounded to WINDOW_SEC.
         model = _state["model"]
         res = model.diarize(audio=[buf], batch_size=1, sample_rate=16000)
         return _parse_segments(res[0] if res else [])
@@ -1592,20 +1623,90 @@ data:
             await ws.close()
             return
         sample_rate = 16000
-        buf = np.zeros((0,), dtype="float32")   # whole-session audio @ 16k
+        # Rolling window: `buf` holds only the ACTIVE window ([base_offset, now]).
+        buf = np.zeros((0,), dtype="float32")
         since = 0                                # samples fed since last diarize
         step_samples = max(16000, int(STEP_SEC * 16000))
         min_samples = max(8000, int(MIN_SEC * 16000))
+        window_samples = max(step_samples * 2, int(WINDOW_SEC * 16000))
+        overlap_samples = min(window_samples - step_samples, max(0, int(OVERLAP_SEC * 16000)))
+        base_offset = 0.0        # ABS time (s) of buf[0]
+        committed = []           # frozen ABS canonical segments from rolled-off audio
+        overlap_ref = []         # ABS canonical segs over the retained tail (remap ref)
+        win_map = {}             # local spk -> canonical spk for the CURRENT window
+        canon = {"n": 0}         # next canonical speaker index
+
+        def _relabel(local_abs):
+            # Map this window's LOCAL speaker labels (already in ABS time) to stable
+            # SESSION-canonical labels. Within a window Sortformer's arrival-order
+            # (AOSC) labels are stable, so win_map is sticky. After a roll, the new
+            # window's labels are anchored to the previous window's via max overlap
+            # with overlap_ref (the carried tail); unmatched speakers get a fresh id.
+            order, by_spk = [], {}
+            for s in local_abs:
+                if s["speaker"] not in by_spk:
+                    order.append(s["speaker"])
+                by_spk.setdefault(s["speaker"], []).append(s)
+            used = set(win_map.values())
+            for L in order:
+                if L in win_map:
+                    continue
+                C = None
+                if overlap_ref:
+                    best = 0.0
+                    cand_set = {r["speaker"] for r in overlap_ref if r["speaker"] not in used}
+                    for cand in cand_set:
+                        ov = 0.0
+                        for a in by_spk[L]:
+                            for r in overlap_ref:
+                                if r["speaker"] != cand:
+                                    continue
+                                ov += max(0.0, min(a["end"], r["end"]) - max(a["start"], r["start"]))
+                        if ov > best:
+                            best, C = ov, cand
+                if C is None:
+                    C = "spk_%d" % canon["n"]; canon["n"] += 1
+                win_map[L] = C
+                used.add(C)
+            return [{"start": s["start"], "end": s["end"], "speaker": win_map[s["speaker"]]}
+                    for s in local_abs]
+
+        async def _current():
+            # Diarize ONLY the active window; return canonical ABS segments for it.
+            if buf.shape[0] < min_samples:
+                return []
+            async with _infer_lock:
+                local = await asyncio.to_thread(_diarize, buf)   # times relative to buf[0]
+            local_abs = [{"start": s["start"] + base_offset, "end": s["end"] + base_offset,
+                          "speaker": s["speaker"]} for s in local]
+            return _relabel(local_abs)
+
+        def _roll(cur):
+            # Once the window is full, freeze turns before the roll boundary into
+            # `committed`, keep only the last OVERLAP_SEC of audio, and stash the
+            # tail's canonical segments as the remap reference for the next window.
+            nonlocal buf, base_offset, overlap_ref, win_map, committed
+            if buf.shape[0] < window_samples or overlap_samples <= 0:
+                return
+            roll_point = buf.shape[0] - overlap_samples
+            boundary = base_offset + roll_point / 16000.0
+            for s in cur:
+                if s["start"] < boundary:
+                    committed.append({"start": s["start"], "end": min(s["end"], boundary),
+                                      "speaker": s["speaker"]})
+            committed = _merge_segments(committed)
+            overlap_ref = [{"start": max(s["start"], boundary), "end": s["end"], "speaker": s["speaker"]}
+                           for s in cur if s["end"] > boundary]
+            base_offset = boundary
+            buf = buf[roll_point:]
+            win_map = {}   # rebuilt on the next _current() via overlap_ref
+
+        async def _send(kind, cur):
+            full = _merge_segments(committed + cur)
+            speakers = sorted({s["speaker"] for s in full})
+            await ws.send_text(json.dumps({"type": kind, "segments": full, "speakers": speakers}))
+
         await ws.send_text(json.dumps({"type": "ready"}))
-
-        async def _emit(kind):
-            segs = []
-            if buf.shape[0] >= min_samples:
-                async with _infer_lock:
-                    segs = await asyncio.to_thread(_diarize, buf)
-            speakers = sorted({s["speaker"] for s in segs})
-            await ws.send_text(json.dumps({"type": kind, "segments": segs, "speakers": speakers}))
-
         try:
             while True:
                 msg = await ws.receive()
@@ -1632,8 +1733,10 @@ data:
                 since += int(seg.shape[0])
                 if since >= step_samples:
                     since = 0
-                    await _emit("partial")
-            await _emit("final")
+                    cur = await _current()
+                    await _send("partial", cur)
+                    _roll(cur)   # roll AFTER emitting, reusing the just-computed segments
+            await _send("final", await _current())
             await ws.close()
         except WebSocketDisconnect:
             pass

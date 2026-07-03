@@ -183,7 +183,17 @@
        image's build with the venv's audio extras visible via PYTHONPATH. If venv creation fails
        we fall back to ephemeral system installs (no worse than before). Per-mode `.ok` sentinels
        (below) let cmd-level pip skip entirely on restart. */ -}}
-{{- $pydepsPrelude := "mkdir -p /pydeps; VENV=/pydeps/venv; if [ ! -x $VENV/bin/python ]; then echo '[pydeps] creating persistent venv (first run)'; python3 -m venv --system-site-packages $VENV || echo '[pydeps] WARN: venv unavailable, using ephemeral system installs'; fi; if [ -x $VENV/bin/python ]; then export PATH=$VENV/bin:$PATH; export PYTHONPATH=$(ls -d $VENV/lib/python*/site-packages 2>/dev/null | head -n1):${PYTHONPATH:-}; fi;" -}}
+{{- /* SELF-HEALING venv: some base images (e.g. harveyff-whisper-webui) create a
+       `python -m venv` WITHOUT a usable pip (no bundled ensurepip / Debian dist-packages
+       pip not on the venv path). If we blindly prepend that pip-less venv to PATH, the
+       cmd's `pip install ...` dies with `No module named pip` and the wrapper crashes
+       (this broke the offline faster-whisper STT engine). So: only ADOPT the venv once we
+       confirm `pip` works in it — bootstrapping via `ensurepip` if missing; if pip STILL
+       can't be had, DON'T switch to the venv, fall back to the image's system python
+       (which has a working pip; deps install ephemerally per restart — fine for the tiny
+       fastapi/uvicorn set). Healthy images (cu129/pyannote/nemo) keep the venv exactly as
+       before. This also REPAIRS an already-broken /pydeps/venv on restart (ensurepip). */ -}}
+{{- $pydepsPrelude := "mkdir -p /pydeps; VENV=/pydeps/venv; if [ ! -x $VENV/bin/python ]; then echo '[pydeps] creating persistent venv (first run)'; python3 -m venv --system-site-packages $VENV || echo '[pydeps] WARN: venv unavailable, using ephemeral system installs'; fi; if [ -x $VENV/bin/python ]; then $VENV/bin/python -m pip --version >/dev/null 2>&1 || { echo '[pydeps] venv has no pip; bootstrapping via ensurepip'; $VENV/bin/python -m ensurepip --upgrade >/dev/null 2>&1 || true; }; if $VENV/bin/python -m pip --version >/dev/null 2>&1; then export PATH=$VENV/bin:$PATH; export PYTHONPATH=$(ls -d $VENV/lib/python*/site-packages 2>/dev/null | head -n1):${PYTHONPATH:-}; else echo '[pydeps] venv pip unavailable (ensurepip missing in image); using system python'; fi; fi;" -}}
 {{- $engineArgs := $oe.ENGINE_ARGS | default "" -}}
 {{- $hfEndpoint := $oe.HF_ENDPOINT | default "" -}}
 {{- $hfToken := $oe.HF_TOKEN | default "" -}}

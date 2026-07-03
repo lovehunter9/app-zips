@@ -59,7 +59,10 @@ upstream gate is red; it just creates rework.
   `diar-streaming-sortformer`, mode `diar_stream`). Script `register-diar-stream-provider.js`.
 - ✅ 7 验证网关 — WS e2e PASSED (`wss://<gw>/v1/audio/diarize/stream?model=diar-streaming-sortformer`,
   Bearer key + SSO cookie; 2 speakers, stable labels, native timestamps).
-- ⏳ 8–11 DEMO 融合 (ASR 派生时间戳 × Sortformer 说话人段) / 联调 / 镜像 / 下一能力 — pending.
+- ✅ base 硬化 — 无限长 ROLLING WINDOW (见下方 2026-07-03 DIAR_STREAM UNBOUNDED 记录),直连 WS 已验。
+- 🔶 8 DEMO — `stream.tsx` 重写:转写/说话人两个独立开关(可单开、可融合),双 WS 广播同一路 PCM,
+  按音频时钟融合(每句字幕着色标注说话人)+ 独立说话人时间线面板。`npm run build` 通过;联调中。
+- ⏳ 9–11 联调 DEMO / 打镜像 / 下一能力 — pending.
 
 ### NEMO PYTHON GOTCHA (cost one clone iteration, 2026-07-03) — diar_stream on /opt/venv, NOT /pydeps
 The `beclab/nvidia-nemo:26.02` image keeps `nemo_toolkit` in its OWN venv **`/opt/venv`**
@@ -177,9 +180,53 @@ template edit) — it does NOT count as a per-clone `--env` override.
 
 ## Live ledger (update after any re-clone)
 
-> **2026-07-03 STATE: ALL 10 clones are LIVE.** Full RULE 1 rebuild ran to ship the diar_stream
-> `/opt/venv` fix (uninstall all 10 → delete chart → upload fixed tgz → re-clone all 10). Every
-> hash reproduced identically → all public URLs unchanged → no Gateway provider re-pointing.
+> **2026-07-03 STATE (rebuild #3): 10/10 clones LIVE + healthy — b2b539 FIXED (P0 closed).**
+> Third full RULE 1 rebuild shipped the `$pydepsPrelude` SELF-HEALING fix (see PYDEPS SELF-HEAL note
+> below). All 10 hashes reproduced identically AGAIN → all public URLs unchanged → no Gateway
+> re-pointing. Engine readiness after: diar_stream/stt_stream/qwen-offline/faster-whisper/vad/diar/
+> translate/embed/enhance/align **all `1/1 ready restarts=0`** (rechecked +2min, all stable). The
+> offline faster-whisper STT (`b2b539`) that CrashLoopBackOff'd on rebuild #2 now boots clean.
+>
+> **2026-07-03 PYDEPS SELF-HEAL (root cause + fix for the b2b539 P0) — engine.yaml `$pydepsPrelude`.**
+> ROOT CAUSE: the persistent-venv prelude did `python3 -m venv --system-site-packages /pydeps/venv`
+> then unconditionally prepended `/pydeps/venv/bin` to PATH. On the `harveyff-whisper-webui:v1.0.7`
+> image that venv has **NO usable pip AND no `ensurepip`** — so once it was first on PATH, the
+> faster-whisper cmd's `pip install fastapi uvicorn` died `No module named pip`, the `&& touch .fw.ok`
+> short-circuited (so it retried+failed every boot, never persisting), and `stt_fw.py` crashed
+> `ModuleNotFoundError: fastapi` → CrashLoopBackOff. The 9 other engines survived only because their
+> images (cu129 / pyannote / nemo) happen to ship a venv with working pip. So the persistent-venv
+> design (2026-07-01) had a latent image-specific hole; rebuild #2 just exposed it (this engine had
+> not been re-tested since). This WAS a regression, not merely pre-existing — owned + fixed.
+> FIX (backward-compatible, all modes): only ADOPT the venv after confirming `pip` works in it —
+> `$VENV/bin/python -m pip --version || ensurepip --upgrade`; if pip STILL isn't available, DON'T put
+> the venv on PATH, fall back to the image's SYSTEM python (which has a working pip; the tiny
+> fastapi/uvicorn set installs ephemerally per restart — acceptable). Healthy images keep the venv
+> exactly as before (pip --version succeeds → same PATH/PYTHONPATH). Also REPAIRS an already-broken
+> /pydeps/venv on restart via ensurepip. VERIFIED from b2b539 boot logs: `[pydeps] venv has no pip;
+> bootstrapping via ensurepip` → `[pydeps] venv pip unavailable (ensurepip missing in image); using
+> system python` → `Application startup complete` / `Uvicorn running` → `/health` 200, ready=true,
+> restarts=0. (This image has NEITHER venv pip NOR ensurepip, so the system-python fallback is the
+> path that saved it.) LESSON: never assume `python -m venv` yields a working pip; gate PATH adoption
+> on an actual `pip --version`.
+>
+> **2026-07-03 DIAR_STREAM UNBOUNDED LENGTH (rolling window) — chart change, verified.** Problem:
+> the skeleton kept the WHOLE session in `buf` and re-ran `.diarize()` on it every 2s → O(n²) compute
+> + unbounded RAM/GPU → a long meeting/audiobook falls behind real time and OOMs (worse than
+> stt_stream's ~10min encoder ceiling). Fix in `diar_stream.py` (`wrappers.yaml`), same "roll instead
+> of grow" idea as stream.py: only diarize the last `DIAR_STREAM_WINDOW_SEC` (default 60s) of audio,
+> COMMIT older turns to a frozen list, carry a `DIAR_STREAM_OVERLAP_SEC` (default 12s) tail across
+> each roll, and REMAP the new window's local speaker labels onto the previous window's by max time
+> overlap on that tail (so spk_0/spk_1 stay stable across the seam — the thing stt_stream's reset
+> didn't have to solve). Compute AND memory now bounded; lag bounded by the window (self-correcting).
+> **VERIFIED direct WS** (`/tmp/diar_ws2.py`, `proxy=None` required per sandbox note) with a 95s
+> two-speaker clip (`say` Daniel/Samantha, A,B,A,B,A): ran to FINAL, 0 drops, coverage grew 2→95.2s
+> ACROSS the ~60s roll, speakers stayed stable (`spk_0[0-19.8] spk_1[19.8-37.8] spk_0[37.8-57.5]
+> spk_1[57.5-75.6] spk_0[75.6-95.2]`), per-emit interval avg 1.08s / max 5.24s and NOT growing past
+> the window. NeMo's `.diarize()` on streaming Sortformer already runs internal "Streaming Steps"
+> (AOSC), so labels are stable within a window; the remap only bridges seams. Knobs: env
+> `DIAR_STREAM_WINDOW_SEC` / `DIAR_STREAM_OVERLAP_SEC`. Future zero-recompute path documented in the
+> wrapper header: `init_streaming_state`+`forward_streaming_step`+`streaming_feat_loader` (feed only
+> new chunks) per NeMo's Streaming_Multitalker_ASR tutorial.
 
 | Cap | Title (exact, hash input) | App name | Namespace | Public URL | Internal URL |
 |---|---|---|---|---|---|
