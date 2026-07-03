@@ -44,17 +44,37 @@ upstream gate is red; it just creates rework.
 10. **打 DEMO 镜像** — bump `audiostudioxdemo` Chart/values version, build+push image.
 11. **选下一个能力** — pick the next capability, back to step 1.
 
-### diar_stream — current position in the pipeline (2026-07-02)
+### diar_stream — current position in the pipeline (2026-07-03)
 - ✅ 1 研 (Sortformer 选定，`diar_stream能力_选型调研.md`)
-- ✅ 2 选引擎 + 骨架 written (engine.yaml/wrappers/manifest；`helm template` 既有模式零回归；
-  `audiolabxv3-1.0.0.tgz` 重打)。镜像 `docker.io/beclab/nvidia-nemo:26.02` mirror **landed**.
-- 🔧 3 CLONE — IN PROGRESS. Recipe: title `Audio Lab X V3 Diar Stream`,
-  `MODEL_SOURCE=hf://nvidia/diar_streaming_sortformer_4spk-v2.1`,
-  `MODEL_NAME=diar-streaming-sortformer`, `MODEL_MODE=diar_stream`,
-  `AUDIO_REQUIRED_GPU_MEMORY=6Gi`. Repo is **public/ungated** (`gated:false`, verified) → no
-  HF_TOKEN needed. Per RULE 1: uninstall the live STT Stream clone (`audiolabxv30f9f88`) →
-  delete audiolabxv3 → upload tgz → clone.
-- ⏳ 4 验证 / 5–10 网关·provider·DEMO — pending. After verify, re-clone STT Stream to restore it.
+- ✅ 2 选引擎 + 骨架 (engine.yaml/wrappers/manifest)。镜像 `docker.io/beclab/nvidia-nemo:26.02`.
+- ✅ 3 CLONE — `audiolabxv3096764`, title `Audio Lab X V3 Diar Stream`, env
+  `MODEL_SOURCE=hf://nvidia/diar_streaming_sortformer_4spk-v2.1 MODEL_NAME=diar-streaming-sortformer
+  MODEL_MODE=diar_stream AUDIO_REQUIRED_GPU_MEMORY=6Gi`. Repo public/ungated.
+- ✅ 4 验证 CLONE — direct WS PASSED (see NEMO PYTHON GOTCHA below; one fix iteration).
+- ✅ 5 网关 route — `GET /v1/audio/diarize/stream` → `AudioDiarizeStreamHandler`
+  (`audio_stream.go` refactored: `stt_stream`+`diar_stream` share `audioStreamProxy`;
+  `spend.ModeDiarStream` added; `providers.ModeDiarStream` + DB CHECKs pre-existed). Backend
+  `lovehunter9/llm-gateway-backend:v2.0.6-test8` built+pushed; chart bumped; user rolled it.
+- ✅ 6 provider — `diar-stream-audiolabxv3` (base_url `https://20b7f5ba…/v1`, model
+  `diar-streaming-sortformer`, mode `diar_stream`). Script `register-diar-stream-provider.js`.
+- ✅ 7 验证网关 — WS e2e PASSED (`wss://<gw>/v1/audio/diarize/stream?model=diar-streaming-sortformer`,
+  Bearer key + SSO cookie; 2 speakers, stable labels, native timestamps).
+- ⏳ 8–11 DEMO 融合 (ASR 派生时间戳 × Sortformer 说话人段) / 联调 / 镜像 / 下一能力 — pending.
+
+### NEMO PYTHON GOTCHA (cost one clone iteration, 2026-07-03) — diar_stream on /opt/venv, NOT /pydeps
+The `beclab/nvidia-nemo:26.02` image keeps `nemo_toolkit` in its OWN venv **`/opt/venv`**
+(a uv venv, python 3.12), separate from the base image's SYSTEM python
+(`/usr/local/.../dist-packages`, where torch lives). The shared `$pydepsPrelude` builds
+`/pydeps/venv` off the SYSTEM python with `--system-site-packages` → it sees torch but **never
+nemo** (different venv, not on the base's site-packages). Result: the wrapper crashed
+`ModuleNotFoundError: No module named 'nemo'` and sat 0/1 for 13h (app state `running`, engine
+`/healthz` 503 — market list lies; check the engine pod READY). FIX (in `engine.yaml` diar_stream
+cmd): run `/opt/venv/bin/python` directly, `export PYTHONPATH=/pydeps/diarstream-site` (RESET,
+dropping the prelude's 3.12 path), and pip/uv `--target` fastapi/uvicorn/websockets there only if
+an import-probe misses (they were already in /opt/venv, so nothing installed). Sentinel
+`/pydeps/.diar_stream.ok` → restart re-installs nothing. LESSON for future NeMo/uv-based images:
+NEVER assume `--system-site-packages` exposes the toolkit; find the interpreter that can
+`import <pkg>` and use it directly.
 
 ## RULE 1 (IRON LAW) — olares-cli can NEVER edit in place: delete + reinstall, always
 
@@ -157,14 +177,13 @@ template edit) — it does NOT count as a per-clone `--env` override.
 
 ## Live ledger (update after any re-clone)
 
-> **2026-07-01 STATE: the 8 offline clones below are currently UNINSTALLED.** To ship the new
-> `stt_stream` mode (a chart change) the full rebuild ran (uninstall all 8 → delete chart →
-> upload → clone stt_stream). Only `stt_stream` is live now; the 8 are pending rebuild (their
-> recipes below are unchanged, so re-clone reproduces the same hashes/URLs). Rebuild when the
-> user says stt_stream is stable.
+> **2026-07-03 STATE: ALL 10 clones are LIVE.** Full RULE 1 rebuild ran to ship the diar_stream
+> `/opt/venv` fix (uninstall all 10 → delete chart → upload fixed tgz → re-clone all 10). Every
+> hash reproduced identically → all public URLs unchanged → no Gateway provider re-pointing.
 
 | Cap | Title (exact, hash input) | App name | Namespace | Public URL | Internal URL |
 |---|---|---|---|---|---|
+| **Diar Stream (Sortformer, WS)** | `Audio Lab X V3 Diar Stream` | `audiolabxv3096764` | `audiolabxv3096764-shared` | `https://20b7f5ba.olarestest003.olares.com` | `http://audio-engine.audiolabxv3096764-shared:8000` (WS `/v1/audio/diarize/stream`) |
 | **STT Stream (Qwen3-ASR, WS)** | `Audio Lab X V3 STT Stream` | `audiolabxv30f9f88` | `audiolabxv30f9f88-shared` | `https://d123f7e6.olarestest003.olares.com` | `http://audio-engine.audiolabxv30f9f88-shared:8000` (WS `/v1/audio/stream`) |
 | STT faster-whisper | `Audio Lab X V3 STT` | `audiolabxv3b2b539` | `audiolabxv3b2b539-shared` | (ask user — unchanged) | `http://audio-engine.audiolabxv3b2b539-shared:8000` |
 | STT Qwen3-ASR | `Audio Lab X V3 Qwen3-ASR` | `audiolabxv3a0bbb6` | `audiolabxv3a0bbb6-shared` | (ask user — unchanged) | `http://audio-engine.audiolabxv3a0bbb6-shared:8000` |
@@ -350,6 +369,7 @@ olares-cli market clone audiolabxv3 -s upload --title "<EXACT TITLE>" \
 | Embed | `hf://pyannote/embedding` | `pyannote-embedding` | `embed` | `0` | — |
 | Enhance | `hf://speechbrain/mtl-mimic-voicebank` | `mtl-mimic-voicebank` | `enhance` | `2Gi` (server-side chunking bounds VRAM; `0`=CPU still works) | — |
 | Align | `hf://Qwen/Qwen3-ForcedAligner-0.6B` | `Qwen/Qwen3-ForcedAligner-0.6B` | `align` | `4Gi` | engine = vLLM cu129 (NOT pyannote); needs forced text |
+| Diar Stream (Sortformer, WS) | `hf://nvidia/diar_streaming_sortformer_4spk-v2.1` | `diar-streaming-sortformer` | `diar_stream` | `6Gi` | title `Audio Lab X V3 Diar Stream`; engine = nvidia-nemo:26.02 on **/opt/venv** python (see NEMO PYTHON GOTCHA); WS `/v1/audio/diarize/stream`; public/ungated |
 
 ## ConfigMap (wrapper) edits → delete + re-clone (see RULE 1)
 

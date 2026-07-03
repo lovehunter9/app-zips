@@ -30,9 +30,19 @@
        engine image (beclab/nvidia-nemo:26.02, ~23GB): NVIDIA Streaming Sortformer is a .nemo
        checkpoint needing the NeMo runtime — it CANNOT ride the pyannote or vLLM images. It runs
        /wrappers/diar_stream.py (a WebSocket at /v1/audio/diarize/stream emitting speaker-turn
-       segments WITH the model's NATIVE frame timestamps). fastapi/uvicorn/websockets are
-       pip-installed into /pydeps on first load (torch + nemo.collections.asr are already in the
-       image). This is the one image the "reuse existing engines" rule doesn't cover.
+       segments WITH the model's NATIVE frame timestamps). This is the one image the
+       "reuse existing engines" rule doesn't cover.
+       CRITICAL PYTHON GOTCHA (cost one clone iteration, 2026-07-03): the NeMo 26.02 image
+       installs nemo_toolkit into a uv venv at /opt/venv (python 3.13), while the base image's
+       torch sits in the SYSTEM python 3.12 (/usr/local/.../dist-packages). The shared
+       $pydepsPrelude builds /pydeps/venv off `python3` = the 3.12 system python, whose
+       --system-site-packages exposes torch but NOT nemo (different interpreter) → the wrapper
+       died with `No module named 'nemo'` for 13h at 0/1. FIX: diar_stream's cmd bypasses the
+       pydeps venv and runs /opt/venv/bin/python directly (the ONLY interpreter with nemo), and
+       persists fastapi/uvicorn/websockets into /pydeps/diarstream-site via `pip/uv --target`
+       (added to PYTHONPATH, which we RESET to $SITE to drop the prelude's 3.12 venv path). Deps
+       install only if missing (import-probe) and only once (sentinel /pydeps/.diar_stream.ok) →
+       restart re-installs nothing.
        stt_stream (streaming ASR) rides the SAME vLLM cu129 image as offline stt/align but runs
        /wrappers/stream.py: Qwen3-ASR streaming lives in the qwen-asr[vllm] package's IN-PROCESS
        API (Qwen3ASRModel.LLM + init/streaming/finish_streaming_transcribe) — `vllm serve` has NO
@@ -89,7 +99,7 @@
       "embed" (dict "image" "docker.io/beclab/maximsachs-pyannote_fastapi:4.0.4" "port" "8000" "health" "/healthz" "cmd" "exec $(command -v python3 || command -v python) /wrappers/embed.py")
       "enhance" (dict "image" "docker.io/beclab/maximsachs-pyannote_fastapi:4.0.4" "port" "8000" "health" "/healthz" "cmd" "exec $(command -v python3 || command -v python) /wrappers/enhance.py")
       "align" (dict "image" "docker.io/beclab/vllm-vllm-openai:v0.23.0-cu129" "port" "8000" "health" "/healthz" "cmd" "export HF_HUB_OFFLINE=1; [ -f /pydeps/.align.ok ] || { python3 -m pip install -q --ignore-installed blinker || true; python3 -m pip install -q qwen-asr librosa soundfile av && touch /pydeps/.align.ok; }; exec $(command -v python3 || command -v python) /wrappers/align.py")
-      "diar_stream" (dict "image" "docker.io/beclab/nvidia-nemo:26.02" "port" "8000" "health" "/healthz" "cmd" "export HF_HUB_OFFLINE=1; export PYTHONUNBUFFERED=1; [ -f /pydeps/.diar_stream.ok ] || { echo '[diar_stream] first-run: installing ws/http deps into /pydeps (reusing NeMo image torch+nemo.asr)'; python3 -m pip install -q --root-user-action=ignore fastapi uvicorn websockets || true; touch /pydeps/.diar_stream.ok; }; echo '[diar_stream] launching diar_stream.py'; exec $(command -v python3 || command -v python) /wrappers/diar_stream.py") -}}
+      "diar_stream" (dict "image" "docker.io/beclab/nvidia-nemo:26.02" "port" "8000" "health" "/healthz" "cmd" "export HF_HUB_OFFLINE=1; export PYTHONUNBUFFERED=1; PY=/opt/venv/bin/python; [ -x $PY ] || PY=$(command -v python3 || command -v python); SITE=/pydeps/diarstream-site; mkdir -p $SITE; export PYTHONPATH=$SITE; [ -f /pydeps/.diar_stream.ok ] || { if $PY -c 'import fastapi,uvicorn,websockets' 2>/dev/null; then echo '[diar_stream] fastapi/uvicorn/websockets already present in image venv'; else echo '[diar_stream] first-run: installing fastapi/uvicorn/websockets into /pydeps/diarstream-site (python=/opt/venv, the interpreter that has nemo)'; { command -v uv >/dev/null 2>&1 && uv pip install --python $PY --target $SITE fastapi uvicorn websockets; } || $PY -m pip install --root-user-action=ignore --target $SITE fastapi uvicorn websockets || { $PY -m ensurepip --upgrade && $PY -m pip install --root-user-action=ignore --target $SITE fastapi uvicorn websockets; } || echo '[diar_stream] WARN dep install failed'; fi; touch /pydeps/.diar_stream.ok; }; echo '[diar_stream] launching diar_stream.py'; exec $PY /wrappers/diar_stream.py") -}}
 {{- $sel := index $engines $modelMode -}}
 {{- if not $sel -}}
 {{- $sel = dict "image" (printf "docker.io/beclab/voice-engine-%s:notbuilt" $modelMode) "port" "8000" "health" "/healthz" -}}
