@@ -119,29 +119,6 @@ function spkLabel(spk: string): string {
   return m ? `说话人 ${parseInt(m[1], 10) + 1}` : spk || "?";
 }
 
-// Pick the speaker for a caption line spanning [t0,t1]: the diar segment with the
-// largest time overlap. If nothing overlaps (line past the diar coverage), fall
-// back to the last segment that starts at or before t1.
-function speakerForSpan(t0: number, t1: number, segs: Seg[]): string {
-  if (!segs.length) return "";
-  const a = Math.min(t0, t1);
-  const b = Math.max(t0, t1);
-  let best = "";
-  let bestOv = 0;
-  let lastBefore = "";
-  for (const s of segs) {
-    if (s.start <= b) lastBefore = s.speaker;
-    const ov = Math.min(b, s.end) - Math.max(a, s.start);
-    if (ov > bestOv) { bestOv = ov; best = s.speaker; }
-  }
-  return best || lastBefore;
-}
-
-function speakerForTime(t: number, segs: Seg[]): string {
-  for (const s of segs) if (t >= s.start && t <= s.end) return s.speaker;
-  return "";
-}
-
 // Collapse consecutive same-speaker segments (short gaps included) into blocks
 // for a compact "who spoke when" timeline.
 function mergeSegs(segs: Seg[]): Seg[] {
@@ -156,6 +133,34 @@ function mergeSegs(segs: Seg[]): Seg[] {
     }
   }
   return out;
+}
+
+// Only truly momentary blips (a couple of 80ms frames) are diarisation noise worth
+// hiding. Keep the threshold low so GENUINE short turns (a quick "Bye", a one-word
+// interjection) survive and rapid speaker switches stay visible; if filtering would
+// empty the set, fall back to the merged raw segments.
+const MIN_TURN = 0.25;
+function stableSegs(segs: Seg[]): Seg[] {
+  const merged = mergeSegs(segs);
+  const kept = merged.filter((s) => s.end - s.start >= MIN_TURN);
+  return kept.length ? kept : merged;
+}
+
+// Attribute a caption line to the speaker on screen AT ITS OWN TIMECODE `t` (the
+// same time shown next to the line and used by the timeline panel), so the fused
+// chip is always consistent with the timeline. Uses the covering turn, else the
+// nearest turn in time. NO [t0,t1] overlap window — that window is polluted by the
+// previous line / inter-sentence gap and mis-attributes short lines.
+function speakerAtTime(t: number, segs: Seg[]): string {
+  if (!segs.length) return "";
+  for (const s of segs) if (t >= s.start && t <= s.end) return s.speaker;
+  let best = segs[0];
+  let bestGap = Infinity;
+  for (const s of segs) {
+    const gap = t < s.start ? s.start - t : t - s.end;
+    if (gap < bestGap) { bestGap = gap; best = s; }
+  }
+  return best.speaker;
 }
 
 type Status = "idle" | "connecting" | "streaming" | "stopping" | "done" | "error";
@@ -174,21 +179,28 @@ export function StreamView({
   const diarModels = useMemo(() => models.filter((m) => m.mode === "diar_stream"), [models]);
 
   // Which capabilities are active. Both can run alone or together (fusion).
+  // Diar defaults ON so the headline "实时字幕 + 说话人" fusion is invoked out of
+  // the box (if no diar_stream model exists in the gateway, the run silently
+  // degrades to STT-only — see openEngines/precheck).
   const [enableStt, setEnableStt] = useState<boolean>(true);
-  const [enableDiar, setEnableDiar] = useState<boolean>(false);
+  const [enableDiar, setEnableDiar] = useState<boolean>(true);
 
   const [model, setModel] = useState<string>("");
   const [diarModel, setDiarModel] = useState<string>("");
   useEffect(() => {
-    // Only auto-fill from what the gateway actually returned; never pre-seed a
-    // guessed model name (models come ONLY from the gateway).
-    if (!model) {
-      const pick = defaults["stt_stream"] || streamModels[0]?.name || "";
-      if (pick) setModel(pick);
+    // Auto-pick ONLY from models the gateway actually serves (never a guessed
+    // vendor name). Self-heal: if the current selection is empty OR no longer in
+    // the served list (e.g. the gateway still returns a stale default that points
+    // at a deleted/renamed model), snap to a valid one — prefer the gateway
+    // default when it's actually served, else the first served model.
+    const has = (name: string, list: ProviderModel[]) => !!name && list.some((m) => m.name === name);
+    if (streamModels.length && !has(model, streamModels)) {
+      const pref = defaults["stt_stream"] || "";
+      setModel(has(pref, streamModels) ? pref : streamModels[0].name);
     }
-    if (!diarModel) {
-      const pick = defaults["diar_stream"] || diarModels[0]?.name || "";
-      if (pick) setDiarModel(pick);
+    if (diarModels.length && !has(diarModel, diarModels)) {
+      const pref = defaults["diar_stream"] || "";
+      setDiarModel(has(pref, diarModels) ? pref : diarModels[0].name);
     }
   }, [defaults, streamModels, diarModels, model, diarModel]);
 
@@ -231,6 +243,13 @@ export function StreamView({
   // superseded (seek-restarted) socket bails out. Sockets also guard on ref identity.
   const sessionRef = useRef<number>(0);
   const pendingRef = useRef<Set<Kind>>(new Set()); // engines still running this session
+  // Settle guard + watchdog: `finish` must be idempotent (multiple engines finishing,
+  // socket onclose, and the watchdog can all race), and a session MUST settle even if
+  // an engine never sends `final`/closes (e.g. a stalled diar engine) — otherwise the
+  // UI is stuck at "收尾中" forever and only a refresh clears it. Gating on `status`
+  // failed because the socket handlers close over a STALE status value.
+  const finalizedRef = useRef<boolean>(false);
+  const finalizeTimerRef = useRef<number | null>(null);
   // File-session state kept in refs so a seek can restart the stream at a new
   // position: pcmRef = decoded 16k mono PCM; sentRef = samples already streamed;
   // runningRef = an active file session is live (gate the seek handler);
@@ -240,7 +259,10 @@ export function StreamView({
   const runningRef = useRef<boolean>(false);
   const seekTimerRef = useRef<number | null>(null);
 
-  const fusion = enableStt && enableDiar;
+  // Fusion (per-line speaker chips) only makes sense when diar can actually run;
+  // if the gateway has no diar_stream model we degraded to STT-only, so don't
+  // leave every line stuck at "识别中…".
+  const fusion = enableStt && enableDiar && diarModels.length > 0;
   // Current on-screen caption = the live (interim) fragment, else the last settled line.
   const currentCaption = interim || (committed.length ? committed[committed.length - 1] : "");
 
@@ -300,8 +322,15 @@ export function StreamView({
     // engine emits ~1–2s behind the audio; fine for a caption timecode / fusion).
     const times = capTimesRef.current;
     if (c.length > times.length) {
+      // Several sentences can settle in ONE engine message. Stamping them all with
+      // `now` collapses their timecodes AND their fusion anchor -> they'd all get
+      // one speaker. Spread the new lines across (lastTime, now] so each gets a
+      // distinct, monotonically-increasing timecode for display + fusion.
       const now = audioClock();
-      for (let i = times.length; i < c.length; i++) times.push(now);
+      const prev = times.length ? times[times.length - 1] : 0;
+      const n = c.length - times.length;
+      const span = Math.max(0, now - prev);
+      for (let k = 1; k <= n; k++) times.push(prev + (span * k) / n);
       capTimesRef.current = times;
       setCapTimes([...times]);
     } else if (c.length < times.length) {
@@ -330,7 +359,10 @@ export function StreamView({
   // done, settle the whole session.
   function noteDone(kind: Kind) {
     pendingRef.current.delete(kind);
-    if (pendingRef.current.size === 0 && (status === "streaming" || status === "stopping")) finish("done");
+    // Settle when the LAST engine is done. Gate on the finalize guard (a ref), NOT the
+    // `status` React state — these run inside socket handlers that captured a stale
+    // `status`, which used to leave the session stuck at "收尾中".
+    if (pendingRef.current.size === 0 && !finalizedRef.current) finish("done");
   }
 
   function openSock(kind: Kind, modelName: string): Promise<WebSocket> {
@@ -360,7 +392,7 @@ export function StreamView({
       };
       ws.onclose = () => {
         if (ref.current !== ws) return; // an old session we intentionally replaced
-        if (status === "streaming" || status === "stopping") noteDone(kind);
+        if (!finalizedRef.current) noteDone(kind);
       };
     });
   }
@@ -371,14 +403,18 @@ export function StreamView({
     }
     if (!enableStt && !enableDiar) throw new Error("请至少启用一项能力(转写 / 说话人)。");
     if (enableStt && !model.trim()) throw new Error("请先选择流式转写模型(mode=stt_stream)。");
-    if (enableDiar && !diarModel.trim()) throw new Error("请先选择流式说话人模型(mode=diar_stream)。");
+    // Diar只在网关确有 diar_stream 模型、却没选的情况下才报错;若网关根本没有
+    // diar_stream 模型,则本次静默降级为仅转写(不阻塞 STT)。
+    if (enableDiar && diarModels.length > 0 && !diarModel.trim())
+      throw new Error("请先选择流式说话人模型(mode=diar_stream)。");
   }
 
   // Open every enabled engine and register it as pending for this session.
+  // Diar只有在真正拿到模型时才连接;否则本次仅跑转写。
   async function openEngines() {
     pendingRef.current = new Set();
     if (enableStt) { await openSock("stt", model.trim()); pendingRef.current.add("stt"); }
-    if (enableDiar) { await openSock("diar", diarModel.trim()); pendingRef.current.add("diar"); }
+    if (enableDiar && diarModel.trim()) { await openSock("diar", diarModel.trim()); pendingRef.current.add("diar"); }
   }
 
   function sendStarts() {
@@ -401,6 +437,14 @@ export function StreamView({
     setStatus("stopping");
     for (const ws of [wsRef.current, diarWsRef.current])
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "stop" }));
+    // Watchdog: an engine may be slow to send its `final` or may never close (a stalled
+    // diar engine can sit inside a long inference). Don't let the UI hang at "收尾中" —
+    // force-settle after a grace period. `finish` is idempotent, so a timely engine
+    // `final` still wins and this becomes a no-op.
+    if (finalizeTimerRef.current) clearTimeout(finalizeTimerRef.current);
+    finalizeTimerRef.current = window.setTimeout(() => {
+      if (!finalizedRef.current) finish("done");
+    }, 5000);
   }
 
   function startTimer() {
@@ -411,6 +455,9 @@ export function StreamView({
   }
 
   function finish(s: Status) {
+    if (finalizedRef.current) return; // idempotent: engines / onclose / watchdog all race here
+    finalizedRef.current = true;
+    if (finalizeTimerRef.current) { clearTimeout(finalizeTimerRef.current); finalizeTimerRef.current = null; }
     runningRef.current = false;
     sessionRef.current++;
     if (seekTimerRef.current) { clearTimeout(seekTimerRef.current); seekTimerRef.current = null; }
@@ -424,6 +471,7 @@ export function StreamView({
     micRef.current = null;
     try { acRef.current?.close(); } catch {}
     acRef.current = null;
+    closeSockets(); // drop any lingering/stalled engine sockets so nothing hangs open
     setLevel(0);
     setStatus(s);
   }
@@ -468,6 +516,7 @@ export function StreamView({
     setStatus("connecting");
     stopFileRef.current = false;
     stopSentRef.current = false;
+    finalizedRef.current = false;
     try {
       precheck();
       const dec = await decodeAudio(file);
@@ -500,6 +549,7 @@ export function StreamView({
     if (!pcmRef.current) return;
     stopFileRef.current = false;
     stopSentRef.current = false;
+    finalizedRef.current = false;
     if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
     closeSockets(); // old sockets; their handlers are ref-identity guarded
     setCommitted([]); setInterim("");
@@ -535,6 +585,7 @@ export function StreamView({
     reset();
     setStatus("connecting");
     stopSentRef.current = false;
+    finalizedRef.current = false;
     try {
       precheck();
       const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
@@ -599,19 +650,33 @@ export function StreamView({
     broadcastStopOnce();
   }
 
-  // Per-line speaker attribution (fusion). Recomputed as diar segments stream in.
+  // Flash-filtered, merged turns — the single source of truth shared by BOTH the
+  // fused caption chips and the timeline panel, so they can never disagree.
+  const fuseSegs = useMemo(() => stableSegs(diarSegs), [diarSegs]);
+  // How far diarisation has actually committed. Diar trails the transcript by ~1-2s
+  // (right-context + emit cadence), so a freshly-settled line often sits AHEAD of
+  // this. We must NOT guess a speaker for those lines (that caused a burst of lines
+  // to all show the last speaker, then "backfill" when diar caught up). Instead they
+  // stay PENDING (no chip) until diar covers their timecode, then fill once, right.
+  const diarCoveredTo = useMemo(
+    () => fuseSegs.reduce((m, s) => Math.max(m, s.end), 0), [fuseSegs]);
+  // Per-line speaker attribution (fusion): each covered line takes the speaker on
+  // screen at its OWN displayed timecode; uncovered (future) lines are pending WHILE
+  // LIVE. Once the session has ended, diar won't advance any further, so stop leaving
+  // the tail stuck at 识别中… — give those lines their best-effort (nearest) speaker.
+  const finalized = status === "done" || status === "error";
   const lineSpeakers = useMemo(() => {
     if (!enableDiar) return [] as string[];
     return committed.map((_, i) => {
-      const t1 = capTimes[i] ?? 0;
-      const t0 = i > 0 ? (capTimes[i - 1] ?? 0) : 0;
-      return speakerForSpan(t0, t1, diarSegs);
+      const t = capTimes[i] ?? 0;
+      if (!finalized && t > diarCoveredTo + 0.3) return "";   // still live & diar hasn't reached here -> pending
+      return speakerAtTime(t, fuseSegs);
     });
-  }, [committed, capTimes, diarSegs, enableDiar]);
+  }, [committed, capTimes, fuseSegs, diarCoveredTo, enableDiar, finalized]);
 
-  const mergedSegs = useMemo(() => mergeSegs(diarSegs), [diarSegs]);
-  const nowSpeaker = enableDiar ? speakerForTime(audioClock(), diarSegs) : "";
-  const currentLineSpeaker = enableDiar && diarSegs.length ? speakerForTime(audioClock(), diarSegs) : "";
+  const mergedSegs = fuseSegs;
+  const nowSpeaker = enableDiar ? speakerAtTime(audioClock(), fuseSegs) : "";
+  const currentLineSpeaker = enableDiar && fuseSegs.length ? speakerAtTime(audioClock(), fuseSegs) : "";
 
   const busy = status === "connecting" || status === "streaming" || status === "stopping";
   const statusLabel: Record<Status, string> = {
@@ -627,7 +692,7 @@ export function StreamView({
     const c = spkColor(spk);
     return (
       <span
-        className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-px text-[11px] font-medium"
+        className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded px-1.5 py-px text-[11px] font-medium leading-none"
         style={{ color: c, backgroundColor: c + "22", border: `1px solid ${c}55` }}
       >
         <span className="inline-block h-2 w-2 rounded-full" style={{ backgroundColor: c }} />
@@ -666,40 +731,40 @@ export function StreamView({
           {fusion && <span className="rounded bg-neutral-800 px-2 py-0.5 text-[11px] text-neutral-300">融合模式:字幕按说话人着色标注</span>}
         </div>
 
-        {/* models */}
+        {/* models — BOTH selectors are ALWAYS rendered (mirrors TAB 1: fixed layout,
+            no appear/disappear when a capability is toggled → no visual shift). The
+            checkbox above governs whether the capability is actually invoked; a select
+            for a disabled capability is dimmed but still pre-selectable. Defaults come
+            ONLY from gateway-fetched models (never a guessed vendor name). */}
         <div className="mb-3 grid gap-3 sm:grid-cols-2">
-          {enableStt && (
-            <label className="text-sm">
-              <span className="mb-1 block text-neutral-400">流式转写模型(mode=stt_stream)</span>
-              <select className="input" value={model} onChange={(e) => setModel(e.target.value)} disabled={busy}>
-                {streamModels.length === 0 && <option value="">(无 stt_stream 模型 — 先刷新)</option>}
-                {streamModels.map((m) => (
-                  <option key={m.id || m.name} value={m.name}>
-                    {m.name}{m.provider_name ? ` · ${m.provider_name}` : ""}
-                  </option>
-                ))}
-              </select>
-              {streamModels.length === 0 && (
-                <span className="mt-1 block text-xs text-amber-500">未在网关发现 stt_stream 模型;请先在『① Gateway 设置』刷新模型。</span>
-              )}
-            </label>
-          )}
-          {enableDiar && (
-            <label className="text-sm">
-              <span className="mb-1 block text-neutral-400">流式说话人模型(mode=diar_stream)</span>
-              <select className="input" value={diarModel} onChange={(e) => setDiarModel(e.target.value)} disabled={busy}>
-                {diarModels.length === 0 && <option value="">(无 diar_stream 模型 — 先刷新)</option>}
-                {diarModels.map((m) => (
-                  <option key={m.id || m.name} value={m.name}>
-                    {m.name}{m.provider_name ? ` · ${m.provider_name}` : ""}
-                  </option>
-                ))}
-              </select>
-              {diarModels.length === 0 && (
-                <span className="mt-1 block text-xs text-amber-500">未在网关发现 diar_stream 模型;请先在『① Gateway 设置』刷新模型。</span>
-              )}
-            </label>
-          )}
+          <label className={`text-sm ${enableStt ? "" : "opacity-50"}`}>
+            <span className="mb-1 block text-neutral-400">流式转写模型(mode=stt_stream)</span>
+            <select className="input" value={model} onChange={(e) => setModel(e.target.value)} disabled={busy}>
+              {streamModels.length === 0 && <option value="">(无 stt_stream 模型 — 先刷新)</option>}
+              {streamModels.map((m) => (
+                <option key={m.id || m.name} value={m.name}>
+                  {m.name}{m.provider_name ? ` · ${m.provider_name}` : ""}
+                </option>
+              ))}
+            </select>
+            {streamModels.length === 0 && (
+              <span className="mt-1 block text-xs text-amber-500">未在网关发现 stt_stream 模型;请先在『① Gateway 设置』刷新模型。</span>
+            )}
+          </label>
+          <label className={`text-sm ${enableDiar ? "" : "opacity-50"}`}>
+            <span className="mb-1 block text-neutral-400">流式说话人模型(mode=diar_stream)</span>
+            <select className="input" value={diarModel} onChange={(e) => setDiarModel(e.target.value)} disabled={busy}>
+              {diarModels.length === 0 && <option value="">(无 diar_stream 模型 — 先刷新)</option>}
+              {diarModels.map((m) => (
+                <option key={m.id || m.name} value={m.name}>
+                  {m.name}{m.provider_name ? ` · ${m.provider_name}` : ""}
+                </option>
+              ))}
+            </select>
+            {diarModels.length === 0 && (
+              <span className="mt-1 block text-xs text-amber-500">未在网关发现 diar_stream 模型;请先在『① Gateway 设置』刷新模型。</span>
+            )}
+          </label>
         </div>
 
         {/* source */}
@@ -784,7 +849,58 @@ export function StreamView({
         {err && <p className="mt-3 rounded bg-red-950/60 px-3 py-2 text-sm text-red-300">{err}</p>}
       </div>
 
-      {/* standalone speaker timeline — shown whenever diar is active */}
+      {/* rolling subtitles — shown whenever STT is active. Placed FIRST because the
+          fused subtitles (text + speaker) are what users most want to see; the raw
+          speaker timeline is a secondary detail panel below. */}
+      {enableStt && (
+        <div className="rounded-lg border border-neutral-800 bg-black/40 p-4">
+          <div className="mb-2 flex items-center justify-between text-xs text-neutral-500">
+            <span>实时字幕{fusion ? "(含说话人)" : ""}</span>
+            <span>{committed.length} 句已定{interim ? " · 1 句识别中" : ""}</span>
+          </div>
+          <div ref={scrollRef} className="max-h-[46vh] min-h-[10rem] space-y-2 overflow-y-auto pr-1">
+            {committed.length === 0 && !interim && (
+              <p className="text-sm text-neutral-600">{busy ? "等待识别结果…" : "选择输入源后点击开始,字幕会在这里逐句滚动。"}</p>
+            )}
+            {committed.map((line, i) => (
+              <p key={i} className="flex gap-2 text-[15px] leading-relaxed text-neutral-100">
+                {showTimecode && (
+                  <span className="shrink-0 pt-px font-mono text-xs tabular-nums text-emerald-400/80">
+                    {fmtTC(capTimes[i] ?? 0)}
+                  </span>
+                )}
+                {fusion && (lineSpeakers[i]
+                  ? <span className="shrink-0 pt-px"><SpeakerChip spk={lineSpeakers[i]} /></span>
+                  : <span className="shrink-0 whitespace-nowrap rounded border border-neutral-700 px-1.5 py-px text-[11px] leading-none text-neutral-500" title="等待说话人识别覆盖此处">识别中…</span>)}
+                <span>{line}</span>
+              </p>
+            ))}
+            {interim && (
+              <p className="text-[15px] italic leading-relaxed text-neutral-400">
+                {interim}<span className="ml-0.5 inline-block h-4 w-1.5 animate-pulse bg-emerald-400 align-middle" />
+              </p>
+            )}
+          </div>
+          {(committed.length > 0 || interim) && (
+            <div className="mt-3 border-t border-neutral-800 pt-2 text-right">
+              <button
+                className="rounded-md bg-neutral-700 px-3 py-1.5 text-sm text-neutral-100 hover:bg-neutral-600"
+                onClick={() => {
+                  const line = (l: string, i: number) => {
+                    const tc = showTimecode ? `[${fmtTC(capTimes[i] ?? 0)}] ` : "";
+                    const spk = fusion && lineSpeakers[i] ? `${spkLabel(lineSpeakers[i])}: ` : "";
+                    return `${tc}${spk}${l}`;
+                  };
+                  const body = committed.map(line).join("\n") + (interim ? `\n${interim}` : "");
+                  navigator.clipboard?.writeText(body);
+                }}
+              >复制全文</button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* standalone speaker timeline — secondary detail, below the fused subtitles */}
       {enableDiar && (
         <div className="rounded-lg border border-neutral-800 bg-black/40 p-4">
           <div className="mb-2 flex items-center justify-between text-xs text-neutral-500">
@@ -812,53 +928,6 @@ export function StreamView({
               );
             })}
           </div>
-        </div>
-      )}
-
-      {/* rolling subtitles — shown whenever STT is active */}
-      {enableStt && (
-        <div className="rounded-lg border border-neutral-800 bg-black/40 p-4">
-          <div className="mb-2 flex items-center justify-between text-xs text-neutral-500">
-            <span>实时字幕{fusion ? "(含说话人)" : ""}</span>
-            <span>{committed.length} 句已定{interim ? " · 1 句识别中" : ""}</span>
-          </div>
-          <div ref={scrollRef} className="max-h-[46vh] min-h-[10rem] space-y-2 overflow-y-auto pr-1">
-            {committed.length === 0 && !interim && (
-              <p className="text-sm text-neutral-600">{busy ? "等待识别结果…" : "选择输入源后点击开始,字幕会在这里逐句滚动。"}</p>
-            )}
-            {committed.map((line, i) => (
-              <p key={i} className="flex gap-2 text-[15px] leading-relaxed text-neutral-100">
-                {showTimecode && (
-                  <span className="shrink-0 pt-px font-mono text-xs tabular-nums text-emerald-400/80">
-                    {fmtTC(capTimes[i] ?? 0)}
-                  </span>
-                )}
-                {fusion && lineSpeakers[i] && <span className="pt-px"><SpeakerChip spk={lineSpeakers[i]} /></span>}
-                <span>{line}</span>
-              </p>
-            ))}
-            {interim && (
-              <p className="text-[15px] italic leading-relaxed text-neutral-400">
-                {interim}<span className="ml-0.5 inline-block h-4 w-1.5 animate-pulse bg-emerald-400 align-middle" />
-              </p>
-            )}
-          </div>
-          {(committed.length > 0 || interim) && (
-            <div className="mt-3 border-t border-neutral-800 pt-2 text-right">
-              <button
-                className="rounded-md bg-neutral-700 px-3 py-1.5 text-sm text-neutral-100 hover:bg-neutral-600"
-                onClick={() => {
-                  const line = (l: string, i: number) => {
-                    const tc = showTimecode ? `[${fmtTC(capTimes[i] ?? 0)}] ` : "";
-                    const spk = fusion && lineSpeakers[i] ? `${spkLabel(lineSpeakers[i])}: ` : "";
-                    return `${tc}${spk}${l}`;
-                  };
-                  const body = committed.map(line).join("\n") + (interim ? `\n${interim}` : "");
-                  navigator.clipboard?.writeText(body);
-                }}
-              >复制全文</button>
-            </div>
-          )}
         </div>
       )}
     </div>

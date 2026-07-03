@@ -1400,19 +1400,26 @@ data:
     # DETERMINISTIC on a given audio PREFIX — so within one window spk_0/spk_1/... are
     # stable across steps (no relabeling churn).
     #
-    # UNBOUNDED LENGTH: we re-run the model's documented `.diarize()` but only over a
-    # bounded ROLLING WINDOW (the last WINDOW_SEC of audio), COMMIT older turns, and
-    # carry an OVERLAP_SEC tail so the next window's labels are remapped onto the prior
-    # window's by time overlap. That keeps compute AND memory bounded (a session can run
-    # for hours without falling behind or OOMing) while speaker numbering stays stable
-    # across the seam — same "roll instead of grow forever" strategy as stt_stream.
+    # UNBOUNDED LENGTH — TWO PATHS (streaming-first, window fallback):
+    #  1) TRUE STREAMING (primary): keep ONE streaming_state for the whole session and
+    #     feed only NEWLY-arrived, chunk-aligned audio through the model's incremental API
+    #     (init_streaming_state + streaming_feat_loader + forward_streaming_step, per NeMo's
+    #     Streaming_Sortformer / Streaming_Multitalker_ASR tutorial). total_preds accumulates
+    #     per-80ms-frame speaker activity for the ENTIRE session, so turns are just a cheap
+    #     O(T) threshold of that matrix. Compute is O(1) per chunk => real-time forever, and
+    #     AOSC keeps column k == the same speaker for the whole stream, so NO window / overlap
+    #     / relabel is needed. Memory is bounded (audio discarded after feeding; total_preds
+    #     is ~4 floats/80ms ≈ 7MB/10h; streaming_state is fixed-size fifo+spkcache).
+    #  2) BOUNDED WINDOW (_run_window fallback): if the streaming self-test fails on a given
+    #     NeMo build, we fall back to re-running the documented `.diarize()` over only the
+    #     last WINDOW_SEC of audio, COMMIT older turns, and carry an OVERLAP_SEC tail so the
+    #     next window's labels are remapped onto the prior window's by time overlap. Slower
+    #     (O(n) per step) but correct — guarantees diar_stream never regresses to "no output".
+    # The path is chosen ONCE per connection, BEFORE any client audio is consumed (the
+    # streaming self-test runs on silence), so a fallback never loses data.
     #
-    # This is a faithful, version-robust implementation using ONLY the model card's public
-    # API (`SortformerEncLabelModel` + `.diarize(audio=[np], sample_rate=16000)` + the
-    # `sortformer_modules` streaming knobs). A future optimization is the true incremental
-    # step API (init_streaming_state + forward_streaming_step + streaming_feat_loader, per
-    # NeMo's Streaming_Multitalker_ASR tutorial) to feed only new chunks and drop the
-    # per-step re-diarize entirely — wire that only after introspecting the mirrored image.
+    # Both paths use ONLY public NeMo API on `SortformerEncLabelModel` + `sortformer_modules`
+    # streaming knobs; no monkey-patching, and other capabilities are untouched.
     #
     # WebSocket contract (client <-> this wrapper) — mirrors stream.py's shape but the
     # payload is speaker SEGMENTS (with the model's NATIVE frame timestamps), not text:
@@ -1442,20 +1449,28 @@ data:
     MODEL_REPO = _src[5:] if _src.startswith("hf://") else (_src or "nvidia/diar_streaming_sortformer_4spk-v2.1")
     PORT = int(os.environ.get("WRAPPER_PORT", "8000"))
 
-    # Streaming knobs (frames = 80ms). Defaults follow the card's LOW-LATENCY preset
-    # (~1.04s input latency, RTF~0.09) — right for live captions/meetings. Override per
-    # host via DIAR_* env. The "very high latency" preset (chunk_len=340,...) trades 30s
-    # latency for RTF~0.002 if throughput ever matters more than responsiveness.
-    CHUNK_LEN = int(os.environ.get("DIAR_CHUNK_LEN", "6") or 6)
-    RIGHT_CONTEXT = int(os.environ.get("DIAR_RIGHT_CONTEXT", "7") or 7)
-    FIFO_LEN = int(os.environ.get("DIAR_FIFO_LEN", "188") or 188)
-    UPDATE_PERIOD = int(os.environ.get("DIAR_UPDATE_PERIOD", "144") or 144)
+    # Streaming knobs (frames = 80ms). Defaults follow the card's HIGH-LATENCY preset
+    # (~10s input latency, RTF~0.005). Rationale: transcription (a separate stt_stream
+    # engine) stays real-time; for SPEAKERS accuracy matters more than immediacy, and a
+    # bigger chunk lets the model attend over a whole ~10s span at once -> it resolves
+    # RAPID adjacent turns (e.g. male->female->male) far better than the 480ms low-latency
+    # chunk, which commits each fragment with too little context and smears them onto the
+    # dominant speaker. NVIDIA's own DER table shows this preset is better for
+    # conversational/meeting audio (CALLHOME 4spk 12.44 -> 11.72) AND ~18x cheaper. The
+    # demo backfills these late-but-correct labels. Override per host via DIAR_* env:
+    #   low latency (1.04s, live-first):  chunk_len=6  rc=7  fifo=188 update=144 cache=188
+    #   high latency (10s, accuracy):     chunk_len=124 rc=1  fifo=124 update=124 cache=188
+    #   very high latency (30.4s):        chunk_len=340 rc=40 fifo=40  update=300 cache=188
+    CHUNK_LEN = int(os.environ.get("DIAR_CHUNK_LEN", "124") or 124)
+    RIGHT_CONTEXT = int(os.environ.get("DIAR_RIGHT_CONTEXT", "1") or 1)
+    FIFO_LEN = int(os.environ.get("DIAR_FIFO_LEN", "124") or 124)
+    UPDATE_PERIOD = int(os.environ.get("DIAR_UPDATE_PERIOD", "124") or 124)
     SPKCACHE_LEN = int(os.environ.get("DIAR_SPKCACHE_LEN", "188") or 188)
-    # Re-diarize cadence: emit an update every this many seconds of NEW audio.
+    # Emit cadence: send a partial update every this many seconds of NEW audio (both paths).
     STEP_SEC = float(os.environ.get("DIAR_STREAM_STEP_SEC", "2.0") or 2.0)
-    # Need a little audio before the first pass produces anything meaningful.
+    # (Fallback-only) need a little audio before the first .diarize() pass is meaningful.
     MIN_SEC = float(os.environ.get("DIAR_STREAM_MIN_SEC", "1.0") or 1.0)
-    # UNBOUNDED-LENGTH ROLLING WINDOW (same idea as stream.py's STREAM_ROLL_SEC):
+    # (Fallback-only) UNBOUNDED-LENGTH ROLLING WINDOW (same idea as stream.py's STREAM_ROLL_SEC):
     # re-running .diarize() on the WHOLE session buffer is O(n) per step -> O(n^2)
     # over a session, and the buffer + GPU work grow without limit (a long meeting /
     # audiobook eventually falls behind real time and OOMs). So we only ever diarize
@@ -1513,7 +1528,22 @@ data:
                 sm._check_streaming_parameters()
             except Exception as e:
                 log.warning("streaming-parameter check skipped: %s", e)
+            # Probe the TRUE incremental-streaming API (init_streaming_state +
+            # streaming_feat_loader + forward_streaming_step). If present we feed only NEW
+            # audio per step (O(1)/chunk, real-time); if ANY piece is missing we fall back
+            # to the bounded-window .diarize() path below (correctness preserved, just the
+            # old slower behaviour). n_spk / subsampling_factor drive preds->timestamps
+            # (each output frame = subsampling_factor * 10ms preprocessor hop = 80ms).
+            _state["n_spk"] = int(getattr(sm, "n_spk", 4) or 4)
+            _state["subsampling"] = int(getattr(sm, "subsampling_factor", 8) or 8)
+            _state["streaming_ok"] = bool(
+                hasattr(sm, "init_streaming_state") and hasattr(sm, "streaming_feat_loader")
+                and hasattr(model, "forward_streaming_step") and hasattr(model, "preprocessor"))
             _state["model"], _state["device"], _state["ready"] = model, dev, True
+            _p("streaming API present=%s n_spk=%d subsampling=%d (methods: %s)"
+               % (_state["streaming_ok"], _state["n_spk"], _state["subsampling"],
+                  ",".join(sorted(m for m in ("init_streaming_state", "streaming_feat_loader")
+                                  if hasattr(sm, m)))))
             _p("engine READY: %s on %s (chunk=%d rc=%d fifo=%d up=%d cache=%d)"
                % (MODEL_REPO, dev, CHUNK_LEN, RIGHT_CONTEXT, FIFO_LEN, UPDATE_PERIOD, SPKCACHE_LEN))
         except Exception as e:
@@ -1588,9 +1618,41 @@ data:
                             "end": round(float(s["end"]), 3), "speaker": s["speaker"]})
         return out
 
+    def _preds_to_segments(preds, frame_sec, thr=0.5):
+        # preds: numpy [T, n_spk] per-frame speaker-activity probabilities from the
+        # streaming model. Each frame spans frame_sec seconds (80ms). Threshold each
+        # speaker column and collapse contiguous active frames into ABS [start,end]
+        # turns. AOSC keeps column k == the same speaker for the whole session, so
+        # labels are globally stable with NO remap. Returns merged spk_<k> segments.
+        import numpy as np
+        out = []
+        if preds is None or getattr(preds, "size", 0) == 0:
+            return out
+        T = preds.shape[0]
+        S = preds.shape[1] if preds.ndim > 1 else 1
+        act = preds >= thr
+        for s in range(S):
+            col = act[:, s]
+            i = 0
+            while i < T:
+                if col[i]:
+                    j = i
+                    while j + 1 < T and col[j + 1]:
+                        j += 1
+                    out.append({"start": round(i * frame_sec, 3),
+                                "end": round((j + 1) * frame_sec, 3),
+                                "speaker": "spk_%d" % s})
+                    i = j + 1
+                else:
+                    i += 1
+        return _merge_segments(out)
+
     def _diarize(buf):
-        # buf: float32 mono @ 16k. Returns parsed segments over the given buffer
-        # (times RELATIVE to buf[0]). Callers keep buf bounded to WINDOW_SEC.
+        # FALLBACK path only (used when the streaming API is absent). buf: float32 mono
+        # @ 16k. Returns parsed segments over the buffer (times RELATIVE to buf[0]);
+        # callers keep buf bounded to WINDOW_SEC. This is the OLD per-step re-diarize
+        # (O(n) per call) — kept solely as a safety net so diar_stream never regresses
+        # to "no output" if a NeMo version lacks forward_streaming_step.
         model = _state["model"]
         res = model.diarize(audio=[buf], batch_size=1, sample_rate=16000)
         return _parse_segments(res[0] if res else [])
@@ -1613,15 +1675,162 @@ data:
         xn = np.linspace(0.0, dur, num=n16, endpoint=False)
         return np.interp(xn, xo, seg).astype("float32")
 
-    @app.websocket("/v1/audio/diarize/stream")
-    async def diarize_stream(ws: WebSocket):
+    class _FallbackToWindow(Exception):
+        # Raised by the streaming path's pre-flight self-test if the incremental API is
+        # not usable on this NeMo build, so the handler switches to the window path
+        # BEFORE any real audio is consumed (no data lost, no worse than the old code).
+        pass
+
+    async def _run_streaming(ws):
+        # TRUE incremental streaming, done the way the model was validated. The key to
+        # QUALITY is matching NeMo's reference path: extract log-mel over a CONTIGUOUS span
+        # (so per-feature normalization is consistent) and let streaming_feat_loader hand
+        # each chunk its left/right neighbour context. Per-tiny-block extraction re-normalizes
+        # every ~2s independently and drops context at seams -> the SAME speaker splits and
+        # DIFFERENT speakers merge (observed). So we keep a rolling WINDOW of recent audio,
+        # re-extract features over the WHOLE window each step, run the loader over it, and
+        # only actually feed forward_streaming_step for chunks that (a) are NEW (not yet
+        # committed) and (b) already have their full right-context inside the window. Already
+        # committed chunks are SKIPPED (streaming_state already reflects them) but still give
+        # new chunks proper left context + shared normalization. total_preds accumulates the
+        # per-80ms-frame speaker activity for the whole session (AOSC keeps column k == one
+        # speaker throughout -> NO window/overlap/relabel). Model compute stays O(1)/chunk
+        # (only new chunks run); feature extraction is O(window) per step (cheap log-mel);
+        # memory is bounded (window trimmed; total_preds ~4 floats/80ms).
+        import numpy as np, torch
+        model = _state["model"]; sm = model.sortformer_modules; device = _state["device"]
+        n_spk = _state["n_spk"]; sub = _state["subsampling"]
+        frame_sec = sub * 0.01                      # 80ms output frame (sub * 10ms hop)
+        hop = 160                                   # samples per 10ms preprocessor frame @16k
+        CS = max(1, int(sm.chunk_len) * sub)        # feat frames committed per chunk
+        CRs = int(getattr(sm, "chunk_right_context", 0)) * sub   # feat frames of right context
+        chunk_audio = CS * hop                       # samples committed per chunk
+        rc_frames = CRs
+        step_samples = max(8000, int(STEP_SEC * 16000))          # process/emit cadence
+        # Rolling window kept for extraction: long enough for stable normalization + left
+        # context, chunk-aligned. Re-extracted each step; trimmed to keep_chunks from the
+        # committed frontier.
+        keep_chunks = max(8, int(WINDOW_SEC * 16000) // chunk_audio)
+        sample_rate = 16000
+        buf = np.zeros((0,), dtype="float32")
+        ss = {"state": None, "preds": None}
+        st = {"base_chunks": 0, "committed": 0}      # chunks dropped from buf front / total fed
+
+        def _init_stream():
+            ss["state"] = sm.init_streaming_state(batch_size=1, async_streaming=True, device=device)
+            ss["preds"] = torch.zeros((1, 0, n_spk), device=device)
+            st["base_chunks"] = 0
+            st["committed"] = 0
+
+        def _process(final=False):
+            # Feed every NEW chunk in the current window that has full right context (or all
+            # remaining chunks when final). feat_seq_offset is ALWAYS 0 (state carries history).
+            nonlocal buf
+            if buf.size < hop:
+                return
+            sig = torch.as_tensor(buf, dtype=torch.float32, device=device).unsqueeze(0)
+            slen = torch.tensor([sig.shape[1]], device=device)
+            with torch.inference_mode():
+                proc, proc_len = model.preprocessor(input_signal=sig, length=slen)
+                T = int(proc.shape[2])
+                zoff = torch.zeros((proc.shape[0],), dtype=torch.long, device=device)
+                loader = sm.streaming_feat_loader(feat_seq=proc, feat_seq_length=proc_len,
+                                                  feat_seq_offset=zoff)
+                local_fed = st["committed"] - st["base_chunks"]   # leading chunks already fed
+                for _tup in loader:
+                    i, chunk_feat, feat_lengths, lo, ro = _tup[0], _tup[1], _tup[2], _tup[3], _tup[4]
+                    if i < local_fed:
+                        continue                       # already committed in a previous step
+                    if not final and ((i + 1) * CS + rc_frames > T):
+                        break                          # right context not fully arrived yet
+                    ss["state"], ss["preds"] = model.forward_streaming_step(
+                        processed_signal=chunk_feat, processed_signal_length=feat_lengths,
+                        streaming_state=ss["state"], total_preds=ss["preds"],
+                        left_offset=lo, right_offset=ro)
+                    st["committed"] += 1
+            # Trim the window to keep_chunks behind the committed frontier (keeps left
+            # context + a normalization window; chunk-aligned so the grid never shifts).
+            max_base = st["committed"] - keep_chunks
+            if max_base > st["base_chunks"]:
+                drop = max_base - st["base_chunks"]
+                buf = buf[drop * chunk_audio:]
+                st["base_chunks"] = max_base
+
+        def _selftest():
+            # Exercise the whole pipeline on ~2 chunks of silence, then RESET so the probe
+            # doesn't shift the real session. Any error here => fall back to window mode.
+            _init_stream()
+            nonlocal buf
+            buf = np.zeros((CS * 3 * hop,), dtype="float32")
+            _process(final=True)
+            buf = np.zeros((0,), dtype="float32")
+            _init_stream()
+
+        def _segments():
+            p = ss["preds"]
+            if p is None or p.shape[1] == 0:
+                return []
+            arr = p[0].detach().float().cpu().numpy()
+            return _preds_to_segments(arr, frame_sec)
+
+        async def _send(kind):
+            segs = await asyncio.to_thread(_segments)
+            speakers = sorted({s["speaker"] for s in segs})
+            await ws.send_text(json.dumps({"type": kind, "segments": segs, "speakers": speakers}))
+
+        # Pre-flight: prove the streaming API works BEFORE consuming client audio.
+        async with _infer_lock:
+            try:
+                await asyncio.to_thread(_selftest)
+            except Exception as e:
+                raise _FallbackToWindow("%s: %s" % (type(e).__name__, e))
+        _p("streaming path active (chunk=%d frames rc=%d keep=%d chunks frame=%.3fs n_spk=%d)"
+           % (CS, rc_frames, keep_chunks, frame_sec, n_spk))
+
+        new_samples = 0
+        total_new = 0
+        last_emit = 0
+        while True:
+            msg = await ws.receive()
+            if msg.get("type") == "websocket.disconnect":
+                break
+            text = msg.get("text")
+            if text is not None:
+                try:
+                    obj = json.loads(text)
+                except Exception:
+                    obj = {}
+                t = obj.get("type")
+                if t == "start":
+                    sample_rate = int(obj.get("sample_rate") or 16000)
+                    continue
+                if t in ("stop", "done", "finish"):
+                    break
+                continue
+            data = msg.get("bytes")
+            if not data:
+                continue
+            seg = _resample_linear(_pcm16_to_f32(data), sample_rate)
+            buf = np.concatenate([buf, seg]) if buf.size else seg
+            new_samples += int(seg.shape[0]); total_new += int(seg.shape[0])
+            if new_samples >= step_samples:
+                new_samples = 0
+                async with _infer_lock:
+                    await asyncio.to_thread(_process)
+                if total_new - last_emit >= step_samples:
+                    last_emit = total_new
+                    await _send("partial")
+        # Final: feed all remaining chunks (accept rc=0 on the trailing chunk), emit final.
+        async with _infer_lock:
+            await asyncio.to_thread(_process, True)
+        await _send("final")
+        await ws.close()
+
+    async def _run_window(ws):
+        # FALLBACK path: the ORIGINAL bounded-window per-step .diarize() implementation.
+        # Only used if the streaming self-test fails. Slower (re-diarizes the active
+        # window each step) but correct, so diar_stream never regresses to "no output".
         import numpy as np
-        await ws.accept()
-        if not _state["ready"]:
-            await ws.send_text(json.dumps({"type": "error",
-                                           "detail": _state["error"] or "model not ready"}))
-            await ws.close()
-            return
         sample_rate = 16000
         # Rolling window: `buf` holds only the ACTIVE window ([base_offset, now]).
         buf = np.zeros((0,), dtype="float32")
@@ -1706,38 +1915,54 @@ data:
             speakers = sorted({s["speaker"] for s in full})
             await ws.send_text(json.dumps({"type": kind, "segments": full, "speakers": speakers}))
 
+        while True:
+            msg = await ws.receive()
+            if msg.get("type") == "websocket.disconnect":
+                break
+            text = msg.get("text")
+            if text is not None:
+                try:
+                    obj = json.loads(text)
+                except Exception:
+                    obj = {}
+                t = obj.get("type")
+                if t == "start":
+                    sample_rate = int(obj.get("sample_rate") or 16000)
+                    continue
+                if t in ("stop", "done", "finish"):
+                    break
+                continue
+            data = msg.get("bytes")
+            if not data:
+                continue
+            seg = _resample_linear(_pcm16_to_f32(data), sample_rate)
+            buf = np.concatenate([buf, seg]) if buf.size else seg
+            since += int(seg.shape[0])
+            if since >= step_samples:
+                since = 0
+                cur = await _current()
+                await _send("partial", cur)
+                _roll(cur)   # roll AFTER emitting, reusing the just-computed segments
+        await _send("final", await _current())
+        await ws.close()
+
+    @app.websocket("/v1/audio/diarize/stream")
+    async def diarize_stream(ws: WebSocket):
+        await ws.accept()
+        if not _state["ready"]:
+            await ws.send_text(json.dumps({"type": "error",
+                                           "detail": _state["error"] or "model not ready"}))
+            await ws.close()
+            return
         await ws.send_text(json.dumps({"type": "ready"}))
         try:
-            while True:
-                msg = await ws.receive()
-                if msg.get("type") == "websocket.disconnect":
-                    break
-                text = msg.get("text")
-                if text is not None:
-                    try:
-                        obj = json.loads(text)
-                    except Exception:
-                        obj = {}
-                    t = obj.get("type")
-                    if t == "start":
-                        sample_rate = int(obj.get("sample_rate") or 16000)
-                        continue
-                    if t in ("stop", "done", "finish"):
-                        break
-                    continue
-                data = msg.get("bytes")
-                if not data:
-                    continue
-                seg = _resample_linear(_pcm16_to_f32(data), sample_rate)
-                buf = np.concatenate([buf, seg]) if buf.size else seg
-                since += int(seg.shape[0])
-                if since >= step_samples:
-                    since = 0
-                    cur = await _current()
-                    await _send("partial", cur)
-                    _roll(cur)   # roll AFTER emitting, reusing the just-computed segments
-            await _send("final", await _current())
-            await ws.close()
+            if _state.get("streaming_ok"):
+                try:
+                    await _run_streaming(ws)
+                    return
+                except _FallbackToWindow as fb:
+                    _p("streaming self-test failed (%s); using window .diarize() fallback" % fb)
+            await _run_window(ws)
         except WebSocketDisconnect:
             pass
         except Exception as e:

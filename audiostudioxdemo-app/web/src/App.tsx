@@ -658,11 +658,20 @@ export default function App() {
         next[cap] = (def && list.find((x) => x.name === def)?.name) || list[0]?.name || "";
       }
       setSelModel(next);
-      const counts = CAP_ORDER.map((c) => `${c}:${pm.filter((x) => x.mode === CAP_MODE[c]).length}`).join("  ");
-      // stt_stream is a standalone (real-time) capability, not part of the offline
-      // CAP_ORDER checkbox set — surface its count here so it's visible too.
-      const streamCount = pm.filter((x) => x.mode === "stt_stream").length;
-      setModelStatus(`✅ 模型 ${pm.length} 个 — ${counts}  stt_stream:${streamCount}`);
+      // Count models per mode DATA-DRIVEN: group over every mode actually present in
+      // the gateway, so a NEW capability (stt_stream, diar_stream, and any future one)
+      // shows up automatically — no per-capability edit needed here. Known modes come
+      // first in a stable order (offline CAP_ORDER, then the streaming ones), then any
+      // unknown/future mode is appended alphabetically.
+      const KNOWN_MODE_ORDER = [...CAP_ORDER.map((c) => CAP_MODE[c]), "stt_stream", "diar_stream"];
+      const modeCounts = new Map<string, number>();
+      for (const m of pm) modeCounts.set(m.mode, (modeCounts.get(m.mode) || 0) + 1);
+      const orderedModes = [
+        ...KNOWN_MODE_ORDER.filter((mode) => modeCounts.has(mode)),
+        ...Array.from(modeCounts.keys()).filter((mode) => !KNOWN_MODE_ORDER.includes(mode)).sort(),
+      ];
+      const counts = orderedModes.map((mode) => `${mode}:${modeCounts.get(mode)}`).join("  ");
+      setModelStatus(`✅ 模型 ${pm.length} 个 — ${counts}`);
     } catch (e: any) {
       setModelStatus("❌ " + String(e.message || e));
     }

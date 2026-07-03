@@ -12,9 +12,12 @@
 //   2. POST /console/api/providers/:id/customizable-models -> attach the model
 (async () => {
   // --- edit these if the instance URL / model change --------------------
+  // ⚠️ BASE_URL 必须是你现在打开 stt_stream 那个实例的网址 + "/v1"。
+  //    重新 clone 后入口域名可能变了，务必确认这一行是当前 stt_stream 实例的地址。
   const BASE_URL = "https://d123f7e6.olarestest003.olares.com/v1"; // stt_stream entrance + /v1
   const PROVIDER_NAME = "stt-stream-audiolabxv3";
-  const MODEL_NAME = "Qwen/Qwen3-ASR-1.7B";
+  // 独立模型名，绝不和离线 Qwen STT 的 "Qwen/Qwen3-ASR-1.7B" 撞名。
+  const MODEL_NAME = "Qwen3-ASR-1.7B-stream";
   const MODE = "stt_stream";
   // ----------------------------------------------------------------------
 

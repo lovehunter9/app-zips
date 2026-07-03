@@ -59,7 +59,14 @@ upstream gate is red; it just creates rework.
   `diar-streaming-sortformer`, mode `diar_stream`). Script `register-diar-stream-provider.js`.
 - ✅ 7 验证网关 — WS e2e PASSED (`wss://<gw>/v1/audio/diarize/stream?model=diar-streaming-sortformer`,
   Bearer key + SSO cookie; 2 speakers, stable labels, native timestamps).
-- ✅ base 硬化 — 无限长 ROLLING WINDOW (见下方 2026-07-03 DIAR_STREAM UNBOUNDED 记录),直连 WS 已验。
+- ⚠️ base 硬化历程 — ROLLING WINDOW → **真流式(option A)** → 滚动窗口重提特征 → 高延迟(10s)预设。
+  但**质量始终不达标**(见下方 EOD HONEST VERDICT):真流式 diar 对"准确优先、可接受延迟"是错的工具,
+  下次改为**离线 `.diarize()` 定期回填 / 直接离线 diar**。窗口路径仍是 self-test 失败的 FALLBACK。
+- ⚠️ **4 位说话人硬上限**:模型 `..._4spk-...`,`n_spk=4` 是架构固定的输出维度(4 个 speaker 槽),不可调;
+  wrapper 从模型读 `n_spk`,换更高容量 checkpoint 会自动适配,但本模型改不了。**超过 4 人时**:不崩不报错,
+  `total_preds` 恒 4 列;AOSC 让前 4 个开口者占 spk_0..spk_3,第 5+ 人被并进声学最接近的已有槽(或在槽间跳),
+  → 分离质量下降、DER 升高(两人被当一人 / 串色),而非新开 spk_4。**>4 人精确分轨**改用离线 `diar`
+  (pyannote community-1,聚类,说话人数无硬上限);实时场景一般同时活跃 ≤4 人,4spk 够用。
 - 🔶 8 DEMO — `stream.tsx` 重写:转写/说话人两个独立开关(可单开、可融合),双 WS 广播同一路 PCM,
   按音频时钟融合(每句字幕着色标注说话人)+ 独立说话人时间线面板。`npm run build` 通过;联调中。
 - ⏳ 9–11 联调 DEMO / 打镜像 / 下一能力 — pending.
@@ -180,6 +187,63 @@ template edit) — it does NOT count as a per-clone `--env` override.
 
 ## Live ledger (update after any re-clone)
 
+> **2026-07-03 EOD STATE: all 10 clones re-cloned (2 streams live earlier + 8 just re-cloned, all
+> hashes reproduced identically → URLs unchanged → no Gateway re-pointing). The 8 non-stream clones
+> were downloading/installing at handoff (status `accepted`); verify readiness next session with
+> `market list --mine` + engine pod READY. Demo image bumped **1.0.7 → 1.0.8** (built+pushed
+> `docker.io/lovehunter9/audiostudioxdemo:1.0.8`, chart+values bumped) with ONLY the demo end-fix
+> below. Diar preset currently = HIGH-LATENCY 10s (chunk=124 rc=1 fifo=124 up=124 cache=188).**
+>
+> **2026-07-03 HONEST VERDICT on diar_stream (own it) — streaming diar is the WRONG tool for
+> "accuracy-first, delay-OK".** Real streaming diar (Sortformer `forward_streaming_step`+AOSC) IS a
+> real, incremental, O(1)/chunk, low-latency tech (NVIDIA Riva live captions). BUT: (a) my hand-written
+> incremental loop + the low/high-latency presets did not reach acceptable speaker quality on real
+> dialogue (same speaker split / different speakers merged — user's 2:36 BBC clip: two M/F "Bye"s
+> merged, "I'm Feifei/and I'm Phil" one-lined). (b) Once you retreat to periodic offline `.diarize()`
+> backfill, QUALITY == plain offline diar; the ONLY residual value over offline is mid-session
+> partials + bounded memory. So for the user's stated contract (transcript realtime, SPEAKER
+> accuracy-first with acceptable backfill delay) the right answer is OFFLINE diar (or periodic offline
+> re-diarize), NOT the streaming model. I oversold streaming and burned a day — recorded so we don't
+> repeat it.
+>
+> **2026-07-03 DEMO END-FIX (the ONLY code change shipped in image 1.0.8) — `stream.tsx` fusion.**
+> Symptom: at end of audio the last captions stuck forever at "识别中…" and never backfilled (diar
+> coverage trails, and with the 10s preset the trailing <10s chunk often never commits). Fix: fusion
+> now suppresses (pending "识别中…") ONLY WHILE LIVE; once the session is `done`/`error` (`finalized`),
+> every committed line falls back to its best-effort (nearest) speaker via `speakerAtTime` so the tail
+> is labelled instead of stuck. Also earlier this session (already in the 1.0.8 bundle): chip
+> `whitespace-nowrap`+wrapper `shrink-0` (no 2-line chips); fusion anchors each line at its OWN
+> timecode (chip == timeline); batch-settled captions get spread distinct timecodes; flash filter
+> `MIN_TURN=0.25` (keep genuine short turns); pending placeholder instead of force-prefill-with-last-speaker.
+>
+> **2026-07-03 NEXT-SESSION PLAN (user said "全给我做了" then scoped EOD to demo-endfix+image+clones;
+> these are the deferred engineering items — do them next):**
+> 1. **diar → offline `.diarize()` self-paced backfill** (reference quality; fixes end-not-analyzed).
+>    Design: accumulate audio (bounded window for very long sessions), a background worker loops
+>    `.diarize(whole/bounded buf)` → send `partial`, self-pacing at RTF (never falls behind
+>    unboundedly); one final `.diarize()` on stop. Labels stable because always diarized from t=0
+>    (AOSC arrival-order). This is essentially "offline diar with backfill" — and that's fine/honest.
+>    (Alternatively just expose offline `diar` and drop the pretense of streaming for accuracy mode.)
+> 2. **stt_stream must emit an AUDIO-TIME per partial/final** (processed-samples/sr — the SAME clock
+>    as diar's native segment times), because Qwen streaming returns NO word timestamps (wrappers.yaml
+>    stream.py line ~1121). TODAY the demo timestamps captions by BROWSER WALL-CLOCK at settle, which
+>    lags real speech 1–2s and clusters for rapid speech → fusion is wrong at every speaker-change
+>    boundary (user's "2:11 换人" complaint). Root cause = the timing SOURCE, not rounding (fusion
+>    already uses float sub-second). Real finer-grained fusion needs real STT timestamps.
+> 3. **demo fusion** then anchors captions on that engine audio-time vs diar's 80ms turns. For a line
+>    that spans a speaker change ("I'm Feifei, and I'm Phil.") true correctness needs WORD-LEVEL
+>    timestamps + word-level colouring (offline faster-whisper HAS `word_timestamps`; Qwen-stream
+>    doesn't) — decide whether to add a delayed timestamped whisper pass for file input.
+> 4. **diar preset selectable via the `start` WS message** (engine change: read `preset`/`chunk_len`…
+>    from `start`, set `sm.*` under `_infer_lock` before running; env stays as DEFAULT). It IS an
+>    engine change (repackage+RULE1 re-clone), not frontend-only. Multi-user w/ different presets needs
+>    per-process re-set under the lock (sm is shared on the model object).
+> 5. **AUDIT every capability for per-request params via the interface** (user suspicion: "之前的模型
+>    你也都没留好选参数"). Already OK: vad `threshold` (Form), offline stt `language`/`vad_filter`/
+>    `word_timestamps`/`beam` (Form). To check/expose: translate target/source lang, diar num_speakers,
+>    enhance params, align text, embed opts, stt_stream step_ms/language. Ensure each is a request
+>    param (not env-only); env only as default.
+>
 > **2026-07-03 STATE (rebuild #3): 10/10 clones LIVE + healthy — b2b539 FIXED (P0 closed).**
 > Third full RULE 1 rebuild shipped the `$pydepsPrelude` SELF-HEALING fix (see PYDEPS SELF-HEAL note
 > below). All 10 hashes reproduced identically AGAIN → all public URLs unchanged → no Gateway
@@ -227,6 +291,34 @@ template edit) — it does NOT count as a per-clone `--env` override.
 > `DIAR_STREAM_WINDOW_SEC` / `DIAR_STREAM_OVERLAP_SEC`. Future zero-recompute path documented in the
 > wrapper header: `init_streaming_state`+`forward_streaming_step`+`streaming_feat_loader` (feed only
 > new chunks) per NeMo's Streaming_Multitalker_ASR tutorial.
+>
+> **2026-07-03 DIAR_STREAM TRUE-STREAMING REWRITE (option A) — replaced the rolling window. Staged
+> rebuild: only the 2 `_STREAM` clones first.** The window path worked but re-ran `.diarize()` on a
+> 60s window every 2s → still O(window) per emit; under a fast full-file dump the speaker analysis
+> visibly stalled while STT kept going. Rewrote `diar_stream.py` to the real incremental API: ONE
+> `init_streaming_state` per WS connection, feed ONLY new audio via `streaming_feat_loader` +
+> `forward_streaming_step`; `total_preds` accumulates per-80ms-frame speaker activity for the whole
+> session, segments = a cheap O(T) threshold of it. AOSC ⇒ column k is one speaker for the whole
+> stream ⇒ NO window/overlap/remap. A pre-flight silence self-test picks true-streaming vs the old
+> `.diarize()` window FALLBACK before any client audio (so a bad NeMo build degrades, never breaks).
+> **BUG that shipped in the first cut (caught by user's 2:36 mp3 test — final was only
+> `spk_0[0.08-1.28]` for the whole clip):** I passed a CUMULATIVE `feat_seq_offset` across feed calls.
+> `streaming_feat_loader`'s last line is `feat_lengths *= (feat_seq_offset < end_feat)` where
+> `end_feat` is BLOCK-LOCAL; once the cumulative offset passed the first block's end, every chunk got
+> `feat_lengths=0` → `forward_streaming_step` processed nothing → `total_preds` froze after block 1.
+> FIX: pass `feat_seq_offset=0` EVERY call (NeMo's own loop in `sortformer_diar_models.py` L666-711
+> keeps it zero; `streaming_state`=spkcache+fifo carries all history). Also feed MULTI-chunk ~STEP_SEC
+> blocks (chunk-aligned, keep remainder) not 1 chunk at a time, else the loader hands every chunk
+> `lc=rc=0` (no encoder context) → poor quality; interior chunks of a block get full left/right context
+> (dropped from the commit via `streaming_update_async` lc/rc). Frame=80ms (`subsampling_factor`*10ms),
+> `chunk_audio = chunk_len*subsampling*160` samples. Boot log prints `streaming path active
+> (chunk_audio=7680 frame=0.080 n_spk=4)` per connection (that line = self-test PASSED, true path).
+> Re-clone reused hashes `096764`/`0f9f88` → URLs unchanged. Other 8 caps NOT yet rebuilt (staged).
+>
+> **SANDBOX NOTE (cost a wrong "session expired" diagnosis 2026-07-03):** in this Cursor sandbox ALL
+> `olares-cli` verbs (market/cluster) return bare `Forbidden` unless the shell runs with
+> `required_permissions:["full_network"]` (or `all`) — the token is FINE (`profile whoami` fresh).
+> Do NOT conclude the login died from a market/cluster `Forbidden`; add full_network and retry first.
 
 | Cap | Title (exact, hash input) | App name | Namespace | Public URL | Internal URL |
 |---|---|---|---|---|---|
