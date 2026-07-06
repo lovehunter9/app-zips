@@ -102,16 +102,37 @@ migrate_from_pkgroot() {
 }
 
 seed_etc() {
-  # /etc is the image's here (not overlay-bound). Copy the tiny base bits (KB)
-  # into the persistent state dir; the pkg-manager sidecar binds these for its
-  # (use-time) apk operations. /etc/passwd|group get the opencode (uid 1000)
-  # entry appended. Re-seeded every start (cheap, offline).
+  # /etc is the image's here (not overlay-bound). The pkg-manager sidecar binds
+  # these persistent bits for its (use-time) apk operations. /etc/passwd|group
+  # get the opencode (uid 1000) entry appended.
+  #
+  # CRITICAL — apk world must NEVER be reset. The apk *installed DB*
+  # (/lib/apk/db/installed) lives on the OverlayFS upper and persists forever;
+  # the apk *world* (/etc/apk/world, the set of explicitly-wanted packages)
+  # lives here in /etc/apk. If we clobbered world with the image's base set on
+  # every start, it would drift from the persistent installed DB, and the NEXT
+  # `apk add`/`apk del` would treat every user-installed package (ffmpeg, jq, ..)
+  # as an orphan and PURGE it. So: seed the whole apk config only on first boot;
+  # afterwards refresh only the image-controlled metadata (keys/repositories/arch)
+  # and set world := union(image base world, existing world) -- base packages are
+  # always kept, user packages are never dropped.
   ETC="$PKG/etc"
   mkdir -p "$ETC"
-  # rm before cp -a: on re-seed these dirs already exist and a bare
-  # `cp -a src dest` would nest as dest/apk/apk.
-  rm -rf "$ETC/apk" "$ETC/ssl"
-  cp -a /etc/apk "$ETC/apk" 2>/dev/null || true
+  if [ ! -f "$ETC/apk/world" ]; then
+    rm -rf "$ETC/apk"
+    cp -a /etc/apk "$ETC/apk" 2>/dev/null || true
+  else
+    cp -a /etc/apk/repositories "$ETC/apk/repositories" 2>/dev/null || true
+    cp -a /etc/apk/arch "$ETC/apk/arch" 2>/dev/null || true
+    rm -rf "$ETC/apk/keys"
+    cp -a /etc/apk/keys "$ETC/apk/keys" 2>/dev/null || true
+    if sort -u "$ETC/apk/world" /etc/apk/world > "$ETC/apk/world.tmp" 2>/dev/null; then
+      mv "$ETC/apk/world.tmp" "$ETC/apk/world"
+    else
+      rm -f "$ETC/apk/world.tmp"
+    fi
+  fi
+  rm -rf "$ETC/ssl"
   cp -a /etc/ssl "$ETC/ssl" 2>/dev/null || true
   cp /etc/passwd "$ETC/passwd"
   cp /etc/group  "$ETC/group"
