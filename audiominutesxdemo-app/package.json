@@ -1,0 +1,16 @@
+{
+  "name": "audiominutesxdemo-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Audio Minutes X Demo — App Server (SPA host + Gateway proxy + ffmpeg + async transcribe pipeline + library persistence)",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "build:web": "npm --prefix web install && npm --prefix web run build",
+    "dev:web": "npm --prefix web run dev"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "multer": "^1.4.5-lts.1"
+  }
+}
