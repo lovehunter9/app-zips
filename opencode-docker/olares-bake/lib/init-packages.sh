@@ -95,8 +95,20 @@ migrate_from_pkgroot() {
     fi
     rm -f /tmp/merged.db
   fi
-  rm -f /tmp/base.list /tmp/old.list /tmp/mig.list
+  # Persist the imported package names so seed_etc unions them into apk world.
+  # The migrated packages are in the installed DB (overlay upper) but NOT in the
+  # image's base world; without this, the next apk add/del would treat them as
+  # orphans and purge them (same class of bug as the /etc/apk/world reset).
   mkdir -p "$PKG"
+  if [ -s /tmp/mig.list ]; then
+    cat /tmp/mig.list >> "$PKG/.world-extra" 2>/dev/null || true
+    if sort -u "$PKG/.world-extra" > "$PKG/.world-extra.tmp" 2>/dev/null; then
+      mv "$PKG/.world-extra.tmp" "$PKG/.world-extra"
+    else
+      rm -f "$PKG/.world-extra.tmp"
+    fi
+  fi
+  rm -f /tmp/base.list /tmp/old.list /tmp/mig.list
   touch "$MIG_MARKER"
   echo "=== migrate: imported $n package(s) (files + apk DB) from .pkg-root into overlay upper (offline) ==="
 }
@@ -118,20 +130,25 @@ seed_etc() {
   # always kept, user packages are never dropped.
   ETC="$PKG/etc"
   mkdir -p "$ETC"
-  if [ ! -f "$ETC/apk/world" ]; then
-    rm -rf "$ETC/apk"
+  if [ ! -d "$ETC/apk" ]; then
+    # First boot: seed the full apk config (keys/repositories/arch/world/...).
     cp -a /etc/apk "$ETC/apk" 2>/dev/null || true
   else
+    # Later boots: refresh only image-controlled metadata; world handled below.
     cp -a /etc/apk/repositories "$ETC/apk/repositories" 2>/dev/null || true
     cp -a /etc/apk/arch "$ETC/apk/arch" 2>/dev/null || true
     rm -rf "$ETC/apk/keys"
     cp -a /etc/apk/keys "$ETC/apk/keys" 2>/dev/null || true
-    if sort -u "$ETC/apk/world" /etc/apk/world > "$ETC/apk/world.tmp" 2>/dev/null; then
-      mv "$ETC/apk/world.tmp" "$ETC/apk/world"
-    else
-      rm -f "$ETC/apk/world.tmp"
-    fi
   fi
+  # world := union(image base world, existing world, migrated .pkg-root extras).
+  # NEVER drop entries: the apk installed DB persists on the OverlayFS upper, so
+  # world must stay in sync with it, else the next apk add/del purges user pkgs.
+  { cat /etc/apk/world 2>/dev/null
+    cat "$ETC/apk/world" 2>/dev/null
+    cat "$PKG/.world-extra" 2>/dev/null
+  } | sort -u > "$ETC/apk/world.tmp" 2>/dev/null \
+    && mv "$ETC/apk/world.tmp" "$ETC/apk/world" \
+    || rm -f "$ETC/apk/world.tmp"
   rm -rf "$ETC/ssl"
   cp -a /etc/ssl "$ETC/ssl" 2>/dev/null || true
   cp /etc/passwd "$ETC/passwd"
