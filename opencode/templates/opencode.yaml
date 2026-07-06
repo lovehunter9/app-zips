@@ -3,7 +3,7 @@
 {{- $env := .Values.olaresEnv | default dict -}}
 {{- $enableOMO := ne (index $env "OPENCODE_OMO" | default "false") "false" }}
 {{- $enableDind := ne (index $env "ENABLE_DIND" | default "true") "false" }}
-{{- $image := "docker.io/beclab/lovehunter9-anomalyco-opencode:1.17.13-test3" }}
+{{- $image := "docker.io/beclab/lovehunter9-anomalyco-opencode:1.17.13.1" }}
 
 ---
 apiVersion: apps/v1
