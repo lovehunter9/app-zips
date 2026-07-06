@@ -7,19 +7,20 @@
 #   PLATFORMS=linux/amd64 ./build.sh   # single arch (native, fastest to test)
 #
 # Env knobs:
-#   IMAGE      full image ref      (default docker.io/beclab/lovehunter9-anomalyco-opencode:1.17.0.0)
+#   IMAGE      full image ref      (default docker.io/beclab/lovehunter9-anomalyco-opencode:1.17.13.0)
 #   PLATFORMS  comma-sep platforms (default linux/amd64,linux/arm64)
 #   PUSH       1 => --push, else --output type=image (no push)
-#   OPENCODE_VERSION / OMO_VERSION / GLIBC_VERSION  override build args
+#   OPENCODE_VERSION / OMO_VERSION / GLIBC_VERSION / OLARES_CLI_NPM_VERSION  override build args
 set -euo pipefail
 
 cd "$(dirname "$0")"
 
-IMAGE="${IMAGE:-docker.io/beclab/lovehunter9-anomalyco-opencode:1.17.0.0}"
+IMAGE="${IMAGE:-docker.io/beclab/lovehunter9-anomalyco-opencode:1.17.13.0}"
 PLATFORMS="${PLATFORMS:-linux/amd64,linux/arm64}"
-OPENCODE_VERSION="${OPENCODE_VERSION:-1.17.0}"
-OMO_VERSION="${OMO_VERSION:-4.8.1}"
+OPENCODE_VERSION="${OPENCODE_VERSION:-1.17.13}"
+OMO_VERSION="${OMO_VERSION:-4.15.1}"
 GLIBC_VERSION="${GLIBC_VERSION:-2.35-r1}"
+OLARES_CLI_NPM_VERSION="${OLARES_CLI_NPM_VERSION:-1.12.6-cli.2}"
 
 # A buildx builder that supports multi-arch (QEMU-backed). Create once.
 BUILDER="${BUILDER:-olares-multiarch}"
@@ -36,13 +37,14 @@ OUTPUT_ARG="--output=type=image"
 [ "${PUSH:-0}" = "1" ] && OUTPUT_ARG="--push"
 
 echo "=== Building $IMAGE ($PLATFORMS) ==="
-echo "    opencode=$OPENCODE_VERSION omo=$OMO_VERSION glibc=$GLIBC_VERSION push=${PUSH:-0}"
+echo "    opencode=$OPENCODE_VERSION omo=$OMO_VERSION glibc=$GLIBC_VERSION olares-cli=$OLARES_CLI_NPM_VERSION push=${PUSH:-0}"
 
 docker buildx build \
   --platform "$PLATFORMS" \
   --build-arg "OPENCODE_VERSION=$OPENCODE_VERSION" \
   --build-arg "OMO_VERSION=$OMO_VERSION" \
   --build-arg "GLIBC_VERSION=$GLIBC_VERSION" \
+  --build-arg "OLARES_CLI_NPM_VERSION=$OLARES_CLI_NPM_VERSION" \
   -t "$IMAGE" \
   $OUTPUT_ARG \
   .

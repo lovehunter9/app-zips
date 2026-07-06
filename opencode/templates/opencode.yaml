@@ -2,7 +2,8 @@
 {{- $opencodeDomain := index $opencodeDomainENV "_0" -}}
 {{- $env := .Values.olaresEnv | default dict -}}
 {{- $enableOMO := ne (index $env "OPENCODE_OMO" | default "false") "false" }}
-{{- $image := "docker.io/beclab/lovehunter9-anomalyco-opencode:1.17.0.0" }}
+{{- $enableDind := ne (index $env "ENABLE_DIND" | default "true") "false" }}
+{{- $image := "docker.io/beclab/lovehunter9-anomalyco-opencode:1.17.13.0" }}
 
 ---
 apiVersion: apps/v1
@@ -13,7 +14,7 @@ metadata:
   labels:
     io.kompose.service: opencode
 spec:
-  replicas: 1
+  replicas: {{ .Values.workloads.opencode.replicaCount }}
   selector:
     matchLabels:
       io.kompose.service: opencode
@@ -49,7 +50,7 @@ spec:
             - name: OLARES_ENABLE_OMO
               value: "{{ if $enableOMO }}1{{ else }}0{{ end }}"
             - name: OLARES_OMO_VERSION
-              value: "{{ index $env "OPENCODE_OMO_VERSION" | default "4.8.1" }}"
+              value: "{{ index $env "OPENCODE_OMO_VERSION" | default "4.15.1" }}"
           volumeMounts:
             - name: opencode-home
               mountPath: /home/opencode
@@ -93,6 +94,44 @@ spec:
             runAsUser: 0
             privileged: true
 
+        {{- if $enableDind }}
+        # DIND: stage the docker CLI + compose/buildx plugins out of the dind image
+        # into a shared emptyDir that the opencode container mounts. The opencode
+        # image ships no docker client; only the privileged dockerd sidecar (below)
+        # provides the engine. chmod so the non-root (uid 1000) main container can
+        # exec the staged binaries.
+        - name: init-docker-cli
+          image: "docker.io/beclab/docker:29.3.0-dind"
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              cp /usr/local/bin/docker /docker-cli/docker
+              mkdir -p /docker-cli/cli-plugins
+              for d in /usr/local/libexec/docker/cli-plugins \
+                       /usr/local/lib/docker/cli-plugins \
+                       /usr/libexec/docker/cli-plugins \
+                       /usr/lib/docker/cli-plugins; do
+                [ -d "$d" ] || continue
+                cp "$d"/docker-compose /docker-cli/cli-plugins/ 2>/dev/null || true
+                cp "$d"/docker-buildx  /docker-cli/cli-plugins/ 2>/dev/null || true
+              done
+              chmod -R a+rx /docker-cli
+              echo "[init-docker-cli] staged:" && ls -la /docker-cli /docker-cli/cli-plugins
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi
+          volumeMounts:
+            - name: docker-cli-bin
+              mountPath: /docker-cli
+        {{- end }}
+
       containers:
         - name: opencode
           image: "{{ $image }}"
@@ -107,7 +146,9 @@ spec:
             - name: TERM
               value: xterm-256color
             - name: PATH
-              value: /home/opencode/.venv/bin:/home/opencode/.npm-global/bin:/home/opencode/go/bin:/home/opencode/.cargo/bin:/home/opencode/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+              # /opt/docker-cli is where the DIND docker client is staged (empty
+              # when DIND is off -- a non-existent PATH entry is harmless).
+              value: /opt/docker-cli:/home/opencode/.venv/bin:/home/opencode/.npm-global/bin:/home/opencode/go/bin:/home/opencode/.cargo/bin:/home/opencode/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
             - name: VIRTUAL_ENV
               value: /home/opencode/.venv
             - name: NPM_CONFIG_PREFIX
@@ -120,6 +161,11 @@ spec:
               value: /home/opencode/.profile
             - name: LD_LIBRARY_PATH
               value: /usr/glibc-compat/lib
+            {{- if $enableDind }}
+            # docker CLI talks to the dockerd sidecar over the shared pod network.
+            - name: DOCKER_HOST
+              value: "tcp://localhost:2375"
+            {{- end }}
           resources:
             limits:
               cpu: "4"
@@ -154,6 +200,19 @@ spec:
             - name: pkg-lib64
               mountPath: /lib64
               mountPropagation: HostToContainer
+            {{- if $enableDind }}
+            # DIND client: docker binary on PATH (/opt/docker-cli, outside the
+            # OverlayFS on /usr) + compose/buildx in the user plugin dir docker
+            # auto-discovers (~/.docker/cli-plugins).
+            - name: docker-cli-bin
+              mountPath: /opt/docker-cli/docker
+              subPath: docker
+              readOnly: true
+            - name: docker-cli-bin
+              mountPath: /home/opencode/.docker/cli-plugins
+              subPath: cli-plugins
+              readOnly: true
+            {{- end }}
           livenessProbe:
             tcpSocket:
               port: 3000
@@ -256,6 +315,56 @@ spec:
               command: ["test", "-d", "/home/opencode/.pkg-queue"]
             initialDelaySeconds: 10
             periodSeconds: 30
+        {{- if $enableDind }}
+        # Privileged Docker-in-Docker engine. Runs dockerd on tcp://localhost:2375
+        # (in-pod only); the opencode container's DOCKER_HOST points here. Image
+        # layers persist on the appData hostPath so `docker` state survives restarts.
+        - name: docker-dind
+          image: "docker.io/beclab/docker:29.3.0-dind"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          env:
+            - name: DOCKER_TLS_CERTDIR
+              value: ""
+          command:
+            - dockerd
+            - --host
+            - tcp://0.0.0.0:2375
+            - --host
+            - unix:///var/run/docker.sock
+            - --mtu=1450
+          ports:
+            - containerPort: 2375
+          startupProbe:
+            exec:
+              command: ["docker", "info"]
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            failureThreshold: 60
+            timeoutSeconds: 10
+          readinessProbe:
+            exec:
+              command: ["docker", "info"]
+            initialDelaySeconds: 5
+            periodSeconds: 20
+            timeoutSeconds: 15
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: "8"
+              memory: 16Gi
+          volumeMounts:
+            - name: dind-storage
+              mountPath: /var/lib/docker
+            # Share the workspace at the SAME path so `docker run -v $(pwd):...`
+            # bind-mounts issued from the terminal resolve inside dockerd.
+            - name: opencode-workspace
+              mountPath: /home/opencode/workspace
+        {{- end }}
       terminationGracePeriodSeconds: 10
       restartPolicy: Always
       volumes:
@@ -320,6 +429,16 @@ spec:
           hostPath:
             path: "{{ .Values.userspace.appData }}/.pkg-overlay/etc/ssl"
             type: DirectoryOrCreate
+        {{- if $enableDind }}
+        # DIND: emptyDir carrying the staged docker client + plugins; dockerd's
+        # image/layer store persisted on the appData hostPath.
+        - name: docker-cli-bin
+          emptyDir: {}
+        - name: dind-storage
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/docker"
+            type: DirectoryOrCreate
+        {{- end }}
 
 ---
 apiVersion: v1

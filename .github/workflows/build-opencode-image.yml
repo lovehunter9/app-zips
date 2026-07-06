@@ -20,15 +20,19 @@ on:
       opencode_version:
         description: "opencode release version (no leading v)"
         required: true
-        default: "1.17.0"
+        default: "1.17.13"
       omo_version:
         description: "OMO default version (oh-my-openagent@<ver>)"
         required: true
-        default: "4.8.1"
+        default: "4.15.1"
       glibc_version:
         description: "sgerrand glibc version (x86_64 only)"
         required: true
         default: "2.35-r1"
+      olares_cli_version:
+        description: "Olares CLI npm version (@olares/cli@<ver>) to bake"
+        required: true
+        default: "1.12.6-cli.2"
       registry:
         description: "Where to push"
         required: true
@@ -38,13 +42,13 @@ on:
           - ghcr
           - dockerhub
       image_repo:
-        description: "Image repository (without registry host)"
+        description: "Image repository (without registry host). Must match the chart image name."
         required: true
-        default: "anomalyco-opencode"
+        default: "lovehunter9-anomalyco-opencode"
       image_tag:
         description: "Image tag"
         required: true
-        default: "1.17.0.0"
+        default: "1.17.13.0"
       dockerhub_namespace:
         description: "Docker Hub namespace (only used when registry=dockerhub)"
         required: false
@@ -143,6 +147,7 @@ jobs:
             OPENCODE_VERSION=${{ inputs.opencode_version }}
             OMO_VERSION=${{ inputs.omo_version }}
             GLIBC_VERSION=${{ inputs.glibc_version }}
+            OLARES_CLI_NPM_VERSION=${{ inputs.olares_cli_version }}
           outputs: type=image,name=${{ needs.setup.outputs.image_name }},push-by-digest=true,name-canonical=true,push=true
 
       - name: Build only (no push / validate)
@@ -158,6 +163,7 @@ jobs:
             OPENCODE_VERSION=${{ inputs.opencode_version }}
             OMO_VERSION=${{ inputs.omo_version }}
             GLIBC_VERSION=${{ inputs.glibc_version }}
+            OLARES_CLI_NPM_VERSION=${{ inputs.olares_cli_version }}
 
       - name: Export digest
         if: ${{ inputs.push }}
@@ -232,5 +238,6 @@ jobs:
             echo "| image | \`${{ needs.setup.outputs.image_name }}:${{ needs.setup.outputs.tag }}\` |"
             echo "| opencode | \`${{ inputs.opencode_version }}\` |"
             echo "| OMO | \`${{ inputs.omo_version }}\` |"
+            echo "| olares-cli | \`${{ inputs.olares_cli_version }}\` |"
             echo "| arm64 | \`${{ inputs.include_arm64 }}\` |"
           } >> "$GITHUB_STEP_SUMMARY"

@@ -35,9 +35,13 @@
 #     packages a user installed under the legacy .pkg-root design into the upper.)
 # ------------------------------------------------------------------------------
 
-ARG OPENCODE_VERSION=1.17.0
-ARG OMO_VERSION=4.8.1
+ARG OPENCODE_VERSION=1.17.13
+ARG OMO_VERSION=4.15.1
 ARG GLIBC_VERSION=2.35-r1
+# Olares CLI npm version to bake. Its postinstall downloads the arch-specific Go
+# vendor binary. Handled exactly like OPENCODE_VERSION / OMO_VERSION: a build-arg
+# with a default here, overridable from build.sh and the GitHub CI workflow input.
+ARG OLARES_CLI_NPM_VERSION=1.12.6-cli.2
 # Pinned Alpine MINOR (vs the rolling `alpine` tag). The chart NEVER resets the
 # OverlayFS upper, so the user's installed packages persist across upgrades with
 # zero reinstall; pinning the minor keeps the base libs they link against
@@ -118,6 +122,7 @@ ARG TARGETARCH
 FROM build-${TARGETARCH} AS final
 ARG OPENCODE_VERSION
 ARG OMO_VERSION
+ARG OLARES_CLI_NPM_VERSION
 
 # Verify the binary actually runs on this arch (under QEMU for the foreign arch).
 RUN opencode --version
@@ -131,9 +136,9 @@ RUN npm install -g --ignore-scripts vite
 # JS shim and the Go binary land under the npm GLOBAL PREFIX (rootfs), so they
 # persist exactly like vite via the chart's .pkg-root snapshot -- no $HOME seed
 # needed. We MUST do this in the per-arch `final` stage so the postinstall picks
-# the matching binary (linux_amd64 / linux_arm64). Mirror knobs are honoured
-# (OLARES_CLI_DOWNLOAD_MIRROR); `--version` asserts the vendor binary runs.
-RUN npm install -g @olares/cli@latest \
+# the matching binary (linux_amd64 / linux_arm64). Version is pinned via the
+# OLARES_CLI_NPM_VERSION build-arg; `--version` asserts the vendor binary runs.
+RUN npm install -g @olares/cli@${OLARES_CLI_NPM_VERSION} \
  && olares-cli --version
 
 # ---- Bake the OMO plugin cache into a NEUTRAL staging dir --------------------
