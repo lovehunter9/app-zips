@@ -36,7 +36,7 @@
 # ------------------------------------------------------------------------------
 
 ARG OPENCODE_VERSION=1.17.13
-ARG OMO_VERSION=4.15.1
+ARG OMO_VERSION=4.8.1
 ARG GLIBC_VERSION=2.35-r1
 # Olares CLI npm version to bake. Its postinstall downloads the arch-specific Go
 # vendor binary. Handled exactly like OPENCODE_VERSION / OMO_VERSION: a build-arg

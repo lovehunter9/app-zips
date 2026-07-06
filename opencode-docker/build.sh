@@ -18,7 +18,7 @@ cd "$(dirname "$0")"
 IMAGE="${IMAGE:-docker.io/beclab/lovehunter9-anomalyco-opencode:1.17.13.0}"
 PLATFORMS="${PLATFORMS:-linux/amd64,linux/arm64}"
 OPENCODE_VERSION="${OPENCODE_VERSION:-1.17.13}"
-OMO_VERSION="${OMO_VERSION:-4.15.1}"
+OMO_VERSION="${OMO_VERSION:-4.8.1}"
 GLIBC_VERSION="${GLIBC_VERSION:-2.35-r1}"
 OLARES_CLI_NPM_VERSION="${OLARES_CLI_NPM_VERSION:-1.12.6-cli.2}"
 

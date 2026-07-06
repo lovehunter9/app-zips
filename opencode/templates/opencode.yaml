@@ -3,7 +3,7 @@
 {{- $env := .Values.olaresEnv | default dict -}}
 {{- $enableOMO := ne (index $env "OPENCODE_OMO" | default "false") "false" }}
 {{- $enableDind := ne (index $env "ENABLE_DIND" | default "true") "false" }}
-{{- $image := "docker.io/beclab/lovehunter9-anomalyco-opencode:1.17.13.0" }}
+{{- $image := "docker.io/beclab/lovehunter9-anomalyco-opencode:1.17.13-test2" }}
 
 ---
 apiVersion: apps/v1
@@ -50,7 +50,7 @@ spec:
             - name: OLARES_ENABLE_OMO
               value: "{{ if $enableOMO }}1{{ else }}0{{ end }}"
             - name: OLARES_OMO_VERSION
-              value: "{{ index $env "OPENCODE_OMO_VERSION" | default "4.15.1" }}"
+              value: "{{ index $env "OPENCODE_OMO_VERSION" | default "4.8.1" }}"
           volumeMounts:
             - name: opencode-home
               mountPath: /home/opencode
@@ -96,10 +96,15 @@ spec:
 
         {{- if $enableDind }}
         # DIND: stage the docker CLI + compose/buildx plugins out of the dind image
-        # into a shared emptyDir that the opencode container mounts. The opencode
-        # image ships no docker client; only the privileged dockerd sidecar (below)
-        # provides the engine. chmod so the non-root (uid 1000) main container can
-        # exec the staged binaries.
+        # DIRECTLY into the persistent $HOME (~/.local/bin + ~/.docker/cli-plugins).
+        # Why not /opt/docker-cli: the web terminal runs a login shell that sources
+        # ~/.profile (regenerated every start by init-packages.sh), which HARD-SETS
+        # PATH and drops any container-env addition like /opt/docker-cli. That
+        # hard-coded PATH already contains ~/.local/bin, so placing docker there is
+        # the one location a login shell will reliably find it. The opencode image
+        # ships no docker client; only the privileged dockerd sidecar (below)
+        # provides the engine. Runs after init-home (which chowns $HOME), and
+        # re-chowns the staged files to uid 1000 so the main container can exec them.
         - name: init-docker-cli
           image: "docker.io/beclab/docker:29.3.0-dind"
           imagePullPolicy: IfNotPresent
@@ -108,18 +113,19 @@ spec:
             - -c
             - |
               set -e
-              cp /usr/local/bin/docker /docker-cli/docker
-              mkdir -p /docker-cli/cli-plugins
+              mkdir -p /home/opencode/.local/bin /home/opencode/.docker/cli-plugins
+              cp /usr/local/bin/docker /home/opencode/.local/bin/docker
               for d in /usr/local/libexec/docker/cli-plugins \
                        /usr/local/lib/docker/cli-plugins \
                        /usr/libexec/docker/cli-plugins \
                        /usr/lib/docker/cli-plugins; do
                 [ -d "$d" ] || continue
-                cp "$d"/docker-compose /docker-cli/cli-plugins/ 2>/dev/null || true
-                cp "$d"/docker-buildx  /docker-cli/cli-plugins/ 2>/dev/null || true
+                cp "$d"/docker-compose /home/opencode/.docker/cli-plugins/ 2>/dev/null || true
+                cp "$d"/docker-buildx  /home/opencode/.docker/cli-plugins/ 2>/dev/null || true
               done
-              chmod -R a+rx /docker-cli
-              echo "[init-docker-cli] staged:" && ls -la /docker-cli /docker-cli/cli-plugins
+              chmod -R a+rx /home/opencode/.local/bin /home/opencode/.docker/cli-plugins
+              chown -R 1000:1000 /home/opencode/.local /home/opencode/.docker
+              echo "[init-docker-cli] staged docker CLI into ~/.local/bin:" && ls -la /home/opencode/.local/bin
           resources:
             requests:
               cpu: 10m
@@ -128,8 +134,8 @@ spec:
               cpu: 500m
               memory: 128Mi
           volumeMounts:
-            - name: docker-cli-bin
-              mountPath: /docker-cli
+            - name: opencode-home
+              mountPath: /home/opencode
         {{- end }}
 
       containers:
@@ -146,9 +152,9 @@ spec:
             - name: TERM
               value: xterm-256color
             - name: PATH
-              # /opt/docker-cli is where the DIND docker client is staged (empty
-              # when DIND is off -- a non-existent PATH entry is harmless).
-              value: /opt/docker-cli:/home/opencode/.venv/bin:/home/opencode/.npm-global/bin:/home/opencode/go/bin:/home/opencode/.cargo/bin:/home/opencode/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+              # DIND docker client is staged into ~/.local/bin (already in PATH),
+              # so this list stays identical to the non-DIND layout.
+              value: /home/opencode/.venv/bin:/home/opencode/.npm-global/bin:/home/opencode/go/bin:/home/opencode/.cargo/bin:/home/opencode/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
             - name: VIRTUAL_ENV
               value: /home/opencode/.venv
             - name: NPM_CONFIG_PREFIX
@@ -200,19 +206,9 @@ spec:
             - name: pkg-lib64
               mountPath: /lib64
               mountPropagation: HostToContainer
-            {{- if $enableDind }}
-            # DIND client: docker binary on PATH (/opt/docker-cli, outside the
-            # OverlayFS on /usr) + compose/buildx in the user plugin dir docker
-            # auto-discovers (~/.docker/cli-plugins).
-            - name: docker-cli-bin
-              mountPath: /opt/docker-cli/docker
-              subPath: docker
-              readOnly: true
-            - name: docker-cli-bin
-              mountPath: /home/opencode/.docker/cli-plugins
-              subPath: cli-plugins
-              readOnly: true
-            {{- end }}
+            # DIND client needs no extra mounts here: init-docker-cli stages the
+            # docker binary + plugins into the persistent $HOME (~/.local/bin +
+            # ~/.docker/cli-plugins), already visible via the opencode-home mount.
           livenessProbe:
             tcpSocket:
               port: 3000
@@ -430,10 +426,8 @@ spec:
             path: "{{ .Values.userspace.appData }}/.pkg-overlay/etc/ssl"
             type: DirectoryOrCreate
         {{- if $enableDind }}
-        # DIND: emptyDir carrying the staged docker client + plugins; dockerd's
-        # image/layer store persisted on the appData hostPath.
-        - name: docker-cli-bin
-          emptyDir: {}
+        # DIND: dockerd's image/layer store persisted on the appData hostPath.
+        # (The docker client is staged into $HOME by init-docker-cli, no volume.)
         - name: dind-storage
           hostPath:
             path: "{{ .Values.userspace.appData }}/docker"
