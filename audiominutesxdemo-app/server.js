@@ -201,11 +201,21 @@ function sliceWav(input, start, end, output) {
 function gwUrl(cfg, p) {
   return cfg.base.replace(/\/+$/, "") + p;
 }
-function gwHeaders(cfg, extra = {}) {
-  const h = { ...extra };
+// Build gateway auth headers. Data plane (/v1/*) uses the Bearer key. Identity for
+// the console API (and, on this gateway, edge auth) comes from the Olares SSO
+// cookie + X-BFL-USER, which the Olares edge injects into requests reaching THIS
+// app. So once deployed we do NOT need a manually-pasted cookie: we forward the
+// live browser cookie and edge-injected x-bfl-user from the current request (`req`).
+// The saved cfg.cookie/cfg.bflUser remain only as a local-dev fallback. `req` is
+// absent for the async transcribe job — there cfg.bflUser is set from the record's
+// captured identity (see runJob), so data-plane calls still carry x-bfl-user.
+function gwHeaders(cfg, { req, extra } = {}) {
+  const h = { ...(extra || {}) };
   if (cfg.key) h["authorization"] = "Bearer " + cfg.key;
-  if (cfg.cookie) h["cookie"] = cfg.cookie;
-  if (cfg.bflUser) h["x-bfl-user"] = cfg.bflUser;
+  const cookie = req?.headers?.cookie || cfg.cookie;
+  if (cookie) h["cookie"] = cookie;
+  const bfl = req?.headers?.["x-bfl-user"] || cfg.bflUser;
+  if (bfl) h["x-bfl-user"] = bfl;
   return h;
 }
 
@@ -226,13 +236,13 @@ async function gwAudioOp(cfg, op, wavPath, model, extra = {}) {
 // ---------------------------------------------------------------------------
 // GET /api/models — discover gateway models grouped by mode + readiness
 // ---------------------------------------------------------------------------
-app.get("/api/models", async (_req, res) => {
+app.get("/api/models", async (req, res) => {
   const cfg = loadConfig();
   if (!cfg.base) return res.status(400).json({ error: "尚未配置网关地址", modes: {} });
   try {
     const r = await fetch(gwUrl(cfg, "/console/api/provider-models?limit=1000"), {
       method: "GET",
-      headers: gwHeaders(cfg),
+      headers: gwHeaders(cfg, { req }),
       redirect: "manual",
     });
     if (r.status === 0 || (r.status >= 301 && r.status <= 308)) {
@@ -676,6 +686,9 @@ async function runJob(id) {
   const rec = readRecord(id);
   if (!rec) return;
   const cfg = loadConfig();
+  // Use the identity captured when this record's transcribe was requested so the
+  // gateway gets x-bfl-user even though the job runs without a live browser request.
+  if (rec.bflUser) cfg.bflUser = rec.bflUser;
   const { ready, missing } = configReady(cfg);
   if (!ready) {
     rec.status = "error";
@@ -888,6 +901,11 @@ app.post("/api/records/:id/transcribe", (req, res) => {
   if (!ready) return res.status(400).json({ error: "无法转录:缺少 " + missing.join("、"), missing });
   if (running.has(rec.id) || queue.includes(rec.id))
     return res.json({ ok: true, alreadyRunning: true });
+  // Capture the caller's Olares identity (edge-injected on THIS app's requests) so
+  // the async job's data-plane gateway calls carry x-bfl-user without a manual
+  // cookie. Not a secret; falls back to any existing value / env.
+  const bfl = (req.headers["x-bfl-user"] || "").toString();
+  if (bfl) rec.bflUser = bfl;
   rec.status = "processing";
   rec.progress = 1;
   rec.phase = "排队中";

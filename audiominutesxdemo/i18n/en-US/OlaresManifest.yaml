@@ -1,0 +1,26 @@
+metadata:
+  title: Audio Minutes X Demo
+  description: Feishu-Minutes-style audio notes — diarized, word-timestamped transcripts with player sync, via the LLM Gateway.
+spec:
+  fullDescription: |
+    Audio Minutes X Demo is a Feishu-Minutes (妙记) style app for turning meetings,
+    lectures and audiobooks into interactive, searchable transcripts — all powered by
+    the on-Olares audio models through the LLM Gateway.
+
+    - Upload an audio or video file; it is normalized server-side (ffmpeg) and
+      transcribed asynchronously, so progress survives page refreshes.
+    - The transcript is speaker-diarized (who said what) and carries WORD-LEVEL
+      timestamps (STT + forced alignment).
+    - Two-way sync: click any word to jump the player there; while playing, the
+      current word is highlighted and the transcript auto-scrolls.
+    - A persistent library ("我的内容") keeps every processed recording.
+    - Configure the LLM Gateway URL and pick which STT / align / diarization models to
+      use, all in the app. If a required model is missing, the app tells you it cannot
+      transcribe until it is configured.
+  upgradeDescription: |
+    1.0.2: No manual Cookie needed once deployed — the browser's Olares session and
+    the edge-injected identity (X-BFL-USER) are forwarded to the Gateway, so both the
+    console and data-plane calls authenticate directly. Chart upgraded to the v3 layout.
+    1.0.1: Word-level highlight — Chinese highlighted by word (jieba segmentation) with
+    a word/char toggle; playback highlight no longer skips words.
+    1.0.0: first release.

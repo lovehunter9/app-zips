@@ -1,19 +1,20 @@
-olaresManifest.version: '0.8.0'
+olaresManifest.version: '0.12.0'
 olaresManifest.type: app
+apiVersion: 'v3'
 metadata:
   name: audiominutesxdemo
   icon: https://app.cdn.olares.com/appstore/llamacpp/icon.png
   description: Feishu-Minutes-style audio notes — diarized, word-timestamped transcripts with player sync, via the LLM Gateway.
   appid: audiominutesxdemo
   title: Audio Minutes X Demo
-  version: '1.0.0'
+  version: '1.0.2'
   categories:
     - Utilities
 permission:
   appData: true
 spec:
   runAsUser: true
-  versionName: '1.0.0'
+  versionName: '1.0.2'
   fullDescription: |
     Audio Minutes X Demo is a Feishu-Minutes (妙记) style app for turning meetings,
     lectures and audiobooks into interactive, searchable transcripts — all powered by
@@ -30,6 +31,10 @@ spec:
       use, all in the app. If a required model is missing, the app tells you it cannot
       transcribe until it is configured.
   upgradeDescription: |
+    1.0.2: 部署后无需手填 Cookie —— 透传浏览器 Olares 会话与 edge 注入的身份
+    (X-BFL-USER) 到网关，console/数据面均可直接鉴权。chart 升级为 v3 结构。
+    1.0.1: 词级高亮增强 —— 中文按词高亮(jieba 分词)+「词/字」切换，播放高亮不再跳字；
+    段落合并、标点保留、对齐语言自动检测等改进。
     1.0.0: first release.
   developer: Olares
   website: https://olares.com
