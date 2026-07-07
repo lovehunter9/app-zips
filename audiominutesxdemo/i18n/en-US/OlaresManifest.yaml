@@ -18,6 +18,10 @@ spec:
       use, all in the app. If a required model is missing, the app tells you it cannot
       transcribe until it is configured.
   upgradeDescription: |
+    1.0.3: Manual Stop for transcription/translation; search-hit highlight (distinct
+    from the playback highlight) that spans word boundaries and also covers the
+    translation; Chinese word/char rendering now packs tightly (no gaps between units);
+    fixed stray spaces in translated Chinese lines.
     1.0.2: No manual Cookie needed once deployed — the browser's Olares session and
     the edge-injected identity (X-BFL-USER) are forwarded to the Gateway, so both the
     console and data-plane calls authenticate directly. Chart upgraded to the v3 layout.

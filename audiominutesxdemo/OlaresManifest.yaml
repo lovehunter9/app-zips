@@ -7,14 +7,14 @@ metadata:
   description: Feishu-Minutes-style audio notes — diarized, word-timestamped transcripts with player sync, via the LLM Gateway.
   appid: audiominutesxdemo
   title: Audio Minutes X Demo
-  version: '1.0.2'
+  version: '1.0.3'
   categories:
     - Utilities
 permission:
   appData: true
 spec:
   runAsUser: true
-  versionName: '1.0.2'
+  versionName: '1.0.3'
   fullDescription: |
     Audio Minutes X Demo is a Feishu-Minutes (妙记) style app for turning meetings,
     lectures and audiobooks into interactive, searchable transcripts — all powered by
@@ -31,6 +31,8 @@ spec:
       use, all in the app. If a required model is missing, the app tells you it cannot
       transcribe until it is configured.
   upgradeDescription: |
+    1.0.3: 转写/翻译支持手动「停止」；搜索命中高亮(区别于播放高亮)、支持跨词搜索并覆盖译文；
+    中文按词/字渲染改为紧密排列(去除字/词间空隙)；译文分段的空格问题修复。
     1.0.2: 部署后无需手填 Cookie —— 透传浏览器 Olares 会话与 edge 注入的身份
     (X-BFL-USER) 到网关，console/数据面均可直接鉴权。chart 升级为 v3 结构。
     1.0.1: 词级高亮增强 —— 中文按词高亮(jieba 分词)+「词/字」切换，播放高亮不再跳字；

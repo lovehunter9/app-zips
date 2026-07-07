@@ -1,4 +1,4 @@
-import type { GatewayConfig, ModelOpt, RecordFull, RecordSummary } from "./types";
+import type { GatewayConfig, ModelOpt, RecordFull, RecordOptions, RecordSummary } from "./types";
 
 async function jget<T>(url: string): Promise<T> {
   const r = await fetch(url);
@@ -30,7 +30,12 @@ export const getModels = () => jget<{ modes: Record<string, ModelOpt[]>; error?:
 export const listRecords = () => jget<{ records: RecordSummary[] }>("/api/records");
 export const getRecord = (id: string) => jget<RecordFull>(`/api/records/${id}`);
 export const deleteRecord = (id: string) => jsend<{ ok: boolean }>(`/api/records/${id}`, "DELETE");
-export const transcribeRecord = (id: string) => jsend<{ ok: boolean }>(`/api/records/${id}/transcribe`, "POST");
+export const transcribeRecord = (id: string, opts?: Partial<RecordOptions>) =>
+  jsend<{ ok: boolean }>(`/api/records/${id}/transcribe`, "POST", opts ?? {});
+export const translateRecord = (id: string) =>
+  jsend<{ ok: boolean }>(`/api/records/${id}/translate`, "POST", {});
+export const cancelRecord = (id: string) =>
+  jsend<{ ok: boolean }>(`/api/records/${id}/cancel`, "POST", {});
 
 export function uploadFile(
   file: File,

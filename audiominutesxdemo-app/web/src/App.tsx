@@ -66,6 +66,75 @@ function fixWordTimes(words: Word[], lo: number, hi: number): Word[] {
 // (word) view groups these into words. Latin tokens are already whole words.
 const isCJKChar = (ch: string) => !!ch && /[\u4E00-\u9FFF\u3400-\u4DBF\uF900-\uFAFF]/.test(ch);
 const isCJKToken = (w: Word) => isCJKChar((w.text || "").charAt(0));
+// sliceToWords drops the whitespace between tokens, so rendering the word <span>s
+// back-to-back glues English words together AND removes every line-break
+// opportunity (a whole English line becomes one unbreakable token → horizontal
+// overflow). Re-insert a separating space before a word EXCEPT when either side
+// touches a CJK char (Chinese/Japanese need no spaces). Punctuation stays attached
+// to its own token, so this never inserts a space in front of / loses punctuation.
+const needsSpaceBefore = (prev: Word, cur: Word) => {
+  const a = prev?.text || "";
+  const b = cur?.text || "";
+  if (!a || !b) return false;
+  if (isCJKChar(a.charAt(a.length - 1)) || isCJKChar(b.charAt(0))) return false;
+  // A contraction split across tokens by an older tokenizer (I' + m, Let' + s):
+  // don't insert a space around the apostrophe.
+  if (/['’]$/.test(a) || /^['’]/.test(b)) return false;
+  return true;
+};
+
+// Per-character search match, computed OVER THE WHOLE LINE (not per word) so a
+// query can span word boundaries (e.g. "我们讨" over 我们|讨论, or "a fresh" over
+// a|fresh). Reconstructs the exact visible line text — same inter-word spaces as
+// rendering (needsSpaceBefore) — lowercases it, finds every occurrence of the
+// (already-lowercased) query, then projects the hit mask back onto each word's
+// chars and the space in front of it.
+interface LineMatch { wordMask: boolean[][]; spaceMatched: boolean[]; count: number }
+function matchLine(words: Word[], query: string): LineMatch {
+  const wordMask = words.map((w) => new Array((w.text || "").length).fill(false));
+  const spaceMatched = words.map(() => false);
+  if (!query) return { wordMask, spaceMatched, count: 0 };
+  // Build the line text + a map from each UTF-16 unit back to (word, isSpace).
+  let full = "";
+  const owner: number[] = [];
+  const isSpace: boolean[] = [];
+  for (let wi = 0; wi < words.length; wi++) {
+    if (wi > 0 && needsSpaceBefore(words[wi - 1], words[wi])) { full += " "; owner.push(wi); isSpace.push(true); }
+    const t = words[wi].text || "";
+    for (let k = 0; k < t.length; k++) { full += t[k]; owner.push(wi); isSpace.push(false); }
+  }
+  const hay = full.toLowerCase();
+  let from = 0, idx: number, count = 0;
+  const hit = new Array(full.length).fill(false);
+  while ((idx = hay.indexOf(query, from)) >= 0) {
+    for (let p = idx; p < idx + query.length; p++) hit[p] = true;
+    count++;
+    from = idx + query.length;
+  }
+  if (count) {
+    const off = words.map(() => 0);
+    for (let p = 0; p < hit.length; p++) {
+      const wi = owner[p];
+      if (isSpace[p]) { if (hit[p]) spaceMatched[wi] = true; }
+      else { if (hit[p]) wordMask[wi][off[wi]] = true; off[wi]++; }
+    }
+  }
+  return { wordMask, spaceMatched, count };
+}
+
+// Split a string into consecutive [matched | not] runs using a boolean mask.
+function maskRuns(text: string, mask: boolean[]): { text: string; hit: boolean }[] {
+  const runs: { text: string; hit: boolean }[] = [];
+  let i = 0;
+  while (i < text.length) {
+    const m = !!mask[i];
+    let j = i;
+    while (j < text.length && !!mask[j] === m) j++;
+    runs.push({ text: text.slice(i, j), hit: m });
+    i = j;
+  }
+  return runs;
+}
 
 // A word segment over a piece of text: the substring, its char offset, and whether
 // it's a real word (vs punctuation/symbol). Produced by jieba (preferred) or, as a
@@ -171,8 +240,9 @@ function fmtElapsed(ms: number): string {
 // single long gateway call with no sub-progress, so the timer reassures the
 // user it is still working).
 const PIPELINE = ["说话人分离", "转写与词级对齐", "整理结果"];
-function ProcessingView({ rec }: { rec: RecordFull }) {
+function ProcessingView({ rec, onStop }: { rec: RecordFull; onStop?: () => void }) {
   const [now, setNow] = useState(Date.now());
+  const [stopping, setStopping] = useState(false);
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
@@ -220,6 +290,18 @@ function ProcessingView({ rec }: { rec: RecordFull }) {
         })}
       </ol>
       <div className="text-center text-xs text-neutral-500">已用时 {fmtElapsed(elapsed)} · 串行处理,多个任务会自动排队</div>
+      {onStop && (
+        <div className="text-center">
+          <button
+            className="rounded border border-red-800/70 px-4 py-1.5 text-sm text-red-300 hover:bg-red-950/50 disabled:opacity-40"
+            disabled={stopping}
+            title="停止本次转写(无法真正暂停,只能中止)"
+            onClick={() => { setStopping(true); onStop(); }}
+          >
+            {stopping ? "停止中…" : "停止"}
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -227,13 +309,13 @@ function ProcessingView({ rec }: { rec: RecordFull }) {
 // ===========================================================================
 // Settings modal
 // ===========================================================================
-function SettingsModal({
+function SettingsPage({
   config,
-  onClose,
+  onBack,
   onSaved,
 }: {
   config: GatewayConfig;
-  onClose: () => void;
+  onBack: () => void;
   onSaved: (cfg: GatewayConfig) => void;
 }) {
   const [base, setBase] = useState(config.base);
@@ -245,6 +327,11 @@ function SettingsModal({
   const [diar, setDiar] = useState(config.models.diar);
   const [segmentedStt, setSegmentedStt] = useState(config.segmentedStt);
   const [language, setLanguage] = useState(config.language || "auto");
+  const [autoTranscribe, setAutoTranscribe] = useState(config.autoTranscribe ?? true);
+  const [trEnabled, setTrEnabled] = useState(config.translate?.enabled ?? false);
+  const [trModel, setTrModel] = useState(config.translate?.model || "");
+  const [trSource, setTrSource] = useState(config.translate?.sourceLang || "auto");
+  const [trTarget, setTrTarget] = useState(config.translate?.targetLang || "auto");
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
   const [msg, setMsg] = useState("");
@@ -275,9 +362,14 @@ function SettingsModal({
   async function save() {
     setErr(""); setLoading(true);
     try {
-      const saved = await api.putConfig({ base, key, cookie, models: { stt, align, diar }, segmentedStt, language });
+      const saved = await api.putConfig({
+        base, key, cookie,
+        models: { stt, align, diar },
+        segmentedStt, language, autoTranscribe,
+        translate: { enabled: trEnabled, model: trModel, sourceLang: trSource, targetLang: trTarget },
+      });
       onSaved(saved);
-      onClose();
+      setMsg("已保存");
     } catch (e: any) {
       setErr(String(e?.message || e));
     } finally {
@@ -302,71 +394,126 @@ function SettingsModal({
     );
   };
 
+  const LANG_OPTS = (
+    <>
+      <option value="auto">自动检测</option>
+      <option value="zho_Hans">中文(简) zho_Hans</option>
+      <option value="eng_Latn">English eng_Latn</option>
+      <option value="jpn_Jpan">日本語 jpn_Jpan</option>
+      <option value="kor_Hang">한국어 kor_Hang</option>
+    </>
+  );
+
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 p-4">
-      <div className="mt-10 w-full max-w-xl card space-y-4">
-        <div className="flex items-center justify-between">
-          <h2 className="text-lg font-semibold">设置 · LLM Gateway</h2>
-          <button className="btn-ghost" onClick={onClose}>关闭</button>
-        </div>
-
-        <label className="block text-sm">
-          <span className="mb-1 block text-neutral-400">网关地址(Base URL,含 /v1 前的根,如 https://xxx.olares.com)</span>
-          <input className="input" value={base} onChange={(e) => setBase(e.target.value)} placeholder="https://<gateway-host>" />
-        </label>
-        <label className="block text-sm">
-          <span className="mb-1 block text-neutral-400">API Key(数据面 Bearer)</span>
-          <input className="input" value={key} onChange={(e) => setKey(e.target.value)} placeholder="sk-..." />
-        </label>
-        <label className="block text-sm">
-          <span className="mb-1 block text-neutral-400">Olares Cookie(本地调试用,可选)</span>
-          <input className="input" value={cookie} onChange={(e) => setCookie(e.target.value)} placeholder="auth_token=..." />
-        </label>
-
-        <div className="flex items-center gap-3">
+    <div className="flex h-full flex-col">
+      {/* Page header — 返回 + title + 保存 always visible */}
+      <div className="flex items-center gap-3 border-b border-neutral-800 px-4 py-2.5">
+        <button className="btn-ghost" onClick={onBack}>← 返回</button>
+        <div className="text-base font-semibold">设置 · LLM Gateway</div>
+        {!err && msg && <span className="text-xs text-emerald-400">✓ {msg}</span>}
+        <div className="ml-auto flex items-center gap-2">
           <button className="btn-ghost" onClick={loadModels} disabled={loading || !base}>
-            {loading ? "加载中…" : "保存并加载模型"}
+            {loading ? "加载中…" : "加载模型"}
           </button>
-          {msg && <span className="text-xs text-emerald-400">{msg}</span>}
-        </div>
-
-        <div className="grid gap-3 border-t border-neutral-800 pt-3">
-          <ModelSelect label="转写 STT" mode="stt" value={stt} set={setStt} />
-          <ModelSelect label="强制对齐 Align(词级时间戳)" mode="align" value={align} set={setAlign} />
-          <ModelSelect label="说话人分离 Diarize" mode="diar" value={diar} set={setDiar} />
-          <label className="block text-sm">
-            <span className="mb-1 block text-neutral-400">对齐语言(默认自动识别,无需手填)</span>
-            <select className="input" value={language} onChange={(e) => setLanguage(e.target.value)}>
-              <option value="auto">自动识别(按转写文本判定)</option>
-              <option value="zh">中文 zh</option>
-              <option value="en">English en</option>
-              <option value="ja">日本語 ja</option>
-              <option value="ko">한국어 ko</option>
-              <option value="yue">粤语 yue</option>
-            </select>
-          </label>
-        </div>
-
-        <label className="flex items-start gap-3 border-t border-neutral-800 pt-3 text-sm">
-          <input
-            type="checkbox"
-            className="mt-0.5 h-4 w-4"
-            checked={segmentedStt}
-            onChange={(e) => setSegmentedStt(e.target.checked)}
-          />
-          <span>
-            <span className="block text-neutral-200">分段转写(按说话人分段逐段调用 STT)</span>
-            <span className="block text-xs text-neutral-500">
-              默认关闭 = 整段转写(整段音频一次 STT,再按说话人切分)。开启后按 diarization 窗口逐段转写,调用次数更多、单段上下文更聚焦。
-            </span>
-          </span>
-        </label>
-
-        {err && <p className="rounded bg-red-950/60 px-3 py-2 text-sm text-red-300">{err}</p>}
-
-        <div className="flex justify-end gap-2 border-t border-neutral-800 pt-3">
-          <button className="btn-ghost" onClick={onClose}>取消</button>
           <button className="btn-primary" onClick={save} disabled={loading}>保存</button>
+        </div>
+      </div>
+
+      {/* Error banner — pinned at the TOP so it is never buried. */}
+      {err && (
+        <div className="px-4 pt-2">
+          <p className="rounded bg-red-950/70 px-3 py-2 text-sm text-red-200 ring-1 ring-red-800/60">⚠ {err}</p>
+        </div>
+      )}
+
+      <div className="flex-1 overflow-y-auto px-4 py-3">
+        <div className="mx-auto grid w-full max-w-5xl gap-3 lg:grid-cols-2">
+          {/* 连接网关 */}
+          <div className="space-y-2 rounded-lg border border-neutral-800 bg-neutral-900/50 p-3">
+            <div className="text-sm font-medium text-neutral-200">连接网关</div>
+            <label className="block text-sm">
+              <span className="mb-1 block text-neutral-400">网关地址(Base URL,含 /v1 前的根)</span>
+              <input className="input" value={base} onChange={(e) => setBase(e.target.value)} placeholder="https://<gateway-host>" />
+            </label>
+            <label className="block text-sm">
+              <span className="mb-1 block text-neutral-400">API Key(数据面 Bearer)</span>
+              <input className="input" value={key} onChange={(e) => setKey(e.target.value)} placeholder="sk-..." />
+            </label>
+            <label className="block text-sm">
+              <span className="mb-1 block text-neutral-400">Olares Cookie(本地调试用;部署到 Olares 请留空)</span>
+              <input className="input" value={cookie} onChange={(e) => setCookie(e.target.value)} placeholder="auth_token=..." />
+              <span className="mt-1 block text-xs text-neutral-500">填了就用填的;留空则自动透传浏览器身份(部署在 Olares 时用它,无需手填)。</span>
+            </label>
+          </div>
+
+          {/* 模型 */}
+          <div className="space-y-2 rounded-lg border border-neutral-800 bg-neutral-900/50 p-3">
+            <div className="text-sm font-medium text-neutral-200">模型</div>
+            <ModelSelect label="转写 STT" mode="stt" value={stt} set={setStt} />
+            <ModelSelect label="强制对齐 Align(词级时间戳)" mode="align" value={align} set={setAlign} />
+            <ModelSelect label="说话人分离 Diarize" mode="diar" value={diar} set={setDiar} />
+            <label className="block text-sm">
+              <span className="mb-1 block text-neutral-400">对齐语言(默认自动识别,无需手填)</span>
+              <select className="input" value={language} onChange={(e) => setLanguage(e.target.value)}>
+                <option value="auto">自动识别(按转写文本判定)</option>
+                <option value="zh">中文 zh</option>
+                <option value="en">English en</option>
+                <option value="ja">日本語 ja</option>
+                <option value="ko">한국어 ko</option>
+                <option value="yue">粤语 yue</option>
+              </select>
+            </label>
+          </div>
+
+          {/* 转写默认(新文件) */}
+          <div className="space-y-2 rounded-lg border border-neutral-800 bg-neutral-900/50 p-3">
+            <div className="text-sm font-medium text-neutral-200">
+              转写默认值 <span className="text-xs font-normal text-neutral-500">· 新文件默认;每个文件可在详情页覆盖</span>
+            </div>
+            <label className="flex items-start gap-2.5 text-sm">
+              <input type="checkbox" className="mt-0.5 h-4 w-4" checked={segmentedStt} onChange={(e) => setSegmentedStt(e.target.checked)} />
+              <span>
+                <span className="block text-neutral-200">分段转写(按说话人分段逐段调用 STT)</span>
+                <span className="block text-xs leading-snug text-neutral-500">默认关闭 = 整段一次 STT 再切分;开启按 diarization 窗口逐段转写(调用更多、上下文更聚焦)。</span>
+              </span>
+            </label>
+            <label className="flex items-start gap-2.5 text-sm">
+              <input type="checkbox" className="mt-0.5 h-4 w-4" checked={autoTranscribe} onChange={(e) => setAutoTranscribe(e.target.checked)} />
+              <span>
+                <span className="block text-neutral-200">上传后自动转写</span>
+                <span className="block text-xs leading-snug text-neutral-500">开启(默认)= 上传即用默认设置立即转写;关闭 = 仅入库为「待转录」,可先在详情页选好选项再手动转写。</span>
+              </span>
+            </label>
+          </div>
+
+          {/* 翻译 */}
+          <div className="space-y-2 rounded-lg border border-neutral-800 bg-neutral-900/50 p-3">
+            <label className="flex items-start gap-2.5 text-sm">
+              <input type="checkbox" className="mt-0.5 h-4 w-4" checked={trEnabled} onChange={(e) => setTrEnabled(e.target.checked)} />
+              <span>
+                <span className="block font-medium text-neutral-200">翻译 Translate(在原文下方显示译文)</span>
+                <span className="block text-xs leading-snug text-neutral-500">默认关闭,关闭时阅读页不显示任何译文/按钮。开启后新文件转写时一并翻译,已转写记录可在详情页「补翻译」;译文支持逐词点击/高亮(词级时间为按段均摊近似)。</span>
+              </span>
+            </label>
+            <ModelSelect label="翻译模型" mode="translate" value={trModel} set={setTrModel} />
+            <div className="grid grid-cols-2 gap-3">
+              <label className="block text-sm">
+                <span className="mb-1 block text-neutral-400">源语言(默认自动检测)</span>
+                <select className="input" value={trSource} onChange={(e) => setTrSource(e.target.value)}>{LANG_OPTS}</select>
+              </label>
+              <label className="block text-sm">
+                <span className="mb-1 block text-neutral-400">目标语言(默认自动)</span>
+                <select className="input" value={trTarget} onChange={(e) => setTrTarget(e.target.value)}>
+                  <option value="auto">自动(中文→英文,其他→中文)</option>
+                  <option value="zho_Hans">中文(简) zho_Hans</option>
+                  <option value="eng_Latn">English eng_Latn</option>
+                  <option value="jpn_Jpan">日本語 jpn_Jpan</option>
+                  <option value="kor_Hang">한국어 kor_Hang</option>
+                </select>
+              </label>
+            </div>
+            <span className="block text-xs leading-snug text-neutral-500">源留「自动检测」逐段判定;目标留「自动」:中文→英文、其他→中文。源与目标相同的段自动跳过。</span>
+          </div>
         </div>
       </div>
     </div>
@@ -386,16 +533,30 @@ interface FlatWord {
 
 function RecordDetail({
   id,
+  config,
   onBack,
   onChanged,
 }: {
   id: string;
+  config: GatewayConfig | null;
   onBack: () => void;
   onChanged: () => void;
 }) {
   const [rec, setRec] = useState<RecordFull | null>(null);
   const [err, setErr] = useState("");
+  // Per-file transcription options (seeded from the record; user can override then
+  // (re)transcribe). `optTouched` tracks whether the user changed anything so we
+  // re-seed from the record on load until they do.
+  const [optLang, setOptLang] = useState("auto");
+  const [optSeg, setOptSeg] = useState(false);
+  const [optTr, setOptTr] = useState(false);
+  const [showOpts, setShowOpts] = useState(false);
+  // Translation UI is entirely hidden unless the global feature is ON. `available`
+  // additionally requires a translate model (needed to actually run 补翻译).
+  const showTranslation = !!config?.translate?.enabled;
+  const translateAvailable = showTranslation && !!config?.translate?.model;
   const [activeGi, setActiveGi] = useState<number>(-1);   // active WORD (word-level path)
+  const [activeTi, setActiveTi] = useState<number>(-1);   // active TRANSLATION word
   const [activeSeg, setActiveSeg] = useState<number>(-1); // active SEGMENT (fallback path)
   const [q, setQ] = useState("");                         // transcript search query
   const [sideTab, setSideTab] = useState<"info" | "spk">("info"); // audio left sidebar
@@ -424,6 +585,21 @@ function RecordDetail({
     return () => clearInterval(t);
   }, [rec, load]);
 
+  // Seed the per-file option controls from the CURRENT GLOBAL settings (so changing
+  // 总设置 is reflected here — otherwise the global toggle feels ineffective). You can
+  // still tweak this bar per run before clicking 重新转写. Seeded once we have both
+  // the record and the config; RecordDetail remounts when returning from 设置, so a
+  // fresh global value is picked up automatically.
+  const seededId = useRef<string>("");
+  useEffect(() => {
+    if (!rec || !config) return;
+    if (seededId.current === rec.id) return;
+    seededId.current = rec.id;
+    setOptLang(config.language || "auto");
+    setOptSeg(!!config.segmentedStt);
+    setOptTr(!!config.translate?.enabled);
+  }, [rec, config]);
+
   // Normalize word times so EVERY word is clickable/highlightable even on older
   // records: clamp into the segment's [start,end] and make starts strictly
   // increasing (the aligner often gives leading chars the same 0 start with zero
@@ -437,14 +613,22 @@ function RecordDetail({
         : intlCut;
       return (rec?.result?.segments || []).map((s) => {
         const fixed = fixWordTimes(s.words || [], s.start, s.end);
-        return { ...s, words: granularity === "word" ? groupWordsToCi(fixed, cut) : fixed };
+        const words = granularity === "word" ? groupWordsToCi(fixed, cut) : fixed;
+        let twords = s.twords;
+        if (twords && twords.length) {
+          const tf = fixWordTimes(twords, s.start, s.end);
+          twords = granularity === "word" ? groupWordsToCi(tf, cut) : tf;
+        }
+        return { ...s, words, twords };
       });
     },
     [rec, granularity, jiebaReady],
   );
   // Whether this transcript has any Chinese (only then is the 字/词 toggle useful).
   const hasCJK = useMemo(
-    () => (rec?.result?.segments || []).some((s) => /[\u4E00-\u9FFF\u3400-\u4DBF]/.test(s.text || "")),
+    () => (rec?.result?.segments || []).some(
+      (s) => /[\u4E00-\u9FFF\u3400-\u4DBF]/.test((s.text || "") + (s.translation || "")),
+    ),
     [rec],
   );
   // Load jieba lazily the first time we actually need Chinese word grouping.
@@ -469,6 +653,25 @@ function RecordDetail({
     return base;
   }, [segments]);
 
+  // Parallel machinery for the TRANSLATION words (twords): its own flat list, base
+  // indices and active pointer, so translated lines highlight/seek independently of
+  // the original (their pseudo timings live in the same segment window).
+  const tflat: FlatWord[] = useMemo(() => {
+    const out: FlatWord[] = [];
+    let ti = 0;
+    segments.forEach((s, si) => {
+      (s.twords || []).forEach((w) => out.push({ gi: ti++, segIdx: si, text: w.text, start: w.start, end: w.end }));
+    });
+    return out;
+  }, [segments]);
+  const segBaseT: number[] = useMemo(() => {
+    const base: number[] = [];
+    let acc = 0;
+    for (const s of segments) { base.push(acc); acc += (s.twords?.length || 0); }
+    return base;
+  }, [segments]);
+  const hasTranslation = tflat.length > 0;
+
   const hasWords = flat.length > 0;
 
   // Binary search: last item whose start <= t. Shared by word- and segment-level.
@@ -481,16 +684,20 @@ function RecordDetail({
     return ans;
   }
   const wordStarts = useMemo(() => flat.map((w) => w.start), [flat]);
+  const twordStarts = useMemo(() => tflat.map((w) => w.start), [tflat]);
   const segStarts = useMemo(() => segments.map((s) => +s.start), [segments]);
   // Latest arrays kept in refs so the rAF loop reads fresh values without needing
   // to restart whenever they change.
   const wordStartsRef = useRef(wordStarts);
+  const twordStartsRef = useRef(twordStarts);
   const segStartsRef = useRef(segStarts);
-  useEffect(() => { wordStartsRef.current = wordStarts; segStartsRef.current = segStarts; }, [wordStarts, segStarts]);
+  useEffect(() => { wordStartsRef.current = wordStarts; twordStartsRef.current = twordStarts; segStartsRef.current = segStarts; }, [wordStarts, twordStarts, segStarts]);
 
   const syncToTime = useCallback((t: number) => {
     const gi = lastAtOrBefore(wordStartsRef.current, t);
     setActiveGi((prev) => (prev === gi ? prev : gi));
+    const ti = lastAtOrBefore(twordStartsRef.current, t);
+    setActiveTi((prev) => (prev === ti ? prev : ti));
     const sg = lastAtOrBefore(segStartsRef.current, t);
     setActiveSeg((prev) => (prev === sg ? prev : sg));
   }, []);
@@ -546,7 +753,18 @@ function RecordDetail({
   }
 
   async function doTranscribe() {
-    try { await api.transcribeRecord(id); await load(); onChanged(); }
+    try {
+      await api.transcribeRecord(id, { language: optLang, segmentedStt: optSeg, translate: optTr });
+      setShowOpts(false);
+      await load(); onChanged();
+    } catch (e: any) { setErr(String(e?.message || e)); }
+  }
+  async function doTranslate() {
+    try { await api.translateRecord(id); await load(); onChanged(); }
+    catch (e: any) { setErr(String(e?.message || e)); }
+  }
+  async function doCancel() {
+    try { await api.cancelRecord(id); await load(); onChanged(); }
     catch (e: any) { setErr(String(e?.message || e)); }
   }
   async function doDelete() {
@@ -564,8 +782,18 @@ function RecordDetail({
   const mediaSrc = `/api/records/${id}/media`;
 
   const query = q.trim().toLowerCase();
+  // A line matches if the query appears in the original OR the translation, so
+  // search covers both. Count total occurrences (not lines) — Feishu-style.
+  const countOcc = (s: string) => {
+    if (!query || !s) return 0;
+    const hay = s.toLowerCase();
+    let n = 0, from = 0, i: number;
+    while ((i = hay.indexOf(query, from)) >= 0) { n++; from = i + query.length; }
+    return n;
+  };
+  const lineMatches = (s: Segment) => query && (countOcc(s.text || "") > 0 || countOcc(s.translation || "") > 0);
   const matchCount = query
-    ? segments.filter((s) => (s.text || "").toLowerCase().includes(query)).length
+    ? segments.reduce((n, s) => n + countOcc(s.text || "") + countOcc(s.translation || ""), 0)
     : 0;
 
   // Search box over the transcript (Feishu-Minutes style). Filters the list to
@@ -610,6 +838,57 @@ function RecordDetail({
     </div>
   ) : null;
 
+  // Render one line of clickable, per-unit spans (original OR translation). CJK
+  // units carry NO horizontal padding so 字/词 both pack tightly like normal
+  // Chinese; English keeps its real inter-word spaces. Search hits are painted in
+  // a distinct amber (different from the emerald/sky playback highlight) and can
+  // span word boundaries (see matchLine).
+  const searchHl = "rounded-[3px] bg-amber-400/45 text-amber-50";
+  const renderUnits = (
+    words: Word[],
+    base: number,
+    activeIdx: number,
+    dataKey: "data-gi" | "data-ti",
+    activeCls: string,
+  ) => {
+    const m = query ? matchLine(words, query) : null;
+    return words.map((w, wi) => {
+      const gi = base + wi;
+      const active = gi === activeIdx;
+      const sp = wi > 0 && needsSpaceBefore(words[wi - 1], w);
+      const spHit = m ? m.spaceMatched[wi] : false;
+      const mask = m ? m.wordMask[wi] : null;
+      const hasHit = mask ? mask.some(Boolean) : false;
+      return (
+        <span key={wi}>
+          {sp ? (spHit ? <span className={searchHl}> </span> : " ") : ""}
+          <span
+            {...{ [dataKey]: gi }}
+            onClick={() => seekTo(w.start)}
+            className={`cursor-pointer rounded-[3px] transition-colors ${active ? activeCls : "hover:bg-neutral-700/60"}`}
+          >
+            {hasHit
+              ? maskRuns(w.text || "", mask!).map((r, ri) =>
+                  r.hit ? <span key={ri} className={searchHl}>{r.text}</span> : <span key={ri}>{r.text}</span>,
+                )
+              : (w.text || "")}
+          </span>
+        </span>
+      );
+    });
+  };
+
+  // Highlight search hits in a plain (non-timed) string — used by the segment-level
+  // fallbacks that have no per-word timings.
+  const markPlain = (text: string) => {
+    if (!query || !text) return text;
+    const mask = new Array(text.length).fill(false);
+    const hay = text.toLowerCase();
+    let from = 0, i: number;
+    while ((i = hay.indexOf(query, from)) >= 0) { for (let p = i; p < i + query.length; p++) mask[p] = true; from = i + query.length; }
+    return maskRuns(text, mask).map((r, ri) => (r.hit ? <span key={ri} className={searchHl}>{r.text}</span> : <span key={ri}>{r.text}</span>));
+  };
+
   // The transcript list is shared by both layouts (video: right column; audio:
   // full-width main body). The scroll container that wraps it differs per layout.
   const transcriptList = (
@@ -618,7 +897,7 @@ function RecordDetail({
       {query && matchCount === 0 && <p className="text-sm text-neutral-600">未找到「{q.trim()}」</p>}
       <div className="space-y-4">
         {segments.map((seg, si) => {
-          if (query && !(seg.text || "").toLowerCase().includes(query)) return null;
+          if (query && !lineMatches(seg)) return null;
           return (
           <div key={si} data-seg={si} className={`rounded-lg p-2 transition-colors ${si === activeSegIdx ? "bg-neutral-800/40" : ""}`}>
             <div className="mb-1 flex items-center gap-2">
@@ -627,22 +906,9 @@ function RecordDetail({
                 {fmtTC(seg.start)}
               </button>
             </div>
-            <p className="text-[15px] leading-relaxed text-neutral-200">
+            <p className="break-words text-[15px] leading-relaxed text-neutral-200">
               {seg.words && seg.words.length
-                ? seg.words.map((w, wi) => {
-                    const gi = segBase[si] + wi;
-                    const active = gi === activeGi;
-                    return (
-                      <span
-                        key={wi}
-                        data-gi={gi}
-                        onClick={() => seekTo(w.start)}
-                        className={`cursor-pointer rounded px-px transition-colors ${active ? "bg-emerald-500/70 text-white" : "hover:bg-neutral-700/60"}`}
-                      >
-                        {w.text}
-                      </span>
-                    );
-                  })
+                ? renderUnits(seg.words, segBase[si], activeGi, "data-gi", "bg-emerald-500/70 text-white")
                 : (
                   // No word-level timings (align returned nothing): fall back to
                   // segment-level — click the whole line to seek, highlight the
@@ -653,10 +919,21 @@ function RecordDetail({
                       si === activeSegIdx ? "bg-emerald-500/25 text-emerald-100" : "hover:bg-neutral-700/50"
                     }`}
                   >
-                    {seg.text}
+                    {markPlain(seg.text)}
                   </span>
                 )}
             </p>
+            {showTranslation && seg.translation && (
+              <p className="mt-1 break-words border-l-2 border-sky-700/50 pl-2 text-[14px] leading-relaxed text-sky-200/90">
+                {seg.twords && seg.twords.length
+                  ? renderUnits(seg.twords, segBaseT[si], activeTi, "data-ti", "bg-sky-500/70 text-white")
+                  : (
+                    <span onClick={() => seekTo(seg.start)} className="cursor-pointer">
+                      {markPlain(seg.translation)}
+                    </span>
+                  )}
+              </p>
+            )}
           </div>
           );
         })}
@@ -678,8 +955,22 @@ function RecordDetail({
           </div>
         </div>
         {rec.status === "done" && <ExportButtons rec={rec} />}
+        {(rec.status === "done" || rec.status === "uploaded" || rec.status === "error") && (
+          <button
+            className={`btn-ghost ${showOpts ? "text-emerald-300" : ""}`}
+            onClick={() => setShowOpts((v) => !v)}
+            title="选择该文件的转写语言 / 分段 / 是否翻译"
+          >
+            转写设置
+          </button>
+        )}
+        {rec.status === "done" && translateAvailable && (
+          <button className="btn-ghost" onClick={doTranslate} title="仅对现有转写补一遍翻译(不重跑 STT)">
+            {rec.translated ? "重新翻译" : "补翻译"}
+          </button>
+        )}
         {rec.status === "done" && (
-          <button className="btn-ghost" onClick={doTranscribe} title="用当前设置(整段/分段)重新跑一遍转写">重新转写</button>
+          <button className="btn-ghost" onClick={doTranscribe} title="用下方「转写设置」重新跑一遍转写">重新转写</button>
         )}
         {(rec.status === "uploaded" || rec.status === "error") && (
           <button className="btn-primary" onClick={doTranscribe}>AI 转录</button>
@@ -687,12 +978,39 @@ function RecordDetail({
         <button className="btn-ghost" onClick={doDelete}>删除</button>
       </div>
 
+      {showOpts && (
+        <div className="flex flex-wrap items-center gap-4 border-b border-neutral-800 bg-neutral-900/50 px-4 py-2.5 text-sm">
+          <label className="flex items-center gap-2">
+            <span className="shrink-0 whitespace-nowrap text-neutral-400">语言</span>
+            <select className="input !w-auto py-1" value={optLang} onChange={(e) => setOptLang(e.target.value)}>
+              <option value="auto">自动识别</option>
+              <option value="zh">中文 zh</option>
+              <option value="en">English en</option>
+              <option value="ja">日本語 ja</option>
+              <option value="ko">한국어 ko</option>
+              <option value="yue">粤语 yue</option>
+            </select>
+          </label>
+          <label className="flex items-center gap-2">
+            <input type="checkbox" className="h-4 w-4" checked={optSeg} onChange={(e) => setOptSeg(e.target.checked)} />
+            <span className="text-neutral-300">分段转写</span>
+          </label>
+          {showTranslation && (
+            <label className="flex items-center gap-2" title={translateAvailable ? "" : "请先在设置中选择翻译模型"}>
+              <input type="checkbox" className="h-4 w-4" checked={optTr} disabled={!translateAvailable} onChange={(e) => setOptTr(e.target.checked)} />
+              <span className={translateAvailable ? "text-neutral-300" : "text-neutral-600"}>转写时翻译</span>
+            </label>
+          )}
+          <span className="text-xs text-neutral-500">改动后点「{rec.status === "done" ? "重新转写" : "AI 转录"}」生效</span>
+        </div>
+      )}
+
       {err && <p className="mx-4 mt-3 rounded bg-red-950/60 px-3 py-2 text-sm text-red-300">{err}</p>}
 
       {rec.status !== "done" ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center">
           {rec.status === "processing" ? (
-            <ProcessingView rec={rec} />
+            <ProcessingView rec={rec} onStop={doCancel} />
           ) : rec.status === "error" ? (
             <div className="text-red-400">{rec.error || "失败"}</div>
           ) : (
@@ -900,6 +1218,19 @@ export default function App() {
     try { await api.deleteRecord(id); await refreshRecords(); } catch (e: any) { setErr(String(e?.message || e)); }
   }, [refreshRecords]);
 
+  const cancel = useCallback(async (id: string) => {
+    setErr("");
+    setBusyIds((s) => new Set(s).add(id));
+    try {
+      await api.cancelRecord(id);
+      await refreshRecords();
+    } catch (e: any) {
+      setErr(String(e?.message || e));
+    } finally {
+      setBusyIds((s) => { const n = new Set(s); n.delete(id); return n; });
+    }
+  }, [refreshRecords]);
+
   useEffect(() => {
     (async () => {
       try { setConfig(await api.getConfig()); } catch { /* ignore */ }
@@ -924,7 +1255,7 @@ export default function App() {
       const rec = await api.uploadFile(f, (p) => setUploadPct(Math.round(p)));
       setUploadPct(null);
       await refreshRecords();
-      if (ready) { await api.transcribeRecord(rec.id); await refreshRecords(); }
+      if (ready && (config?.autoTranscribe ?? true)) { await api.transcribeRecord(rec.id); await refreshRecords(); }
     } catch (e: any) {
       setErr(String(e?.message || e));
       setUploadPct(null);
@@ -935,21 +1266,36 @@ export default function App() {
   return (
     <div className="mx-auto flex h-screen max-w-6xl flex-col">
       <header className="flex items-center gap-3 border-b border-neutral-800 px-4 py-3">
-        <h1 className="text-lg font-semibold">🎙 Audio Minutes <span className="text-neutral-500">X Demo</span></h1>
+        <button
+          className="text-lg font-semibold hover:text-emerald-300"
+          onClick={() => { setShowSettings(false); setSelectedId(null); }}
+          title="返回文件列表"
+        >
+          🎙 Audio Minutes <span className="text-neutral-500">X Demo</span>
+        </button>
         <div className="ml-auto flex items-center gap-2">
-          <button className="btn-ghost" onClick={() => setShowSettings(true)}>设置</button>
+          <button
+            className={`btn-ghost ${showSettings ? "text-emerald-300" : ""}`}
+            onClick={() => setShowSettings((v) => !v)}
+          >
+            设置
+          </button>
         </div>
       </header>
 
-      {!ready && (
+      {!ready && !showSettings && (
         <div className="border-b border-red-900/50 bg-red-950/40 px-4 py-2 text-sm text-red-300">
           无法转录:缺少 {config?.missing?.join("、") || "网关配置"}。请点击右上角「设置」配置网关地址并选择 STT / Align / Diarize 模型。
         </div>
       )}
 
-      {selectedId ? (
+      {showSettings && config ? (
         <div className="flex-1 overflow-hidden">
-          <RecordDetail id={selectedId} onBack={() => setSelectedId(null)} onChanged={refreshRecords} />
+          <SettingsPage config={config} onBack={() => setShowSettings(false)} onSaved={(cfg) => setConfig(cfg)} />
+        </div>
+      ) : selectedId ? (
+        <div className="flex-1 overflow-hidden">
+          <RecordDetail id={selectedId} config={config} onBack={() => setSelectedId(null)} onChanged={refreshRecords} />
         </div>
       ) : (
         <div className="flex-1 overflow-y-auto p-4">
@@ -1002,11 +1348,21 @@ export default function App() {
                   </div>
                   <div className="mt-3 flex items-center gap-2">
                     {r.status === "processing" ? (
-                      <div className="flex-1">
-                        <div className="mb-1 text-xs text-amber-400">{statusText(r)}</div>
-                        <div className="h-1.5 w-full overflow-hidden rounded bg-neutral-800">
-                          <div className="h-full bg-amber-500 transition-[width] duration-500" style={{ width: `${r.progress}%` }} />
+                      <div className="flex flex-1 items-center gap-2">
+                        <div className="min-w-0 flex-1">
+                          <div className="mb-1 truncate text-xs text-amber-400">{statusText(r)}</div>
+                          <div className="h-1.5 w-full overflow-hidden rounded bg-neutral-800">
+                            <div className="h-full bg-amber-500 transition-[width] duration-500" style={{ width: `${r.progress}%` }} />
+                          </div>
                         </div>
+                        <button
+                          className="shrink-0 rounded bg-neutral-800 px-2 py-1 text-xs text-red-300 hover:bg-red-950/60 hover:text-red-200 disabled:opacity-40"
+                          disabled={busyIds.has(r.id)}
+                          title="停止本次转写"
+                          onClick={(e) => { e.stopPropagation(); cancel(r.id); }}
+                        >
+                          {busyIds.has(r.id) ? "…" : "停止"}
+                        </button>
                       </div>
                     ) : r.status === "done" ? (
                       <>
@@ -1051,14 +1407,6 @@ export default function App() {
             </div>
           )}
         </div>
-      )}
-
-      {showSettings && config && (
-        <SettingsModal
-          config={config}
-          onClose={() => setShowSettings(false)}
-          onSaved={(cfg) => setConfig(cfg)}
-        />
       )}
     </div>
   );

@@ -55,13 +55,24 @@ const DEFAULT_CONFIG = {
   cookie: "",
   bflUser: GW_BFL_USER || "",
   models: { stt: "", align: "", diar: "" },
-  // false (default) = 整段转写: one whole-clip STT call. true = 分段转写: STT is
-  // called per diarization window (more calls, tighter per-turn context).
+  // DEFAULTS for NEW files (each record snapshots these into record.options at
+  // upload; per-file overrides win at (re)transcribe time):
+  //   segmentedStt false = 整段转写 (one whole-clip STT); true = 分段转写 (STT per
+  //   diarization window).
   segmentedStt: false,
-  // Forced-alignment needs a language NAME and Qwen3-ASR can't report one, so we
-  // auto-detect it from the transcript text (like audiostudioxdemo). "auto" =
-  // detect per slice; a code (zh/en/ja/ko/…) here forces that language instead.
+  //   language "auto" = detect per slice from the STT text; a code (zh/en/ja/ko/…)
+  //   forces that language for forced alignment.
   language: "auto",
+  // Upload → auto-start transcription with the defaults above. Off = uploads only
+  // land in the library as 待转录; the user picks per-file options then transcribes.
+  autoTranscribe: true,
+  // Translation (global). Off by default; only takes effect when enabled AND a
+  // translate-mode model is chosen.
+  //   sourceLang "auto" = detect the source per segment; or a fixed FLORES code.
+  //   targetLang "auto" = smart zh<->en (Chinese → English, everything else →
+  //     Chinese); or an explicit FLORES code (zho_Hans/eng_Latn/…).
+  // Segments whose (resolved) source == target are skipped.
+  translate: { enabled: false, model: "", sourceLang: "auto", targetLang: "auto" },
 };
 
 function loadConfig() {
@@ -71,6 +82,7 @@ function loadConfig() {
       ...DEFAULT_CONFIG,
       ...raw,
       models: { ...DEFAULT_CONFIG.models, ...(raw.models || {}) },
+      translate: { ...DEFAULT_CONFIG.translate, ...(raw.translate || {}) },
     };
   } catch {
     return { ...DEFAULT_CONFIG, models: { ...DEFAULT_CONFIG.models } };
@@ -141,6 +153,8 @@ function recordSummary(rec) {
     createdAt: rec.createdAt,
     speakers: rec.result?.speakers?.length || 0,
     segments: rec.result?.segments?.length || 0,
+    options: rec.options || { language: "auto", segmentedStt: false, translate: false },
+    translated: !!(rec.result?.segments || []).some((s) => s.translation),
   };
 }
 
@@ -203,18 +217,22 @@ function gwUrl(cfg, p) {
 }
 // Build gateway auth headers. Data plane (/v1/*) uses the Bearer key. Identity for
 // the console API (and, on this gateway, edge auth) comes from the Olares SSO
-// cookie + X-BFL-USER, which the Olares edge injects into requests reaching THIS
-// app. So once deployed we do NOT need a manually-pasted cookie: we forward the
-// live browser cookie and edge-injected x-bfl-user from the current request (`req`).
-// The saved cfg.cookie/cfg.bflUser remain only as a local-dev fallback. `req` is
-// absent for the async transcribe job — there cfg.bflUser is set from the record's
-// captured identity (see runJob), so data-plane calls still carry x-bfl-user.
+// cookie + X-BFL-USER.
+//
+// Priority = MANUALLY-FILLED value wins, else fall back to the current request.
+//   • Local dev: you paste the Olares cookie into 设置; the browser's cookie for
+//     localhost is unrelated junk, so the pasted one MUST win.
+//   • Deployed on Olares: leave the cookie blank; the app sits behind the gateway
+//     on the same domain, so the browser sends the real auth_token and the edge
+//     injects x-bfl-user — both forwarded here via `req`.
+//   • Async transcribe job: no `req`; cfg.bflUser is set from the record's captured
+//     identity (see runJob) so data-plane calls still carry x-bfl-user.
 function gwHeaders(cfg, { req, extra } = {}) {
   const h = { ...(extra || {}) };
   if (cfg.key) h["authorization"] = "Bearer " + cfg.key;
-  const cookie = req?.headers?.cookie || cfg.cookie;
+  const cookie = cfg.cookie || req?.headers?.cookie;
   if (cookie) h["cookie"] = cookie;
-  const bfl = req?.headers?.["x-bfl-user"] || cfg.bflUser;
+  const bfl = cfg.bflUser || req?.headers?.["x-bfl-user"];
   if (bfl) h["x-bfl-user"] = bfl;
   return h;
 }
@@ -293,6 +311,13 @@ app.put("/api/config", (req, res) => {
     },
     segmentedStt: Boolean(b.segmentedStt ?? cur.segmentedStt ?? false),
     language: (b.language ?? cur.language ?? "auto").toString().trim() || "auto",
+    autoTranscribe: Boolean(b.autoTranscribe ?? cur.autoTranscribe ?? true),
+    translate: {
+      enabled: Boolean(b.translate?.enabled ?? cur.translate?.enabled ?? false),
+      model: (b.translate?.model ?? cur.translate?.model ?? "").toString(),
+      sourceLang: (b.translate?.sourceLang ?? cur.translate?.sourceLang ?? "auto").toString().trim() || "auto",
+      targetLang: (b.translate?.targetLang ?? cur.translate?.targetLang ?? "auto").toString().trim() || "auto",
+    },
   };
   saveConfig(next);
   res.json({ ...next, ...configReady(next) });
@@ -311,6 +336,7 @@ const upload = multer({
 
 app.post("/api/upload", upload.single("file"), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: "no file" });
+  const cfg = loadConfig();
   const id = randomUUID();
   const stored = req.file.path;
   const mime = req.file.mimetype || "";
@@ -337,6 +363,13 @@ app.post("/api/upload", upload.single("file"), async (req, res) => {
       progress: 0,
       phase: "",
       error: "",
+      // Per-file transcription options, snapshotted from the current global
+      // defaults; the user can override them per record before (re)transcribing.
+      options: {
+        language: cfg.language || "auto",
+        segmentedStt: !!cfg.segmentedStt,
+        translate: !!cfg.translate?.enabled,
+      },
       createdAt: nowIso(),
       updatedAt: nowIso(),
       result: null,
@@ -392,7 +425,29 @@ app.get("/api/records/:id/audio", (req, res) => {
 // stall together at 3%). Jobs are therefore queued FIFO and drained one by one.
 const running = new Set(); // the single id currently processing (in-process guard)
 const queue = [];          // ids waiting their turn (FIFO)
+const jobKinds = new Map(); // id -> "full" | "translate" (translate = add译文 only)
 let draining = false;      // true while a job is active (the serial gate)
+// Ids the user asked to STOP. There is no true pause (diar/STT are one-shot remote
+// calls we can't interrupt mid-flight), so this is a cooperative abort: the running
+// job checks it at each checkpoint (between windows / segments) and bails out.
+const cancelled = new Set();
+
+class CancelError extends Error { constructor() { super("__cancelled__"); this.cancelled = true; } }
+// Throw at a checkpoint if this job was asked to stop.
+function ckCancel(id) { if (cancelled.has(id)) throw new CancelError(); }
+// Put a stopped record back into a stable, non-processing state: keep the previous
+// transcript if there was one (done), otherwise mark it as待转录 so it can be re-run.
+function revertStopped(id, fallbackRec) {
+  const r = readRecord(id) || fallbackRec;
+  if (!r) return;
+  if (r.result && r.result.segments && r.result.segments.length) {
+    r.status = "done"; r.progress = 100;
+  } else {
+    r.status = "uploaded"; r.progress = 0;
+  }
+  r.phase = ""; r.error = ""; r.stepDone = 0; r.stepTotal = 0;
+  writeRecord(r);
+}
 
 // Reflect each waiting record's queue position in its phase so the UI clearly
 // shows it is lined up (not silently doing nothing).
@@ -408,8 +463,9 @@ function refreshQueuePhases() {
   });
 }
 
-function enqueueJob(id) {
+function enqueueJob(id, kind = "full") {
   if (running.has(id) || queue.includes(id)) return false;
+  jobKinds.set(id, kind);
   queue.push(id);
   refreshQueuePhases();
   pump();
@@ -423,8 +479,11 @@ async function pump() {
   if (id === undefined) return;
   draining = true;
   refreshQueuePhases();
+  const kind = jobKinds.get(id) || "full";
+  jobKinds.delete(id);
   try {
-    await runJob(id);
+    if (kind === "translate") await runTranslateJob(id);
+    else await runJob(id);
   } catch {
     /* runJob persists its own terminal status/error */
   } finally {
@@ -577,13 +636,27 @@ function punctLineBreaks(refText, c0, c1, maxLen) {
 // punctuation; spaces separate.
 function sliceToWords(refText, c0, c1, timeAtChar) {
   const PUNCT = /[。！？，、；：,.!?;:"'”’」』）)\]…—·]/;
+  const APOS = /['’]/;                 // contraction apostrophe (I'm, Let's, don't)
+  const WORDCH = /[\p{L}\p{N}]/u;      // letter/digit
   const words = [];
   let i = c0;
   while (i < c1) {
     if (/\s/.test(refText[i])) { i++; continue; }
     let j;
     if (isCJK(refText[i])) j = i + 1;
-    else { j = i; while (j < c1 && !/\s/.test(refText[j]) && !isCJK(refText[j]) && !PUNCT.test(refText[j])) j++; if (j === i) j = i + 1; }
+    else {
+      j = i;
+      while (j < c1 && !/\s/.test(refText[j]) && !isCJK(refText[j])) {
+        if (PUNCT.test(refText[j])) {
+          // Keep an apostrophe INSIDE a word (letter ' letter) so contractions
+          // like I'm / Let's / don't stay one token; any other punct breaks.
+          if (APOS.test(refText[j]) && j > i && WORDCH.test(refText[j - 1]) && j + 1 < c1 && WORDCH.test(refText[j + 1])) { j++; continue; }
+          break;
+        }
+        j++;
+      }
+      if (j === i) j = i + 1;
+    }
     while (j < c1 && PUNCT.test(refText[j])) j++;
     const text = refText.slice(i, j);
     if (text.trim()) words.push({ text, start: round3(timeAtChar(i)), end: round3(timeAtChar(j)) });
@@ -681,6 +754,164 @@ async function mapLimit(items, limit, fn) {
   return results;
 }
 
+// ---------------------------------------------------------------------------
+// Translation (NLLB via the gateway's /v1/translate). Per-segment, driven by the
+// original transcript. The audio is in the SOURCE language, so we can't get real
+// word times for the translation — we instead spread the translated text evenly
+// across each segment's [start,end] (pseudo word-level) so the UI can still
+// click-to-seek and highlight-in-sync at word granularity.
+// ---------------------------------------------------------------------------
+async function gwTranslate(cfg, model, text, target, source) {
+  const body = { model, text, target };
+  if (source) body.source = source;
+  const r = await fetch(gwUrl(cfg, "/v1/translate"), {
+    method: "POST",
+    headers: { ...gwHeaders(cfg), "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const t = await r.text();
+  let j;
+  try { j = JSON.parse(t); } catch { j = t; }
+  if (!r.ok) throw new Error(`translate ${r.status}: ${String(t).slice(0, 200)}`);
+  return (j?.translation ?? j?.text ?? j?.translated_text ?? "").toString();
+}
+
+// Script-based source-language guess (FLORES code) — enough to drive the smart
+// zh<->en default and the same-language skip. No franc on the server; scripts
+// decide (Kana → ja, Hangul → ko, Han → zh, else → en).
+function detectFlores(text) {
+  const t = (text || "").trim();
+  if (!t) return "eng_Latn";
+  if (/[\u3040-\u30ff]/.test(t)) return "jpn_Jpan";
+  if (/[\uac00-\ud7af]/.test(t)) return "kor_Hang";
+  if (/[\u4e00-\u9fff]/.test(t)) return "zho_Hans";
+  return "eng_Latn";
+}
+
+// Resolve the target FLORES code. "auto" = smart zh<->en (Chinese → English,
+// anything else → Chinese). An explicit code wins.
+function resolveTarget(cfgTarget, src) {
+  const t = cfgTarget || "auto";
+  if (t && t !== "auto") return t;
+  return src === "zho_Hans" ? "eng_Latn" : "zho_Hans";
+}
+
+// Spread a translated string evenly across [lo,hi] as pseudo-timed words (same
+// tokenization as the original transcript, so the frontend renders/handles them
+// identically — jieba grouping, click-to-seek, highlight).
+function evenTimedWords(text, lo, hi) {
+  const L = (text || "").length;
+  if (!L) return [];
+  const dur = Math.max(0.001, (hi || 0) - (lo || 0));
+  const timeAtChar = (c) => lo + dur * (Math.min(Math.max(c, 0), L) / L);
+  return finalizeWords(sliceToWords(text, 0, L, timeAtChar), lo, hi);
+}
+
+// Translate each segment in place (adds seg.translation + seg.twords). Segments
+// whose detected source == target are left untranslated (translation cleared).
+async function translateSegments(cfg, segments, setP, id) {
+  const model = cfg.translate?.model;
+  if (!model || !segments?.length) return { translated: 0 };
+  const cfgSource = cfg.translate?.sourceLang || "auto";
+  const cfgTarget = cfg.translate?.targetLang || "auto";
+  const total = segments.length;
+  let done = 0, translated = 0;
+  if (setP) setP(95, "翻译", 0, total);
+  await mapLimit(segments, 4, async (seg) => {
+    // Checkpoint OUTSIDE the per-segment try/catch below so a stop actually
+    // propagates (the inner catch swallows per-segment errors on purpose).
+    if (id) ckCancel(id);
+    const text = (seg.text || "").trim();
+    if (text) {
+      try {
+        // Source: use the fixed choice if set, else detect per segment. Target:
+        // fixed choice, else smart zh<->en based on the (resolved) source.
+        const src = cfgSource !== "auto" ? cfgSource : detectFlores(text);
+        const target = resolveTarget(cfgTarget, src);
+        if (src !== target) {
+          const tr = (await gwTranslate(cfg, model, text, target, src)).trim();
+          if (tr) {
+            seg.translation = tr;
+            seg.twords = evenTimedWords(tr, seg.start, seg.end);
+            seg.translateTo = target;
+            translated++;
+          } else {
+            delete seg.translation; delete seg.twords; delete seg.translateTo;
+          }
+        } else {
+          delete seg.translation; delete seg.twords; delete seg.translateTo;
+        }
+      } catch { /* leave this segment untranslated; the run still succeeds */ }
+    }
+    done++;
+    if (setP) setP(95 + Math.round((5 * done) / total), "翻译", done, total);
+  });
+  return { translated };
+}
+
+// Translate-only job for an ALREADY-transcribed record (补翻译). Reuses the serial
+// queue so it never contends with a running transcription for the gateway/GPU.
+async function runTranslateJob(id) {
+  if (running.has(id)) return;
+  const rec = readRecord(id);
+  if (!rec) return;
+  const cfg = loadConfig();
+  if (rec.bflUser) cfg.bflUser = rec.bflUser;
+  if (!rec.result?.segments?.length) {
+    rec.status = rec.result ? "done" : rec.status;
+    rec.error = "无内容可翻译";
+    writeRecord(rec);
+    return;
+  }
+  if (!cfg.translate?.model) {
+    rec.status = "error";
+    rec.error = "无法翻译:未选择翻译模型";
+    writeRecord(rec);
+    return;
+  }
+  running.add(id);
+  const startedAt = nowIso();
+  const setP = (progress, phase, stepDone = 0, stepTotal = 0) => {
+    const r = readRecord(id);
+    if (!r) return;
+    r.status = "processing";
+    r.progress = progress;
+    r.phase = phase;
+    r.stepDone = stepDone;
+    r.stepTotal = stepTotal;
+    r.startedAt = startedAt;
+    r.error = "";
+    writeRecord(r);
+  };
+  try {
+    ckCancel(id);
+    const out = readRecord(id);
+    const segments = out.result.segments;
+    await translateSegments(cfg, segments, setP, id);
+    out.result.segments = segments;
+    out.options = { ...(out.options || {}), translate: true };
+    out.status = "done";
+    out.progress = 100;
+    out.phase = "";
+    out.error = "";
+    writeRecord(out);
+  } catch (e) {
+    if (e && e.cancelled) {
+      // Stopped by the user: this record already had a transcript, so just
+      // restore its 已完成 state (keep whatever partial译文 was written).
+      revertStopped(id, rec);
+    } else {
+      const out = readRecord(id) || rec;
+      out.status = "error";
+      out.error = String(e.message || e);
+      writeRecord(out);
+    }
+  } finally {
+    running.delete(id);
+    cancelled.delete(id);
+  }
+}
+
 async function runJob(id) {
   if (running.has(id)) return;
   const rec = readRecord(id);
@@ -689,6 +920,10 @@ async function runJob(id) {
   // Use the identity captured when this record's transcribe was requested so the
   // gateway gets x-bfl-user even though the job runs without a live browser request.
   if (rec.bflUser) cfg.bflUser = rec.bflUser;
+  // Per-file options override the global defaults for THIS job.
+  const opts = rec.options || {};
+  if (opts.language) cfg.language = opts.language;
+  cfg.segmentedStt = !!opts.segmentedStt;
   const { ready, missing } = configReady(cfg);
   if (!ready) {
     rec.status = "error";
@@ -714,9 +949,11 @@ async function runJob(id) {
   };
   const tmp = [];
   try {
+    ckCancel(id);
     setP(3, "说话人分离（整段分析中）");
     // 1) diarization over the whole clip
     const diar = await gwAudioOp(cfg, "diarization", rec.audioPath, cfg.models.diar);
+    ckCancel(id);
     const diarSegs = Array.isArray(diar?.segments) ? diar.segments : [];
 
     // 2) transcription strategy (integral vs segmented). Both feed the same
@@ -771,6 +1008,7 @@ async function runJob(id) {
       setP(20, "分段转写与词级对齐", 0, windows.length);
       let done = 0;
       return mapLimit(windows, 2, async (w, idx) => {
+        ckCancel(id);
         const slicePath = path.join(UPLOAD_DIR, `${id}-w${idx}.wav`);
         tmp.push(slicePath);
         await sliceWav(rec.audioPath, w.start, w.end, slicePath);
@@ -799,10 +1037,12 @@ async function runJob(id) {
       // failure (e.g. clip too long for a single call) degrades to the per-window
       // path so a result is always produced.
       try {
+        ckCancel(id);
         setP(20, "整段转写");
         const stt = await gwAudioOp(cfg, "transcriptions", rec.audioPath, cfg.models.stt, { response_format: "json" });
         const fullText = (typeof stt === "string" ? stt : stt?.text ?? "").trim();
         if (!fullText) throw new Error("STT 无文本");
+        ckCancel(id);
 
         setP(55, "词级对齐");
         const units = await alignSlice(0, rec.durationSec || 0, fullText, "wa_full");
@@ -875,6 +1115,13 @@ async function runJob(id) {
       .sort((a, b) => a.start - b.start);
     const speakers = Array.from(new Set(segments.map((s) => s.speaker)));
 
+    // Optional translation for this run (per-file toggle; needs a translate model).
+    // If the user hit stop, skip translating and keep the transcript we just built
+    // (translate is the last 5% — no reason to throw the transcript away).
+    if (rec.options?.translate && cfg.translate?.model && !cancelled.has(id)) {
+      try { await translateSegments(cfg, segments, setP, id); } catch { /* keep transcript */ }
+    }
+
     const out = readRecord(id);
     out.result = { language: language || "", speakers, segments };
     out.status = "done";
@@ -883,12 +1130,19 @@ async function runJob(id) {
     out.error = "";
     writeRecord(out);
   } catch (e) {
-    const out = readRecord(id) || rec;
-    out.status = "error";
-    out.error = String(e.message || e);
-    writeRecord(out);
+    if (e && e.cancelled) {
+      // Stopped mid-transcribe: no full result was written, so drop back to待转录
+      // (or keep a prior transcript if this was a 重新转写 over an existing one).
+      revertStopped(id, rec);
+    } else {
+      const out = readRecord(id) || rec;
+      out.status = "error";
+      out.error = String(e.message || e);
+      writeRecord(out);
+    }
   } finally {
     running.delete(id);
+    cancelled.delete(id);
     for (const t of tmp) fs.rm(t, { force: true }, () => {});
   }
 }
@@ -906,6 +1160,15 @@ app.post("/api/records/:id/transcribe", (req, res) => {
   // cookie. Not a secret; falls back to any existing value / env.
   const bfl = (req.headers["x-bfl-user"] || "").toString();
   if (bfl) rec.bflUser = bfl;
+  // Options for THIS run: explicit body values win (the detail-page bar sends
+  // them); otherwise fall back to the CURRENT GLOBAL defaults (not a stale per-file
+  // snapshot) so changing 总设置 takes effect for card-level 重新转写 / 上传自动转写.
+  const b = req.body || {};
+  rec.options = {
+    language: (b.language ?? cfg.language ?? "auto").toString().trim() || "auto",
+    segmentedStt: b.segmentedStt !== undefined ? !!b.segmentedStt : !!cfg.segmentedStt,
+    translate: b.translate !== undefined ? !!b.translate : !!cfg.translate?.enabled,
+  };
   rec.status = "processing";
   rec.progress = 1;
   rec.phase = "排队中";
@@ -913,6 +1176,55 @@ app.post("/api/records/:id/transcribe", (req, res) => {
   writeRecord(rec);
   enqueueJob(rec.id); // queued; the serial pump runs it when its turn comes
   res.json({ ok: true, queued: true });
+});
+
+// Add/refresh translation for an already-transcribed record (补翻译), without
+// re-running the whole STT/align pipeline. Uses the current global translate model
+// + target language.
+app.post("/api/records/:id/translate", (req, res) => {
+  const rec = readRecord(req.params.id);
+  if (!rec) return res.status(404).json({ error: "not found" });
+  const cfg = loadConfig();
+  if (!cfg.translate?.model) return res.status(400).json({ error: "无法翻译:请先在设置中选择翻译模型" });
+  if (!rec.result?.segments?.length) return res.status(400).json({ error: "该记录尚无转写内容可翻译" });
+  if (running.has(rec.id) || queue.includes(rec.id))
+    return res.json({ ok: true, alreadyRunning: true });
+  const bfl = (req.headers["x-bfl-user"] || "").toString();
+  if (bfl) rec.bflUser = bfl;
+  rec.status = "processing";
+  rec.progress = 1;
+  rec.phase = "排队中（翻译）";
+  rec.error = "";
+  writeRecord(rec);
+  enqueueJob(rec.id, "translate");
+  res.json({ ok: true, queued: true });
+});
+
+// Stop a queued or running job. No true pause (diar/STT are one-shot remote calls),
+// so this is a best-effort cooperative abort: queued jobs are dropped immediately;
+// a running job stops at its next checkpoint (between windows/segments), which can
+// take a moment if a single long gateway call is in flight.
+app.post("/api/records/:id/cancel", (req, res) => {
+  const rec = readRecord(req.params.id);
+  if (!rec) return res.status(404).json({ error: "not found" });
+  const id = rec.id;
+  const qi = queue.indexOf(id);
+  if (qi >= 0) {
+    queue.splice(qi, 1);
+    jobKinds.delete(id);
+    cancelled.delete(id);
+    revertStopped(id, rec);
+    refreshQueuePhases();
+    return res.json({ ok: true, stopped: "queued" });
+  }
+  if (running.has(id)) {
+    cancelled.add(id);
+    const r = readRecord(id) || rec;
+    r.phase = "停止中…";
+    writeRecord(r);
+    return res.json({ ok: true, stopping: true });
+  }
+  return res.json({ ok: true, noop: true }); // already finished / not active
 });
 
 // ---------------------------------------------------------------------------
