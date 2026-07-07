@@ -29,6 +29,9 @@ export interface RecordSummary {
   status: RecordStatus;
   progress: number;
   phase: string;
+  stepDone: number;
+  stepTotal: number;
+  startedAt: string;
   error: string;
   createdAt: string;
   speakers: number;
@@ -52,6 +55,8 @@ export interface GatewayConfig {
   cookie: string;
   bflUser: string;
   models: { stt: string; align: string; diar: string };
+  segmentedStt: boolean;
+  language: string;
   ready: boolean;
   missing: string[];
 }
