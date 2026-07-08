@@ -49,6 +49,22 @@ export function uploadBackground(file: File): Promise<GatewayConfig> {
 }
 export const deleteBackground = () => jsend<GatewayConfig>("/api/background", "DELETE");
 
+// Cover: set from a captured video frame (base64 data URL) or an uploaded file;
+// or clear it (revert to the default kind-based tile).
+export const setCoverDataUrl = (id: string, dataUrl: string) =>
+  jsend<RecordSummary>(`/api/records/${id}/cover`, "POST", { dataUrl });
+export function uploadCover(id: string, file: File): Promise<RecordSummary> {
+  const fd = new FormData();
+  fd.append("file", file);
+  return fetch(`/api/records/${id}/cover`, { method: "POST", body: fd }).then(async (r) => {
+    const t = await r.text();
+    let b: any; try { b = JSON.parse(t); } catch { b = t; }
+    if (!r.ok) throw new Error(b?.error || `cover ${r.status}`);
+    return b as RecordSummary;
+  });
+}
+export const deleteCover = (id: string) => jsend<RecordSummary>(`/api/records/${id}/cover`, "DELETE");
+
 export function uploadFile(
   file: File,
   onProgress?: (pct: number) => void

@@ -62,6 +62,8 @@ export interface RecordSummary {
   translated?: boolean;
   jobKind?: "full" | "translate";
   notices?: Notice[];
+  hasCover?: boolean;
+  coverVer?: string; // changes when the cover is (re)set, used to bust the <img> cache
 }
 
 export interface RecordFull extends RecordSummary {

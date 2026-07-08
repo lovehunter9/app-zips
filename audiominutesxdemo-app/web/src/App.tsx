@@ -1055,6 +1055,15 @@ function RecordDetail({
     // playing, paused keeps paused).
     m.currentTime = Math.max(0, t);
   }
+  // Jump ±N seconds from the current playhead (Feishu-style -15s / +15s).
+  function skip(delta: number) {
+    const m = mediaRef.current;
+    if (!m) return;
+    const dur = Number.isFinite(m.duration) ? m.duration : Infinity;
+    m.currentTime = Math.min(Math.max(0, m.currentTime + delta), dur);
+    syncToTime(m.currentTime);
+  }
+  const [coverOpen, setCoverOpen] = useState(false);
 
   async function doTranscribe() {
     try {
@@ -1360,16 +1369,7 @@ function RecordDetail({
                     </div>
                   )}
                 </div>
-                <div className="flex shrink-0 items-center justify-end gap-2 px-1">
-                  <button
-                    onClick={() => setSubs((v) => !v)}
-                    className={`flex items-center gap-1 rounded px-2 py-1 text-xs font-medium ${subs ? "bg-emerald-600/80 text-white" : "bg-neutral-700/60 text-neutral-300"} hover:brightness-110`}
-                    title={subs ? "关闭字幕" : "开启字幕"}
-                  >
-                    <span className="rounded-sm border border-current px-1 text-[10px] leading-tight">CC</span>
-                    字幕 {subs ? "开" : "关"}
-                  </button>
-                </div>
+                <PlayerBar kind="video" subs={subs} setSubs={setSubs} skip={skip} onSetCover={() => setCoverOpen(true)} />
                 <MetaTabs rec={rec} defaultTab="spk" />
               </div>
             }
@@ -1419,10 +1419,250 @@ function RecordDetail({
             }
           />
           <div className="border-t border-neutral-800 bg-neutral-900/80 px-4 py-3">
-            <audio ref={(el) => { mediaRef.current = el; }} src={mediaSrc} controls className="mx-auto block w-full max-w-4xl" onTimeUpdate={onTimeUpdate} onPlay={startRaf} onPause={stopRaf} onEnded={stopRaf} onSeeking={onTimeUpdate} />
+            <div className="mx-auto flex max-w-5xl items-center gap-2">
+              <button onClick={() => skip(-15)} className="flex shrink-0 items-center gap-1 rounded px-2 py-1 text-xs font-medium bg-neutral-700/60 text-neutral-300 hover:brightness-110" title="后退 15 秒">⏪ 15s</button>
+              <button onClick={() => skip(15)} className="flex shrink-0 items-center gap-1 rounded px-2 py-1 text-xs font-medium bg-neutral-700/60 text-neutral-300 hover:brightness-110" title="前进 15 秒">15s ⏩</button>
+              <audio ref={(el) => { mediaRef.current = el; }} src={mediaSrc} controls className="min-w-0 flex-1" onTimeUpdate={onTimeUpdate} onPlay={startRaf} onPause={stopRaf} onEnded={stopRaf} onSeeking={onTimeUpdate} />
+              <button onClick={() => setCoverOpen(true)} className="flex shrink-0 items-center gap-1 rounded px-2 py-1 text-xs font-medium bg-neutral-700/60 text-neutral-300 hover:brightness-110" title="设置封面">🖼 设置封面</button>
+            </div>
           </div>
         </div>
       )}
+      {coverOpen && rec && (
+        <CoverModal
+          rec={rec}
+          mediaSrc={mediaSrc}
+          onClose={() => setCoverOpen(false)}
+          onSaved={() => { setCoverOpen(false); load(); onChanged(); }}
+        />
+      )}
+    </div>
+  );
+}
+
+// Feishu-style control strip that sits just under the native player: -15s / +15s,
+// (video only) the CC subtitle toggle, and 设置封面. Native <video>/<audio>
+// controls can't host custom buttons, so these live in a row right below.
+function PlayerBar({
+  kind, subs, setSubs, skip, onSetCover,
+}: {
+  kind: "audio" | "video";
+  subs: boolean;
+  setSubs: (fn: (v: boolean) => boolean) => void;
+  skip: (delta: number) => void;
+  onSetCover: () => void;
+}) {
+  const btn = "flex items-center gap-1 rounded px-2 py-0.5 text-xs font-medium bg-neutral-700/60 text-neutral-300 hover:brightness-110";
+  return (
+    <div className="mt-1.5 flex shrink-0 flex-nowrap items-center justify-between gap-2 px-1">
+      <div className="flex items-center gap-2">
+        <button onClick={() => skip(-15)} className={btn} title="后退 15 秒">⏪ 15s</button>
+        <button onClick={() => skip(15)} className={btn} title="前进 15 秒">15s ⏩</button>
+        {kind === "video" && (
+          <button
+            onClick={() => setSubs((v) => !v)}
+            className={`flex items-center gap-1 rounded px-2 py-0.5 text-xs font-medium ${subs ? "bg-emerald-600/80 text-white" : "bg-neutral-700/60 text-neutral-300"} hover:brightness-110`}
+            title={subs ? "关闭字幕" : "开启字幕"}
+          >
+            <span className="rounded-sm border border-current px-1 text-[10px] leading-tight">CC</span>
+            字幕 {subs ? "开" : "关"}
+          </button>
+        )}
+      </div>
+      <button onClick={onSetCover} className={btn} title="设置封面">🖼 设置封面</button>
+    </div>
+  );
+}
+
+// Draw a video frame (at its current time) to a JPEG data URL, capped to maxW wide.
+function frameToDataUrl(v: HTMLVideoElement, maxW = 1280): string {
+  const vw = v.videoWidth || 1280, vh = v.videoHeight || 720;
+  const scale = Math.min(1, maxW / vw);
+  const cw = Math.max(1, Math.round(vw * scale)), ch = Math.max(1, Math.round(vh * scale));
+  const c = document.createElement("canvas");
+  c.width = cw; c.height = ch;
+  const ctx = c.getContext("2d");
+  if (!ctx) return "";
+  ctx.drawImage(v, 0, 0, cw, ch);
+  return c.toDataURL("image/jpeg", 0.82);
+}
+function seekAndCapture(v: HTMLVideoElement, t: number, maxW = 1280): Promise<string> {
+  return new Promise((resolve) => {
+    const done = () => { v.removeEventListener("seeked", done); resolve(frameToDataUrl(v, maxW)); };
+    v.addEventListener("seeked", done, { once: true });
+    try { v.currentTime = t; } catch { resolve(frameToDataUrl(v, maxW)); }
+  });
+}
+function CoverModal({
+  rec, mediaSrc, onClose, onSaved,
+}: {
+  rec: RecordFull;
+  mediaSrc: string;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const isVideo = rec.kind === "video";
+  const [tab, setTab] = useState<"rec" | "pick" | "upload">(isVideo ? "rec" : "upload");
+  const [recs, setRecs] = useState<string[]>([]);       // system-recommended thumbnails (dataUrls)
+  const [sel, setSel] = useState<string | null>(null);  // chosen dataUrl (recommend/pick/preset)
+  const [file, setFile] = useState<File | null>(null);  // chosen upload file
+  const [filePrev, setFilePrev] = useState<string>("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const capRef = useRef<HTMLVideoElement | null>(null); // hidden video for recommend capture
+  const pickRef = useRef<HTMLVideoElement | null>(null); // visible scrubber
+
+  // System-recommended frames: for video, capture a handful evenly spaced frames;
+  // for audio, offer preset gradient tiles (no frames to sample).
+  useEffect(() => {
+    if (!isVideo) return; // audio has no frames — only 上传/取消
+    let alive = true;
+    const v = document.createElement("video");
+    v.src = mediaSrc; v.muted = true; (v as any).playsInline = true; v.preload = "auto";
+    capRef.current = v;
+    const run = async () => {
+      await new Promise<void>((res) => {
+        if (v.readyState >= 1) return res();
+        v.addEventListener("loadedmetadata", () => res(), { once: true });
+      });
+      const dur = Number.isFinite(v.duration) ? v.duration : 0;
+      if (!dur) return;
+      const fracs = [0.05, 0.2, 0.4, 0.6, 0.8, 0.95];
+      const out: string[] = [];
+      for (const f of fracs) {
+        if (!alive) return;
+        const url = await seekAndCapture(v, dur * f, 960);
+        if (url) out.push(url);
+        if (alive) setRecs([...out]);
+      }
+    };
+    run().catch(() => {});
+    return () => { alive = false; try { v.src = ""; } catch { /* ignore */ } };
+  }, [isVideo, mediaSrc]);
+
+  const chosen = tab === "upload" ? (file ? filePrev : "") : sel || "";
+
+  async function save() {
+    setBusy(true); setErr("");
+    try {
+      if (tab === "upload") {
+        if (!file) throw new Error("请先选择图片");
+        await api.uploadCover(rec.id, file);
+      } else {
+        if (!sel) throw new Error("请先选择一张封面");
+        await api.setCoverDataUrl(rec.id, sel);
+      }
+      onSaved();
+    } catch (e: any) { setErr(String(e?.message || e)); setBusy(false); }
+  }
+  async function clear() {
+    setBusy(true); setErr("");
+    try { await api.deleteCover(rec.id); onSaved(); }
+    catch (e: any) { setErr(String(e?.message || e)); setBusy(false); }
+  }
+
+  const tabBtn = (id: "rec" | "pick" | "upload", label: string) => (
+    <button
+      onClick={() => setTab(id)}
+      className={`border-b-2 px-3 py-2 text-sm ${tab === id ? "border-emerald-500 text-emerald-400" : "border-transparent text-neutral-400 hover:text-neutral-200"}`}
+    >
+      {label}
+    </button>
+  );
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
+      <div className="w-full max-w-2xl rounded-xl border border-neutral-700 bg-neutral-900 shadow-xl" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between border-b border-neutral-800 px-4 py-3">
+          <div className="text-base font-medium text-neutral-100">设置封面</div>
+          <button className="rounded px-2 text-neutral-400 hover:bg-neutral-800" onClick={onClose}>✕</button>
+        </div>
+
+        <div className="flex gap-1 border-b border-neutral-800 px-2">
+          {isVideo && tabBtn("rec", "系统推荐")}
+          {isVideo && tabBtn("pick", "从视频中选")}
+          {tabBtn("upload", "上传封面")}
+        </div>
+
+        <div className="max-h-[60vh] overflow-y-auto p-4">
+          {tab === "rec" && (
+            <div className="grid grid-cols-3 gap-3">
+              {recs.length === 0 && <div className="col-span-3 py-8 text-center text-sm text-neutral-500">正在生成推荐封面…</div>}
+              {recs.map((u, i) => (
+                <button
+                  key={i}
+                  onClick={() => setSel(u)}
+                  className={`overflow-hidden rounded-lg border-2 ${sel === u ? "border-emerald-500" : "border-transparent hover:border-neutral-600"}`}
+                >
+                  <img src={u} className="aspect-video w-full object-cover" />
+                </button>
+              ))}
+            </div>
+          )}
+
+          {tab === "pick" && isVideo && (
+            <div className="flex flex-col gap-3">
+              <video ref={pickRef} src={mediaSrc} controls className="max-h-[42vh] w-full rounded-lg bg-black object-contain" />
+              <div className="flex items-center gap-2">
+                <button
+                  className="rounded bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:brightness-110"
+                  onClick={() => { const v = pickRef.current; if (v) setSel(frameToDataUrl(v, 1280)); }}
+                >
+                  截取当前画面
+                </button>
+                <span className="text-xs text-neutral-500">拖动播放条到想要的画面,再点「截取当前画面」。</span>
+              </div>
+              {sel && tab === "pick" && (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-neutral-400">已截取:</span>
+                  <img src={sel} className="h-16 rounded border border-emerald-500 object-cover" />
+                </div>
+              )}
+            </div>
+          )}
+
+          {tab === "upload" && (
+            <div className="flex flex-col items-start gap-3">
+              <label className="cursor-pointer rounded bg-neutral-700 px-3 py-1.5 text-sm text-neutral-100 hover:bg-neutral-600">
+                选择图片文件
+                <input
+                  type="file" accept="image/*" className="hidden"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0] || null;
+                    setFile(f);
+                    if (filePrev) URL.revokeObjectURL(filePrev);
+                    setFilePrev(f ? URL.createObjectURL(f) : "");
+                  }}
+                />
+              </label>
+              {filePrev && <img src={filePrev} className="max-h-[42vh] rounded-lg object-contain" />}
+            </div>
+          )}
+
+          {err && <div className="mt-3 rounded bg-red-950/60 px-3 py-2 text-sm text-red-300">{err}</div>}
+        </div>
+
+        <div className="flex items-center justify-between border-t border-neutral-800 px-4 py-3">
+          <button
+            className="rounded px-3 py-1.5 text-sm text-neutral-400 hover:bg-neutral-800 hover:text-red-400 disabled:opacity-40"
+            onClick={clear}
+            disabled={busy || !rec.hasCover}
+            title={rec.hasCover ? "移除封面,恢复默认" : "当前没有自定义封面"}
+          >
+            取消封面(恢复默认)
+          </button>
+          <div className="flex items-center gap-2">
+            <button className="rounded px-3 py-1.5 text-sm text-neutral-300 hover:bg-neutral-800" onClick={onClose} disabled={busy}>取消</button>
+            <button
+              className="rounded bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:brightness-110 disabled:opacity-40"
+              onClick={save}
+              disabled={busy || !chosen}
+            >
+              {busy ? "保存中…" : "确定"}
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1550,6 +1790,32 @@ function ExportButtons({ rec }: { rec: RecordFull }) {
   );
 }
 
+// A library-card thumbnail: the custom cover if set, else a default kind-based
+// tile (video film glyph / audio mic glyph), with a duration badge.
+function CoverThumb({ r, className }: { r: RecordSummary; className?: string }) {
+  const url = r.hasCover ? `/api/records/${r.id}/cover?v=${encodeURIComponent(r.coverVer || "")}` : "";
+  return (
+    <div
+      className={`relative shrink-0 overflow-hidden rounded-md bg-gradient-to-br ${
+        r.kind === "video" ? "from-neutral-700 to-neutral-800" : "from-indigo-600/50 to-sky-600/40"
+      } ${className || ""}`}
+    >
+      {url ? (
+        <img src={url} className="h-full w-full object-cover" />
+      ) : (
+        <div className="flex h-full w-full items-center justify-center opacity-80">
+          <span className="text-[1.6em]">{r.kind === "video" ? "🎬" : "🎙"}</span>
+        </div>
+      )}
+      {r.durationSec != null && (
+        <span className="absolute bottom-0.5 right-0.5 rounded bg-black/70 px-1 text-[10px] leading-tight text-white">
+          {fmtDur(r.durationSec)}
+        </span>
+      )}
+    </div>
+  );
+}
+
 // ===========================================================================
 // Library + shell
 // ===========================================================================
@@ -1569,6 +1835,12 @@ export default function App() {
   const [cardView, setCardView] = useState<"grid" | "list">(
     () => (localStorage.getItem("amx.cardview") === "list" ? "list" : "grid"),
   );
+  // Grid density: how many cards per row (大图3 / 中图4 / 小图5).
+  const [gridCols, setGridCols] = useState<3 | 4 | 5>(() => {
+    const n = parseInt(localStorage.getItem("amx.gridcols") || "3", 10);
+    return (n === 4 || n === 5 ? n : 3) as 3 | 4 | 5;
+  });
+  useEffect(() => { localStorage.setItem("amx.gridcols", String(gridCols)); }, [gridCols]);
   // Bumped whenever the background image changes so the <img> URL busts its cache.
   const [bgVer, setBgVer] = useState(0);
 
@@ -1793,6 +2065,20 @@ export default function App() {
                   ☰
                 </button>
               </div>
+              {cardView === "grid" && (
+                <div className="mr-1 inline-flex overflow-hidden rounded-md border border-neutral-700" title="每行卡片数(大/中/小图)">
+                  {([[3, "大图"], [4, "中图"], [5, "小图"]] as [3 | 4 | 5, string][]).map(([n, label]) => (
+                    <button
+                      key={n}
+                      className={`px-2 py-1.5 text-xs ${gridCols === n ? "bg-neutral-700 text-neutral-100" : "bg-neutral-900 text-neutral-400 hover:bg-neutral-800"}`}
+                      title={label}
+                      onClick={() => setGridCols(n)}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              )}
               <input
                 ref={fileRef}
                 type="file"
@@ -1813,19 +2099,19 @@ export default function App() {
               还没有内容。点击「{(config?.autoTranscribe ?? true) ? "上传并转录" : "上传音视频"}」上传一段音频或视频。
             </div>
           ) : cardView === "grid" ? (
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            <div className={`grid gap-3 sm:grid-cols-2 ${gridCols === 3 ? "lg:grid-cols-3" : gridCols === 4 ? "lg:grid-cols-4" : "lg:grid-cols-5"}`}>
               {records.map((r) => (
                 <div
                   key={r.id}
                   onClick={() => setSelectedId(r.id)}
                   className="card cursor-pointer text-left transition-colors hover:border-neutral-600"
                 >
-                  <div className="flex items-start gap-2">
-                    <span className="text-2xl">{r.kind === "video" ? "🎬" : "🎧"}</span>
+                  <CoverThumb r={r} className="aspect-video w-full text-4xl" />
+                  <div className="mt-2 flex items-start gap-2">
                     <div className="min-w-0 flex-1">
                       <div className="truncate font-medium text-neutral-100">{r.title}</div>
                       <div className="mt-0.5 text-xs text-neutral-500">
-                        {fmtDur(r.durationSec)} · {new Date(r.createdAt).toLocaleString()}
+                        {new Date(r.createdAt).toLocaleString()}
                       </div>
                     </div>
                     <button
@@ -1836,7 +2122,7 @@ export default function App() {
                       ✕
                     </button>
                   </div>
-                  <div className="mt-3 flex items-center gap-2">{statusActions(r)}</div>
+                  <div className="mt-2 flex items-center gap-2">{statusActions(r)}</div>
                 </div>
               ))}
             </div>
@@ -1848,7 +2134,7 @@ export default function App() {
                   onClick={() => setSelectedId(r.id)}
                   className={`flex cursor-pointer items-center gap-3 px-3 py-2.5 transition-colors hover:bg-neutral-800/40 ${i > 0 ? "border-t border-neutral-800/60" : ""}`}
                 >
-                  <span className="text-lg">{r.kind === "video" ? "🎬" : "🎧"}</span>
+                  <CoverThumb r={r} className="h-10 w-16 text-base" />
                   <div className="min-w-0 flex-[2]">
                     <div className="truncate text-sm font-medium text-neutral-100">{r.title}</div>
                     <div className="mt-0.5 text-xs text-neutral-500">

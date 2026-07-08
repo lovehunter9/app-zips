@@ -43,14 +43,17 @@ const UPLOAD_DIR = path.join(DATA_DIR, "uploads");
 const LIBRARY_DIR = path.join(DATA_DIR, "library");
 const CONFIG_PATH = path.join(DATA_DIR, "config.json");
 const BACKGROUND_PATH = path.join(DATA_DIR, "background.bin");
+const COVERS_DIR = path.join(DATA_DIR, "covers");
 const STATIC_DIR = path.join(__dirname, "web", "dist");
 
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 fs.mkdirSync(LIBRARY_DIR, { recursive: true });
+fs.mkdirSync(COVERS_DIR, { recursive: true });
 
 const app = express();
 app.disable("x-powered-by");
-app.use(express.json({ limit: "2mb" }));
+// 12mb so a captured video-frame cover (base64 JPEG) fits in the JSON body.
+app.use(express.json({ limit: "12mb" }));
 
 const round3 = (n) => Math.round(n * 1000) / 1000;
 const nowIso = () => new Date().toISOString();
@@ -183,6 +186,9 @@ function configReady(cfg) {
 function recPath(id) {
   return path.join(LIBRARY_DIR, id + ".json");
 }
+function coverPath(id) {
+  return path.join(COVERS_DIR, id + ".jpg");
+}
 function readRecord(id) {
   try {
     return JSON.parse(fs.readFileSync(recPath(id), "utf8"));
@@ -245,6 +251,8 @@ function recordSummary(rec) {
     translated: !!(rec.result?.segments || []).some((s) => s.translation),
     jobKind: rec.jobKind || "full",
     notices: Array.isArray(rec.notices) ? rec.notices : [],
+    hasCover: !!rec.cover,
+    coverVer: rec.cover?.at || "",
   };
 }
 
@@ -411,6 +419,7 @@ app.get("/api/models", async (req, res) => {
     }
     res.json({ modes });
   } catch (e) {
+    console.error("[/api/models] fetch error:", e?.message, "cause:", e?.cause?.code || e?.cause?.message || e?.cause, "url:", gwUrl(cfg, "/console/api/provider-models"));
     res.status(502).json({ error: String(e.message || e), modes: {} });
   }
 });
@@ -564,17 +573,66 @@ app.get("/api/records", (_req, res) => {
 app.get("/api/records/:id", (req, res) => {
   const rec = readRecord(req.params.id);
   if (!rec) return res.status(404).json({ error: "not found" });
-  res.json(rec);
+  // Expose the same cover flags the summary carries so the detail view knows a
+  // cover exists (raw record only has the internal `cover` object).
+  res.json({ ...rec, hasCover: !!rec.cover, coverVer: rec.cover?.at || "" });
 });
 
 app.delete("/api/records/:id", (req, res) => {
   const rec = readRecord(req.params.id);
   if (!rec) return res.status(404).json({ error: "not found" });
-  for (const p of [rec.mediaPath, rec.audioPath]) {
+  for (const p of [rec.mediaPath, rec.audioPath, coverPath(rec.id)]) {
     if (p) fs.rm(p, { force: true }, () => {});
   }
   fs.rm(recPath(rec.id), { force: true }, () => {});
   res.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// Cover image — a per-record thumbnail shown on the library cards. Accepts either
+// an uploaded image file (multipart "file") or a captured video frame as a base64
+// data URL (JSON { dataUrl }). Stored as covers/<id>.jpg; cleared via DELETE.
+// ---------------------------------------------------------------------------
+const coverUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
+
+app.post("/api/records/:id/cover", coverUpload.single("file"), (req, res) => {
+  const rec = readRecord(req.params.id);
+  if (!rec) return res.status(404).json({ error: "not found" });
+  let buf = null;
+  if (req.file) {
+    if (!(req.file.mimetype || "").startsWith("image/")) return res.status(400).json({ error: "仅支持图片文件" });
+    buf = req.file.buffer;
+  } else if (typeof req.body?.dataUrl === "string") {
+    const m = /^data:image\/[a-zA-Z0-9.+-]+;base64,(.+)$/.exec(req.body.dataUrl);
+    if (!m) return res.status(400).json({ error: "无效的图片数据" });
+    buf = Buffer.from(m[1], "base64");
+  }
+  if (!buf || !buf.length) return res.status(400).json({ error: "no image" });
+  try {
+    fs.writeFileSync(coverPath(rec.id), buf);
+    rec.cover = { at: nowIso() };
+    writeRecord(rec);
+    res.json(recordSummary(rec));
+  } catch (e) {
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
+app.get("/api/records/:id/cover", (req, res) => {
+  const p = coverPath(req.params.id);
+  if (!fs.existsSync(p)) return res.status(404).end();
+  res.type("image/jpeg");
+  res.setHeader("Cache-Control", "no-cache");
+  res.sendFile(path.resolve(p));
+});
+
+app.delete("/api/records/:id/cover", (req, res) => {
+  const rec = readRecord(req.params.id);
+  if (!rec) return res.status(404).json({ error: "not found" });
+  fs.rm(coverPath(rec.id), { force: true }, () => {});
+  delete rec.cover;
+  writeRecord(rec);
+  res.json(recordSummary(rec));
 });
 
 app.get("/api/records/:id/media", (req, res) => {
