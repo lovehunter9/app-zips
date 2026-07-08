@@ -18,6 +18,14 @@ spec:
       use, all in the app. If a required model is missing, the app tells you it cannot
       transcribe until it is configured.
   upgradeDescription: |
+    1.0.4: Long-audio whole-clip transcription fully fixed — forced alignment now
+    auto-splits into windows (avoids the gateway 413) and timestamps span the entire
+    clip (fixed the time collapse). Adds speech Enhancement (denoise), light/dark theme,
+    a custom background image, and grid/list library views; an in-UI processing log
+    (denoise / auto-split / fallback / translation events and failure reasons — no more
+    black box); EN→ZH punctuation auto-converted to full-width; a Feishu-Minutes-style
+    layout (full-width, larger video, denser transcript); translate-only jobs show just
+    the Translate step.
     1.0.3: Manual Stop for transcription/translation; search-hit highlight (distinct
     from the playback highlight) that spans word boundaries and also covers the
     translation; Chinese word/char rendering now packs tightly (no gaps between units);

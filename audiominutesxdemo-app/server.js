@@ -24,6 +24,14 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { setGlobalDispatcher, Agent } from "undici";
+
+// Node's global fetch (undici) defaults to a 5-minute headers/body timeout. A
+// whole-clip STT / enhance on an hour-long file can take longer than that to
+// return, which would abort the 整段转写 path and force the per-window fallback
+// (the browser DEMO has no such limit, so it "just worked" there). Disable the
+// idle/response timeouts so long single calls complete; keep a sane connect cap.
+setGlobalDispatcher(new Agent({ headersTimeout: 0, bodyTimeout: 0, connectTimeout: 30_000 }));
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -34,6 +42,7 @@ const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
 const UPLOAD_DIR = path.join(DATA_DIR, "uploads");
 const LIBRARY_DIR = path.join(DATA_DIR, "library");
 const CONFIG_PATH = path.join(DATA_DIR, "config.json");
+const BACKGROUND_PATH = path.join(DATA_DIR, "background.bin");
 const STATIC_DIR = path.join(__dirname, "web", "dist");
 
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
@@ -45,6 +54,61 @@ app.use(express.json({ limit: "2mb" }));
 
 const round3 = (n) => Math.round(n * 1000) / 1000;
 const nowIso = () => new Date().toISOString();
+
+// Normalize ASCII punctuation to full-width Chinese punctuation in a translated
+// string. Only converts a mark when it sits next to a CJK character (prev/next
+// non-space), so decimals ("3.14"), URLs and embedded English fragments keep their
+// half-width punctuation. Straight double quotes around CJK are converted to the
+// curly pair “…” by alternating open/close.
+const CJK_RE = /[\u3400-\u9FFF\u3040-\u30FF\uAC00-\uD7A3]/;
+function toChinesePunct(s) {
+  if (!s) return s;
+  const map = { ",": "，", ".": "。", "!": "！", "?": "？", ":": "：", ";": "；", "(": "（", ")": "）" };
+  const chars = Array.from(s);
+  const isCJK = (c) => !!c && CJK_RE.test(c);
+  let quoteOpen = true;
+  for (let i = 0; i < chars.length; i++) {
+    const c = chars[i];
+    let p = i - 1; while (p >= 0 && /\s/.test(chars[p])) p--;
+    let n = i + 1; while (n < chars.length && /\s/.test(chars[n])) n++;
+    const prev = chars[p], next = chars[n];
+    const nearCJK = isCJK(prev) || isCJK(next);
+    if (map[c] && nearCJK) {
+      chars[i] = map[c];
+    } else if (c === '"' && nearCJK) {
+      chars[i] = quoteOpen ? "\u201C" : "\u201D";
+      quoteOpen = !quoteOpen;
+    }
+  }
+  return chars.join("");
+}
+
+// Split `text` into `n` proportional parts, snapping each cut to a nearby sentence
+// end so a window's aligned text never begins/ends mid-sentence. Joining the parts
+// with "" reproduces the input exactly. Ported from audiostudioxdemo so long-audio
+// forced alignment can be chunked (each align call only sees its own audio's text).
+function splitTextN(text, n) {
+  if (n <= 1 || !text) return [text];
+  const len = text.length;
+  const parts = [];
+  let start = 0;
+  for (let i = 1; i < n; i++) {
+    const target = Math.round((len * i) / n);
+    const reach = Math.max(8, Math.round(len * 0.15));
+    let cut = -1;
+    for (let j = target; j < Math.min(len, target + reach); j++) {
+      if (/[。！？!?.]/.test(text[j])) { cut = j + 1; break; }
+    }
+    if (cut < 0) for (let j = target; j > Math.max(start + 1, target - reach); j--) {
+      if (/[。！？!?.]/.test(text[j])) { cut = j + 1; break; }
+    }
+    if (cut < 0 || cut <= start) cut = Math.max(start + 1, target);
+    parts.push(text.slice(start, cut));
+    start = cut;
+  }
+  parts.push(text.slice(start));
+  return parts;
+}
 
 // ---------------------------------------------------------------------------
 // Config (LLM Gateway creds + chosen models) — persisted at /data/config.json
@@ -73,6 +137,14 @@ const DEFAULT_CONFIG = {
   //     Chinese); or an explicit FLORES code (zho_Hans/eng_Latn/…).
   // Segments whose (resolved) source == target are skipped.
   translate: { enabled: false, model: "", sourceLang: "auto", targetLang: "auto" },
+  // Speech enhancement / denoise (global). Off by default; when enabled AND a
+  // enhance-mode model is chosen, the clip is denoised BEFORE diar/STT/align. The
+  // denoiser strips non-speech, so it hurts music-heavy clips (see UI hint).
+  enhance: { enabled: false, model: "" },
+  // Cosmetic background image (uploaded separately to /api/background). `enabled`
+  // shows it behind the UI; `dim` (0..80) darkens it for text legibility; `mime`
+  // is remembered so GET /api/background can serve it with the right type.
+  background: { enabled: false, dim: 40, mime: "" },
 };
 
 function loadConfig() {
@@ -83,6 +155,8 @@ function loadConfig() {
       ...raw,
       models: { ...DEFAULT_CONFIG.models, ...(raw.models || {}) },
       translate: { ...DEFAULT_CONFIG.translate, ...(raw.translate || {}) },
+      enhance: { ...DEFAULT_CONFIG.enhance, ...(raw.enhance || {}) },
+      background: { ...DEFAULT_CONFIG.background, ...(raw.background || {}) },
     };
   } catch {
     return { ...DEFAULT_CONFIG, models: { ...DEFAULT_CONFIG.models } };
@@ -120,6 +194,20 @@ function writeRecord(rec) {
   rec.updatedAt = nowIso();
   fs.writeFileSync(recPath(rec.id), JSON.stringify(rec));
 }
+// Append a user-visible processing event/notice to a record (persisted so the UI
+// can show WHAT happened — denoise fell back, alignment auto-split, a step failed —
+// instead of a black box). Always re-reads the fresh record so it doesn't clobber
+// progress written concurrently by setP. level: "info" | "warn" | "error".
+function addNotice(id, level, msg) {
+  const r = readRecord(id);
+  if (!r) return;
+  r.notices = Array.isArray(r.notices) ? r.notices : [];
+  r.notices.push({ at: nowIso(), level, msg });
+  if (r.notices.length > 60) r.notices = r.notices.slice(-60);
+  writeRecord(r);
+  const tag = level === "error" ? "ERROR" : level === "warn" ? "WARN" : "INFO";
+  console.log(`[${id}] (${tag}) ${msg}`);
+}
 function listRecords() {
   let files = [];
   try {
@@ -153,8 +241,10 @@ function recordSummary(rec) {
     createdAt: rec.createdAt,
     speakers: rec.result?.speakers?.length || 0,
     segments: rec.result?.segments?.length || 0,
-    options: rec.options || { language: "auto", segmentedStt: false, translate: false },
+    options: rec.options || { language: "auto", segmentedStt: false, translate: false, enhance: false },
     translated: !!(rec.result?.segments || []).some((s) => s.translation),
+    jobKind: rec.jobKind || "full",
+    notices: Array.isArray(rec.notices) ? rec.notices : [],
   };
 }
 
@@ -209,6 +299,24 @@ function sliceWav(input, start, end, output) {
   });
 }
 
+// Transcode any audio to a compact mono 16k mp3. The speech-enhancement endpoint
+// returns an uncompressed WAV (~32KB/s → >100MB for an hour), which then gets
+// rejected by the gateway's upload limit (413) on the whole-clip diarization/STT
+// calls. Re-encoding to mp3 keeps those uploads small while preserving the
+// enhanced audio for downstream steps (per-window align re-slices to WAV anyway).
+function transcodeMp3(input, output) {
+  return new Promise((resolve, reject) => {
+    const ff = spawn("ffmpeg", [
+      "-y", "-i", input,
+      "-ac", "1", "-ar", "16000", "-b:a", "64k", output,
+    ]);
+    let err = "";
+    ff.stderr.on("data", (d) => (err += d.toString()));
+    ff.on("close", (code) => (code === 0 ? resolve(output) : reject(new Error("ffmpeg transcode failed: " + err.slice(-1500)))));
+    ff.on("error", reject);
+  });
+}
+
 // ---------------------------------------------------------------------------
 // LLM Gateway calls (server-side; Bearer/Cookie from saved config)
 // ---------------------------------------------------------------------------
@@ -243,12 +351,31 @@ async function gwAudioOp(cfg, op, wavPath, model, extra = {}) {
   fd.append("file", new Blob([buf], { type: "audio/wav" }), "audio.wav");
   fd.append("model", model);
   for (const [k, v] of Object.entries(extra)) fd.append(k, String(v));
-  const r = await fetch(gwUrl(cfg, `/v1/audio/${op}`), { method: "POST", headers: gwHeaders(cfg), body: fd });
+  const r = await fetch(gwUrl(cfg, `/v1/audio/${op}`), { method: "POST", headers: gwHeaders(cfg), body: fd, signal: cfg._signal });
   const text = await r.text();
   let j;
   try { j = JSON.parse(text); } catch { j = text; }
   if (!r.ok) throw new Error(`${op} ${r.status}: ${String(text).slice(0, 300)}`);
   return j;
+}
+
+// Speech enhancement: POST the whole clip to /v1/audio/enhance and write the
+// returned WAV (binary, not JSON) to outPath. Used as a pre-processing step
+// before diar/STT/align. Throws on non-2xx so the caller can fall back to the
+// original audio.
+async function gwAudioEnhance(cfg, wavPath, model, outPath) {
+  const buf = fs.readFileSync(wavPath);
+  const fd = new FormData();
+  fd.append("file", new Blob([buf], { type: "audio/wav" }), "audio.wav");
+  fd.append("model", model);
+  const r = await fetch(gwUrl(cfg, "/v1/audio/enhance"), { method: "POST", headers: gwHeaders(cfg), body: fd, signal: cfg._signal });
+  if (!r.ok) {
+    const t = await r.text().catch(() => "");
+    throw new Error(`enhance ${r.status}: ${String(t).slice(0, 300)}`);
+  }
+  const ab = await r.arrayBuffer();
+  fs.writeFileSync(outPath, Buffer.from(ab));
+  return outPath;
 }
 
 // ---------------------------------------------------------------------------
@@ -318,9 +445,54 @@ app.put("/api/config", (req, res) => {
       sourceLang: (b.translate?.sourceLang ?? cur.translate?.sourceLang ?? "auto").toString().trim() || "auto",
       targetLang: (b.translate?.targetLang ?? cur.translate?.targetLang ?? "auto").toString().trim() || "auto",
     },
+    enhance: {
+      enabled: Boolean(b.enhance?.enabled ?? cur.enhance?.enabled ?? false),
+      model: (b.enhance?.model ?? cur.enhance?.model ?? "").toString(),
+    },
+    background: {
+      enabled: Boolean(b.background?.enabled ?? cur.background?.enabled ?? false),
+      dim: Math.max(0, Math.min(80, Number(b.background?.dim ?? cur.background?.dim ?? 40) || 0)),
+      mime: (b.background?.mime ?? cur.background?.mime ?? "").toString(),
+    },
   };
   saveConfig(next);
   res.json({ ...next, ...configReady(next) });
+});
+
+// ---------------------------------------------------------------------------
+// Background image (cosmetic) — single uploaded file at DATA_DIR/background.bin
+// ---------------------------------------------------------------------------
+const bgUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
+
+app.post("/api/background", bgUpload.single("file"), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "no file" });
+  const mime = req.file.mimetype || "";
+  if (!mime.startsWith("image/")) return res.status(400).json({ error: "仅支持图片文件" });
+  try {
+    fs.writeFileSync(BACKGROUND_PATH, req.file.buffer);
+    const cfg = loadConfig();
+    cfg.background = { ...cfg.background, enabled: true, mime };
+    saveConfig(cfg);
+    res.json({ ...cfg, ...configReady(cfg) });
+  } catch (e) {
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
+app.get("/api/background", (_req, res) => {
+  if (!fs.existsSync(BACKGROUND_PATH)) return res.status(404).end();
+  const cfg = loadConfig();
+  if (cfg.background?.mime) res.type(cfg.background.mime);
+  res.setHeader("Cache-Control", "no-cache");
+  res.sendFile(path.resolve(BACKGROUND_PATH));
+});
+
+app.delete("/api/background", (_req, res) => {
+  fs.rm(BACKGROUND_PATH, { force: true }, () => {});
+  const cfg = loadConfig();
+  cfg.background = { ...cfg.background, enabled: false, mime: "" };
+  saveConfig(cfg);
+  res.json({ ...cfg, ...configReady(cfg) });
 });
 
 // ---------------------------------------------------------------------------
@@ -369,6 +541,7 @@ app.post("/api/upload", upload.single("file"), async (req, res) => {
         language: cfg.language || "auto",
         segmentedStt: !!cfg.segmentedStt,
         translate: !!cfg.translate?.enabled,
+        enhance: !!cfg.enhance?.enabled,
       },
       createdAt: nowIso(),
       updatedAt: nowIso(),
@@ -431,6 +604,10 @@ let draining = false;      // true while a job is active (the serial gate)
 // calls we can't interrupt mid-flight), so this is a cooperative abort: the running
 // job checks it at each checkpoint (between windows / segments) and bails out.
 const cancelled = new Set();
+// id -> AbortController for the job's in-flight gateway fetches, so a stop can
+// abort a long single call (whole-clip STT/enhance) immediately instead of
+// waiting for it to return at the next checkpoint.
+const jobAbort = new Map();
 
 class CancelError extends Error { constructor() { super("__cancelled__"); this.cancelled = true; } }
 // Throw at a checkpoint if this job was asked to stop.
@@ -768,6 +945,7 @@ async function gwTranslate(cfg, model, text, target, source) {
     method: "POST",
     headers: { ...gwHeaders(cfg), "content-type": "application/json" },
     body: JSON.stringify(body),
+    signal: cfg._signal,
   });
   const t = await r.text();
   let j;
@@ -815,7 +993,7 @@ async function translateSegments(cfg, segments, setP, id) {
   const cfgSource = cfg.translate?.sourceLang || "auto";
   const cfgTarget = cfg.translate?.targetLang || "auto";
   const total = segments.length;
-  let done = 0, translated = 0;
+  let done = 0, translated = 0, failed = 0, lastErr = "";
   if (setP) setP(95, "翻译", 0, total);
   await mapLimit(segments, 4, async (seg) => {
     // Checkpoint OUTSIDE the per-segment try/catch below so a stop actually
@@ -829,7 +1007,10 @@ async function translateSegments(cfg, segments, setP, id) {
         const src = cfgSource !== "auto" ? cfgSource : detectFlores(text);
         const target = resolveTarget(cfgTarget, src);
         if (src !== target) {
-          const tr = (await gwTranslate(cfg, model, text, target, src)).trim();
+          let tr = (await gwTranslate(cfg, model, text, target, src)).trim();
+          // Chinese target: convert the model's half-width punctuation (,.!? etc.)
+          // to full-width Chinese punctuation so the译文 reads naturally.
+          if (tr && /^zho/i.test(target)) tr = toChinesePunct(tr);
           if (tr) {
             seg.translation = tr;
             seg.twords = evenTimedWords(tr, seg.start, seg.end);
@@ -841,12 +1022,21 @@ async function translateSegments(cfg, segments, setP, id) {
         } else {
           delete seg.translation; delete seg.twords; delete seg.translateTo;
         }
-      } catch { /* leave this segment untranslated; the run still succeeds */ }
+      } catch (e) {
+        // leave this segment untranslated; the run still succeeds. Remember the
+        // failure so the caller can surface a single aggregate notice.
+        failed++;
+        if (!(e && e.cancelled)) lastErr = (e?.message || String(e));
+        else throw e;
+      }
     }
     done++;
     if (setP) setP(95 + Math.round((5 * done) / total), "翻译", done, total);
   });
-  return { translated };
+  if (id && failed > 0) {
+    addNotice(id, "warn", `翻译有 ${failed}/${total} 段未成功（该部分保留原文）。${lastErr ? "示例错误：" + lastErr : ""}`);
+  }
+  return { translated, failed };
 }
 
 // Translate-only job for an ALREADY-transcribed record (补翻译). Reuses the serial
@@ -870,6 +1060,10 @@ async function runTranslateJob(id) {
     return;
   }
   running.add(id);
+  cancelled.delete(id); // clear any stale stop flag from a prior desync/cancel
+  const ac = new AbortController();
+  jobAbort.set(id, ac);
+  cfg._signal = ac.signal; // gateway fetches abort immediately on stop
   const startedAt = nowIso();
   const setP = (progress, phase, stepDone = 0, stepTotal = 0) => {
     const r = readRecord(id);
@@ -887,7 +1081,8 @@ async function runTranslateJob(id) {
     ckCancel(id);
     const out = readRecord(id);
     const segments = out.result.segments;
-    await translateSegments(cfg, segments, setP, id);
+    const tr = await translateSegments(cfg, segments, setP, id);
+    addNotice(id, "info", `补翻译完成：${tr.translated}/${segments.length} 段（模型 ${cfg.translate.model}）。`);
     out.result.segments = segments;
     out.options = { ...(out.options || {}), translate: true };
     out.status = "done";
@@ -896,9 +1091,10 @@ async function runTranslateJob(id) {
     out.error = "";
     writeRecord(out);
   } catch (e) {
-    if (e && e.cancelled) {
-      // Stopped by the user: this record already had a transcript, so just
-      // restore its 已完成 state (keep whatever partial译文 was written).
+    if ((e && e.cancelled) || cancelled.has(id)) {
+      // Stopped by the user (CancelError OR an aborted in-flight fetch): this
+      // record already had a transcript, so just restore its 已完成 state (keep
+      // whatever partial译文 was written).
       revertStopped(id, rec);
     } else {
       const out = readRecord(id) || rec;
@@ -909,6 +1105,7 @@ async function runTranslateJob(id) {
   } finally {
     running.delete(id);
     cancelled.delete(id);
+    jobAbort.delete(id);
   }
 }
 
@@ -932,6 +1129,11 @@ async function runJob(id) {
     return;
   }
   running.add(id);
+  cancelled.delete(id); // clear any stale stop flag from a prior desync/cancel
+  const ac = new AbortController();
+  jobAbort.set(id, ac);
+  cfg._signal = ac.signal; // gateway fetches abort immediately on stop
+  console.log(`[${id}] 开始转写 "${rec.title}" 时长=${rec.durationSec ?? "?"}s options=${JSON.stringify(rec.options || {})} models=${JSON.stringify(cfg.models)} enhanceModel=${cfg.enhance?.model || "-"}`);
   const startedAt = nowIso();
   // Persist progress with a granular step counter so the UI can show
   // "阶段 · 第 done/total" and an elapsed timer (see setP calls below).
@@ -950,11 +1152,39 @@ async function runJob(id) {
   const tmp = [];
   try {
     ckCancel(id);
+    // 0) optional speech enhancement (denoise) as a PRE-processing step. The
+    // enhanced clip becomes the working audio for diar/STT/align; playback still
+    // uses the original media. On failure we silently keep the original audio.
+    let workAudio = rec.audioPath;
+    if (rec.options?.enhance && cfg.enhance?.model) {
+      try {
+        setP(2, "降噪增强（整段处理中）");
+        const enhPath = path.join(UPLOAD_DIR, `${id}-enh.wav`);
+        tmp.push(enhPath);
+        await gwAudioEnhance(cfg, rec.audioPath, cfg.enhance.model, enhPath);
+        ckCancel(id);
+        // The enhancer returns raw WAV; compress to mp3 so the whole-clip diar/STT
+        // uploads stay under the gateway limit (a raw hour-long WAV → 413).
+        const enhMp3 = path.join(UPLOAD_DIR, `${id}-enh.mp3`);
+        tmp.push(enhMp3);
+        await transcodeMp3(enhPath, enhMp3);
+        workAudio = enhMp3;
+        ckCancel(id);
+        addNotice(id, "info", `降噪增强完成（模型 ${cfg.enhance.model}），后续转写基于增强后音频。`);
+      } catch (e) {
+        // a stop during enhance (CancelError or aborted fetch) must bubble up, not
+        // silently fall through to diar
+        if ((e && e.cancelled) || cancelled.has(id)) throw e;
+        addNotice(id, "warn", `降噪增强失败，已改用原始音频转写。原因：${e?.message || e}`);
+        workAudio = rec.audioPath;
+      }
+    }
     setP(3, "说话人分离（整段分析中）");
     // 1) diarization over the whole clip
-    const diar = await gwAudioOp(cfg, "diarization", rec.audioPath, cfg.models.diar);
+    const diar = await gwAudioOp(cfg, "diarization", workAudio, cfg.models.diar);
     ckCancel(id);
     const diarSegs = Array.isArray(diar?.segments) ? diar.segments : [];
+    console.log(`[${id}] 说话人分离完成: ${diarSegs.length} 段  workAudio=${path.basename(workAudio)}`);
 
     // 2) transcription strategy (integral vs segmented). Both feed the same
     //    fuse/sort tail below via segsOut. Forced alignment needs a language NAME
@@ -984,17 +1214,23 @@ async function runJob(id) {
       const slicePath = path.join(UPLOAD_DIR, `${id}-${tag}.wav`);
       tmp.push(slicePath);
       try {
-        await sliceWav(rec.audioPath, aStart, aEnd, slicePath);
+        await sliceWav(workAudio, aStart, aEnd, slicePath);
         const langName = resolveAlignLang(cfg.language, text);
         if (!language) language = langName;
         const al = await gwAudioOp(cfg, "align", slicePath, cfg.models.align, { text, language: langName });
         if (al?.language) language = al.language;
-        return (Array.isArray(al?.units) ? al.units : []).map((u) => ({
+        const units = (Array.isArray(al?.units) ? al.units : []).map((u) => ({
           text: u.text ?? u.word ?? u.token ?? "",
           start: round3(Number(u.start ?? u.start_time ?? 0) + aStart),
           end: round3(Number(u.end ?? u.end_time ?? 0) + aStart),
         }));
-      } catch {
+        if (tag === "wa_full") {
+          console.log(`[${id}] 对齐(${tag}) 返回 ${units.length} 个单元 · 切片时长≈${round3(aEnd - aStart)}s · text长度=${text.length} · lang=${langName} · resp类型=${al && typeof al === "object" ? "keys[" + Object.keys(al).join(",") + "]" : typeof al}`);
+        }
+        return units;
+      } catch (e) {
+        if (e && e.cancelled) throw e;
+        console.error(`[${id}] 对齐(${tag})调用失败: ${e?.message || e}`);
         return [];
       }
     };
@@ -1003,15 +1239,18 @@ async function runJob(id) {
     // already coalesces tiny same-speaker fragments into ~30s windows, so this is
     // a handful of requests, not one-per-diar-segment. Used directly by 分段转写
     // and as the robust fallback for 整段转写.
-    const runWindows = async () => {
+    // `phase` distinguishes the user-chosen 分段转写 from the 整段转写 long-audio
+    // fallback (which reuses this same per-window machinery) so the UI doesn't
+    // mislead the user into thinking 分段 was turned on when it wasn't.
+    const runWindows = async (phase = "分段转写与词级对齐") => {
       const windows = buildWindows(diarSegs, rec.durationSec);
-      setP(20, "分段转写与词级对齐", 0, windows.length);
+      setP(20, phase, 0, windows.length);
       let done = 0;
       return mapLimit(windows, 2, async (w, idx) => {
         ckCancel(id);
         const slicePath = path.join(UPLOAD_DIR, `${id}-w${idx}.wav`);
         tmp.push(slicePath);
-        await sliceWav(rec.audioPath, w.start, w.end, slicePath);
+        await sliceWav(workAudio, w.start, w.end, slicePath);
         let text = "";
         try {
           const stt = await gwAudioOp(cfg, "transcriptions", slicePath, cfg.models.stt, { response_format: "json" });
@@ -1021,7 +1260,7 @@ async function runJob(id) {
         const units = await alignSlice(w.start, w.end, text, `wa${idx}`);
         const words = finalizeWords(wordsFromRef(text, units), w.start, w.end);
         done++;
-        setP(20 + Math.round((70 * done) / windows.length), "分段转写与词级对齐", done, windows.length);
+        setP(20 + Math.round((70 * done) / windows.length), phase, done, windows.length);
         return { start: round3(w.start), end: round3(w.end), speaker: w.speaker, text, words };
       });
     };
@@ -1039,20 +1278,77 @@ async function runJob(id) {
       try {
         ckCancel(id);
         setP(20, "整段转写");
-        const stt = await gwAudioOp(cfg, "transcriptions", rec.audioPath, cfg.models.stt, { response_format: "json" });
+        console.log(`[${id}] 整段转写：单次 STT 整段音频 (${path.basename(workAudio)}, 时长≈${rec.durationSec ?? "?"}s, model=${cfg.models.stt})`);
+        const t0 = Date.now();
+        const stt = await gwAudioOp(cfg, "transcriptions", workAudio, cfg.models.stt, { response_format: "json" });
+        console.log(`[${id}] 整段 STT 返回，用时 ${((Date.now() - t0) / 1000).toFixed(1)}s`);
         const fullText = (typeof stt === "string" ? stt : stt?.text ?? "").trim();
         if (!fullText) throw new Error("STT 无文本");
         ckCancel(id);
 
         setP(55, "词级对齐");
-        const units = await alignSlice(0, rec.durationSec || 0, fullText, "wa_full");
+        // Forced alignment respects the aligner's native ~300s / upload-size cap and
+        // handles length on OUR side (the audiostudioxdemo strategy): a single call
+        // only when short enough, otherwise AUTO-SPLIT the audio into ≤290s windows
+        // and split the full STT text proportionally so each call sees only its own
+        // window's text (never overfed) and each uploaded WAV stays small (no 413).
+        const ALIGN_WIN_S = 290;
+        const ALIGN_CONCURRENCY = 2;
+        const alignTotal = rec.durationSec || 0;
+        let units, map;
+        if (alignTotal <= ALIGN_WIN_S + 5) {
+          units = await alignSlice(0, alignTotal || ALIGN_WIN_S, fullText, "wa_full");
+          map = mapUnitsToRef(units, fullText);
+        } else {
+          const nWin = Math.ceil(alignTotal / ALIGN_WIN_S);
+          const winLen = alignTotal / nWin;
+          const parts = splitTextN(fullText, nWin);
+          // Char offset of each part inside fullText (parts concatenate to fullText
+          // exactly), so each window's units can be char-mapped LOCALLY against its
+          // own text slice and then shifted into fullText coordinates. This is what
+          // keeps one window's text drift from freezing the global cursor (which
+          // otherwise pins every later char to a single time).
+          const partStart = [];
+          { let acc = 0; for (let i = 0; i < nWin; i++) { partStart.push(acc); acc += (parts[i] || "").length; } }
+          console.log(`[${id}] 词级对齐：整段${Math.round(alignTotal)}s 超过单窗上限，自动分 ${nWin} 窗(≤${ALIGN_WIN_S}s/窗)·并发${ALIGN_CONCURRENCY} 对齐`);
+          addNotice(id, "info", `整段音频较长（约 ${Math.round(alignTotal)} 秒），词级对齐已自动分为 ${nWin} 个窗口（每窗 ≤${ALIGN_WIN_S} 秒）分别处理。`);
+          const resU = new Array(nWin), resM = new Array(nWin);
+          let next = 0, okWin = 0, doneWin = 0;
+          const worker = async () => {
+            while (true) {
+              const i = next++;
+              if (i >= nWin) break;
+              ckCancel(id);
+              const a = i * winLen;
+              const b = Math.min(alignTotal, (i + 1) * winLen);
+              const part = parts[i] || "";
+              const u = await alignSlice(a, b, part, `wa_${i}`);
+              // Map THIS window's units against ONLY its own text slice, then shift
+              // char positions into fullText coordinates by the part's offset.
+              const localMap = mapUnitsToRef(u, part);
+              resM[i] = localMap.map((m) => ({ ci: partStart[i] + m.ci, cj: partStart[i] + m.cj }));
+              if (u.length) okWin++;
+              resU[i] = u;
+              doneWin++;
+              setP(55 + Math.round((30 * doneWin) / nWin), "词级对齐");
+            }
+          };
+          await Promise.all(
+            Array.from({ length: Math.min(ALIGN_CONCURRENCY, nWin) }, worker)
+          );
+          units = resU.filter(Boolean).flat();
+          map = resM.filter(Boolean).flat();
+          console.log(`[${id}] 词级对齐完成：${okWin}/${nWin} 窗成功，共 ${units.length} 个单元`);
+          if (okWin < nWin) {
+            addNotice(id, "warn", `词级对齐有 ${nWin - okWin}/${nWin} 个窗口未成功，这部分文字将退化为句级时间（仍可点击定位，但逐字高亮可能不精确）。`);
+          }
+        }
         if (!units.length) throw new Error("对齐无结果");
 
         setP(85, "整理结果");
         // char<->time over the punctuated reference, then cut along diar windows
         // (boundaries snapped to punctuation) and re-wrap into readable, timed,
         // punctuation-preserving lines. Reuses the audiostudioxdemo algorithm.
-        const map = mapUnitsToRef(units, fullText);
         const timeAtChar = buildCharToTime(units, map);
         const timeToChar = (t) => {
           for (let i = 0; i < units.length; i++) {
@@ -1105,7 +1401,14 @@ async function runJob(id) {
           segsOut = [{ start: 0, end: round3(rec.durationSec || 0), speaker: pickSpeaker(0, rec.durationSec || 0), text: fullText, words }];
         }
       } catch (e) {
-        segsOut = await runWindows();
+        // A stop must abort, not fall into the fallback path.
+        if ((e && e.cancelled) || cancelled.has(id)) throw e;
+        // 整段 STT/align failed — fall back to the per-window path so a result is
+        // still produced. Label it clearly as a fallback so the user doesn't think
+        // 分段转写 was enabled. LOG the real reason (gateway status/body, etc.).
+        console.error(`[${id}] 整段转写失败，回退逐段转写与对齐 — 原因: ${e && e.stack ? e.stack : (e?.message || e)}`);
+        addNotice(id, "warn", `整段转写失败，已自动回退为逐段转写与对齐（结果仍可用）。原因：${e?.message || e}`);
+        segsOut = await runWindows("整段转写失败，回退逐段转写与对齐");
       }
     }
 
@@ -1119,7 +1422,13 @@ async function runJob(id) {
     // If the user hit stop, skip translating and keep the transcript we just built
     // (translate is the last 5% — no reason to throw the transcript away).
     if (rec.options?.translate && cfg.translate?.model && !cancelled.has(id)) {
-      try { await translateSegments(cfg, segments, setP, id); } catch { /* keep transcript */ }
+      try {
+        const tr = await translateSegments(cfg, segments, setP, id);
+        addNotice(id, "info", `翻译完成：${tr.translated}/${segments.length} 段（模型 ${cfg.translate.model}）。`);
+      } catch (e) {
+        if ((e && e.cancelled) || cancelled.has(id)) throw e;
+        addNotice(id, "warn", `翻译过程中出错，已保留转写结果。原因：${e?.message || e}`);
+      }
     }
 
     const out = readRecord(id);
@@ -1130,11 +1439,13 @@ async function runJob(id) {
     out.error = "";
     writeRecord(out);
   } catch (e) {
-    if (e && e.cancelled) {
-      // Stopped mid-transcribe: no full result was written, so drop back to待转录
-      // (or keep a prior transcript if this was a 重新转写 over an existing one).
+    if ((e && e.cancelled) || cancelled.has(id)) {
+      // Stopped mid-transcribe (CancelError OR an aborted in-flight fetch): no
+      // full result was written, so drop back to待转录 (or keep a prior transcript
+      // if this was a 重新转写 over an existing one).
       revertStopped(id, rec);
     } else {
+      addNotice(id, "error", `转写失败：${e?.message || e}`);
       const out = readRecord(id) || rec;
       out.status = "error";
       out.error = String(e.message || e);
@@ -1143,6 +1454,7 @@ async function runJob(id) {
   } finally {
     running.delete(id);
     cancelled.delete(id);
+    jobAbort.delete(id);
     for (const t of tmp) fs.rm(t, { force: true }, () => {});
   }
 }
@@ -1168,11 +1480,14 @@ app.post("/api/records/:id/transcribe", (req, res) => {
     language: (b.language ?? cfg.language ?? "auto").toString().trim() || "auto",
     segmentedStt: b.segmentedStt !== undefined ? !!b.segmentedStt : !!cfg.segmentedStt,
     translate: b.translate !== undefined ? !!b.translate : !!cfg.translate?.enabled,
+    enhance: b.enhance !== undefined ? !!b.enhance : !!cfg.enhance?.enabled,
   };
   rec.status = "processing";
   rec.progress = 1;
   rec.phase = "排队中";
   rec.error = "";
+  rec.jobKind = "full"; // full transcription pipeline (drives the processing step list)
+  rec.notices = []; // fresh run → fresh event log
   writeRecord(rec);
   enqueueJob(rec.id); // queued; the serial pump runs it when its turn comes
   res.json({ ok: true, queued: true });
@@ -1195,6 +1510,7 @@ app.post("/api/records/:id/translate", (req, res) => {
   rec.progress = 1;
   rec.phase = "排队中（翻译）";
   rec.error = "";
+  rec.jobKind = "translate"; // translate-only → processing view shows just 翻译
   writeRecord(rec);
   enqueueJob(rec.id, "translate");
   res.json({ ok: true, queued: true });
@@ -1219,10 +1535,22 @@ app.post("/api/records/:id/cancel", (req, res) => {
   }
   if (running.has(id)) {
     cancelled.add(id);
+    jobAbort.get(id)?.abort(); // abort any in-flight gateway call → near-instant stop
     const r = readRecord(id) || rec;
     r.phase = "停止中…";
     writeRecord(r);
     return res.json({ ok: true, stopping: true });
+  }
+  // Not tracked as queued or running, yet the record still says 处理中. This can
+  // happen after a process restart (the in-memory running/queue sets are empty
+  // but a boot re-queue is mid-flight) or any tracking desync. Flag cancellation
+  // regardless — ckCancel keys off `cancelled`, so any live job WILL bail at its
+  // next checkpoint — and revert the record now so the UI unsticks immediately.
+  if (rec.status === "processing") {
+    cancelled.add(id);
+    jobAbort.get(id)?.abort();
+    revertStopped(id, rec);
+    return res.json({ ok: true, stopped: "stale" });
   }
   return res.json({ ok: true, noop: true }); // already finished / not active
 });

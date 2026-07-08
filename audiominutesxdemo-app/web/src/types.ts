@@ -26,10 +26,20 @@ export interface RecordResult {
 
 export type RecordStatus = "uploaded" | "processing" | "done" | "error";
 
+// A user-visible processing event/notice attached to a record so the UI can show
+// WHAT happened during a run (denoise fell back, alignment auto-split, a step
+// failed) instead of a black box.
+export interface Notice {
+  at: string;
+  level: "info" | "warn" | "error";
+  msg: string;
+}
+
 export interface RecordOptions {
   language: string;
   segmentedStt: boolean;
   translate?: boolean;
+  enhance?: boolean;
 }
 
 export interface RecordSummary {
@@ -50,6 +60,8 @@ export interface RecordSummary {
   segments: number;
   options?: RecordOptions;
   translated?: boolean;
+  jobKind?: "full" | "translate";
+  notices?: Notice[];
 }
 
 export interface RecordFull extends RecordSummary {
@@ -70,6 +82,17 @@ export interface TranslateConfig {
   targetLang: string; // "auto" (smart zh<->en) or a FLORES code (zho_Hans/eng_Latn/…)
 }
 
+export interface EnhanceConfig {
+  enabled: boolean;
+  model: string;
+}
+
+export interface BackgroundConfig {
+  enabled: boolean;
+  dim: number; // 0..80 darken overlay
+  mime?: string;
+}
+
 export interface GatewayConfig {
   base: string;
   key: string;
@@ -80,6 +103,8 @@ export interface GatewayConfig {
   language: string;
   autoTranscribe: boolean;
   translate: TranslateConfig;
+  enhance: EnhanceConfig;
+  background: BackgroundConfig;
   ready: boolean;
   missing: string[];
 }

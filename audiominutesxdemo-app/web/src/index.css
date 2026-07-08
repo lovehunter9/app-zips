@@ -28,3 +28,52 @@ body {
     @apply rounded-lg border border-neutral-800 bg-neutral-900/50 p-4;
   }
 }
+
+/* ==========================================================================
+   Light theme. The app is authored in dark utilities (bg/text/border-neutral-*)
+   plus accent colors (emerald/sky/amber/red) that read fine on both themes. To
+   avoid touching hundreds of classNames, we remap ONLY the neutral greys (and
+   the component classes) when <html> carries `.light`. Selector `html.light .x`
+   outranks a bare `.x` utility, so no !important is needed. Panels stay
+   translucent so an uploaded background image shows through in either theme.
+   ========================================================================== */
+html.light { color-scheme: light; }
+html.light body { background: #f5f5f4; color: #1c1917; }
+
+html.light .input { background: #ffffff; border-color: #d4d4d4; color: #171717; }
+html.light .input:focus { border-color: #a3a3a3; }
+html.light .btn-ghost { background: #e5e5e5; color: #262626; }
+html.light .btn-ghost:hover { background: #d4d4d4; }
+html.light .card { background: rgba(255,255,255,0.72); border-color: #e5e5e5; }
+
+/* text greys */
+html.light .text-neutral-100 { color: #171717; }
+html.light .text-neutral-200 { color: #262626; }
+html.light .text-neutral-300 { color: #404040; }
+html.light .text-neutral-400 { color: #525252; }
+html.light .text-neutral-500 { color: #737373; }
+html.light .text-neutral-600 { color: #a3a3a3; }
+
+/* background greys */
+html.light .bg-neutral-900\/80 { background-color: rgba(255,255,255,0.88); }
+html.light .bg-neutral-900\/50 { background-color: rgba(255,255,255,0.72); }
+html.light .bg-neutral-800 { background-color: #e5e5e5; }
+html.light .bg-neutral-800\/40 { background-color: rgba(0,0,0,0.05); }
+html.light .bg-neutral-700 { background-color: #d4d4d4; }
+html.light .bg-neutral-700\/60 { background-color: rgba(0,0,0,0.08); }
+html.light .bg-neutral-700\/50 { background-color: rgba(0,0,0,0.06); }
+
+/* borders */
+html.light .border-neutral-800 { border-color: #e5e5e5; }
+html.light .border-neutral-800\/60 { border-color: #ececec; }
+html.light .border-neutral-700 { border-color: #d4d4d4; }
+html.light .border-neutral-600 { border-color: #a3a3a3; }
+
+/* hover states */
+html.light .hover\:bg-neutral-800:hover { background-color: #e5e5e5; }
+html.light .hover\:bg-neutral-700:hover { background-color: #d4d4d4; }
+html.light .hover\:bg-neutral-700\/60:hover { background-color: rgba(0,0,0,0.08); }
+html.light .hover\:bg-neutral-700\/50:hover { background-color: rgba(0,0,0,0.06); }
+html.light .hover\:text-neutral-200:hover { color: #262626; }
+html.light .hover\:text-neutral-300:hover { color: #404040; }
+html.light .hover\:border-neutral-600:hover { border-color: #a3a3a3; }

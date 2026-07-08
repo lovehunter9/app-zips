@@ -6,8 +6,8 @@
 //   • Settings: LLM Gateway address + which STT/align/diar models to use (chosen
 //     from what the gateway actually serves). Missing a required model => the app
 //     tells you it cannot transcribe.
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { GatewayConfig, ModelOpt, RecordFull, RecordSummary, Segment, Word } from "./types";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import type { GatewayConfig, ModelOpt, Notice, RecordFull, RecordSummary, Segment, Word } from "./types";
 import * as api from "./api";
 import { ensureJieba, jiebaCut, jiebaState } from "./jieba";
 
@@ -82,6 +82,43 @@ const needsSpaceBefore = (prev: Word, cur: Word) => {
   if (/['’]$/.test(a) || /^['’]/.test(b)) return false;
   return true;
 };
+
+// Subtitle cue: a SHORT clause (one line of on-screen subtitle) with its own time
+// window. Feishu-Minutes shows only the currently-spoken clause, never a whole
+// speaker paragraph — so we re-split the word stream on clause punctuation (and a
+// hard width cap for run-ons), independent of how the transcript groups segments.
+type SubCue = { start: number; end: number; text: string };
+const CLAUSE_END = /[，。！？；、,.!?;:…]$/;
+// Display width: CJK glyphs are ~2x a latin char. ~40 ≈ 20 Chinese chars / line.
+const cueWidth = (s: string) => {
+  let w = 0;
+  for (const ch of s) w += isCJKChar(ch) ? 2 : 1;
+  return w;
+};
+function buildCues(words: { segIdx: number; text: string; start: number; end: number }[]): SubCue[] {
+  const cues: SubCue[] = [];
+  let cur: { segIdx: number; text: string; start: number; end: number }[] = [];
+  const flush = () => {
+    if (!cur.length) return;
+    let text = "";
+    for (let i = 0; i < cur.length; i++) {
+      if (i > 0 && needsSpaceBefore(cur[i - 1], cur[i])) text += " ";
+      text += cur[i].text;
+    }
+    text = text.trim();
+    if (text) cues.push({ start: cur[0].start, end: cur[cur.length - 1].end, text });
+    cur = [];
+  };
+  for (const w of words) {
+    if (cur.length && w.segIdx !== cur[cur.length - 1].segIdx) flush(); // speaker turn
+    cur.push(w);
+    const t = w.text || "";
+    const width = cueWidth(cur.map((x) => x.text).join(""));
+    if (CLAUSE_END.test(t) || width >= 40) flush();
+  }
+  flush();
+  return cues;
+}
 
 // Per-character search match, computed OVER THE WHOLE LINE (not per word) so a
 // query can span word boundaries (e.g. "我们讨" over 我们|讨论, or "a fresh" over
@@ -209,10 +246,10 @@ function SpeakerChip({ spk }: { spk: string }) {
   const c = spkColor(spk);
   return (
     <span
-      className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded px-1.5 py-0.5 text-[11px] font-medium leading-none"
+      className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded px-1 py-0.5 text-[10px] font-medium leading-none"
       style={{ color: c, backgroundColor: c + "22", border: `1px solid ${c}55` }}
     >
-      <span className="inline-block h-2 w-2 rounded-full" style={{ backgroundColor: c }} />
+      <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ backgroundColor: c }} />
       {spkLabel(spk)}
     </span>
   );
@@ -239,7 +276,109 @@ function fmtElapsed(ms: number): string {
 // stage's step counter, and a live elapsed timer (the diarization stage is a
 // single long gateway call with no sub-progress, so the timer reassures the
 // user it is still working).
-const PIPELINE = ["说话人分离", "转写与词级对齐", "整理结果"];
+// Processing event/notice log — surfaces WHAT happened during a run (denoise fell
+// back, alignment auto-split, a step failed) so the pipeline isn't a black box.
+function NoticeList({ notices, className = "" }: { notices?: Notice[]; className?: string }) {
+  if (!notices || notices.length === 0) return null;
+  const box = (l: string) =>
+    l === "error"
+      ? "border-red-900/60 bg-red-950/30 text-red-200"
+      : l === "warn"
+      ? "border-amber-900/60 bg-amber-950/30 text-amber-100"
+      : "border-neutral-800 bg-neutral-900/50 text-neutral-300";
+  const dot = (l: string) =>
+    l === "error" ? "bg-red-600 text-white" : l === "warn" ? "bg-amber-500 text-black" : "bg-neutral-700 text-neutral-200";
+  const sym = (l: string) => (l === "error" ? "✕" : l === "warn" ? "!" : "i");
+  const clock = (at: string) => {
+    const d = new Date(at);
+    return Number.isNaN(d.getTime()) ? "" : d.toLocaleTimeString();
+  };
+  return (
+    <div className={`space-y-1.5 ${className}`}>
+      {notices.map((n, i) => (
+        <div key={i} className={`flex items-start gap-2 rounded-lg border px-3 py-1.5 text-xs ${box(n.level)}`}>
+          <span className={`mt-px flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[10px] font-bold ${dot(n.level)}`}>
+            {sym(n.level)}
+          </span>
+          <span className="flex-1 break-words leading-snug">{n.msg}</span>
+          <span className="shrink-0 tabular-nums text-[10px] opacity-50">{clock(n.at)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Draggable left/right splitter (Feishu-Minutes style): the left pane has an
+// explicit, user-resizable width (persisted); the right pane fills the rest. Drag
+// the thin bar between them to rebalance the player vs. transcript panes.
+function ResizableSplit({
+  storageKey,
+  defaultPx,
+  minPx = 220,
+  maxFrac = 0.8,
+  left,
+  right,
+}: {
+  storageKey: string;
+  defaultPx: number;
+  minPx?: number;
+  maxFrac?: number;
+  left: ReactNode;
+  right: ReactNode;
+}) {
+  const [w, setW] = useState<number>(() => {
+    const s = localStorage.getItem(storageKey);
+    const n = s ? parseFloat(s) : NaN;
+    return Number.isFinite(n) ? n : defaultPx;
+  });
+  const wRef = useRef(w);
+  wRef.current = w;
+  const containerRef = useRef<HTMLDivElement>(null);
+  const dragging = useRef(false);
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      if (!dragging.current || !containerRef.current) return;
+      const rect = containerRef.current.getBoundingClientRect();
+      let nw = e.clientX - rect.left;
+      nw = Math.max(minPx, Math.min(rect.width * maxFrac, nw));
+      setW(nw);
+    };
+    const onUp = () => {
+      if (!dragging.current) return;
+      dragging.current = false;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      localStorage.setItem(storageKey, String(Math.round(wRef.current)));
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, [minPx, maxFrac, storageKey]);
+  const start = () => {
+    dragging.current = true;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+  };
+  return (
+    <div ref={containerRef} className="flex min-h-0 flex-1 overflow-hidden">
+      <div className="min-h-0 shrink-0 overflow-hidden" style={{ width: w }}>{left}</div>
+      <div
+        onMouseDown={start}
+        title="拖动调整左右宽度"
+        className="group relative w-px shrink-0 cursor-col-resize bg-neutral-800 hover:bg-emerald-500/70"
+      >
+        {/* wider invisible hit area so the 1px bar is easy to grab */}
+        <div className="absolute inset-y-0 -left-1.5 -right-1.5" />
+        <div className="absolute inset-y-0 left-0 w-px bg-emerald-500/0 group-hover:bg-emerald-500/70" />
+      </div>
+      <div className="min-h-0 min-w-0 flex-1 overflow-hidden">{right}</div>
+    </div>
+  );
+}
+
 function ProcessingView({ rec, onStop }: { rec: RecordFull; onStop?: () => void }) {
   const [now, setNow] = useState(Date.now());
   const [stopping, setStopping] = useState(false);
@@ -248,9 +387,57 @@ function ProcessingView({ rec, onStop }: { rec: RecordFull; onStop?: () => void 
     return () => clearInterval(t);
   }, []);
   const p = rec.progress || 0;
-  const stage = p < 20 ? 0 : p < 94 ? 1 : 2;
   const elapsed = rec.startedAt ? now - new Date(rec.startedAt).getTime() : 0;
   const hasCount = (rec.stepTotal || 0) > 0;
+
+  // The step list reflects the OPTIONS actually enabled for THIS file — optional
+  // stages (降噪增强 / 翻译) appear as their own steps instead of being hidden
+  // inside the native three. The active step is derived from the server phase
+  // text (robust to the 整段/分段/回退 variants); progress is only the fallback.
+  const opts = rec.options;
+  const ph = rec.phase || "";
+  const queued = ph.includes("排队");
+  // 补翻译 (translate-only) reuses the queue but runs ONLY the translation step —
+  // don't show the transcription pipeline (说话人分离/转写/整理), which isn't running.
+  const translateOnly = rec.jobKind === "translate";
+  const steps: { key: string; label: string }[] = [];
+  if (translateOnly) {
+    steps.push({ key: "translate", label: "翻译" });
+  } else {
+    if (opts?.enhance) steps.push({ key: "enhance", label: "降噪增强" });
+    steps.push({ key: "diar", label: "说话人分离" });
+    steps.push({ key: "stt", label: "转写与词级对齐" });
+    steps.push({ key: "tidy", label: "整理结果" });
+    if (opts?.translate) steps.push({ key: "translate", label: "翻译" });
+  }
+
+  const activeKey = queued
+    ? translateOnly
+      ? "translate"
+      : null
+    : ph.includes("降噪")
+    ? "enhance"
+    : ph.includes("说话人")
+    ? "diar"
+    : ph.includes("翻译")
+    ? "translate"
+    : ph.includes("整理结果")
+    ? "tidy"
+    : ph.includes("转写") || ph.includes("对齐")
+    ? "stt"
+    : translateOnly
+    ? "translate"
+    : p >= 94
+    ? "tidy"
+    : p >= 20
+    ? "stt"
+    : p >= 3
+    ? "diar"
+    : opts?.enhance
+    ? "enhance"
+    : "diar";
+  const stage = activeKey ? steps.findIndex((s) => s.key === activeKey) : -1;
+
   return (
     <div className="w-full max-w-md space-y-5">
       <div className="text-center">
@@ -261,8 +448,8 @@ function ProcessingView({ rec, onStop }: { rec: RecordFull; onStop?: () => void 
         <div className="h-full bg-emerald-500 transition-[width] duration-500" style={{ width: `${p}%` }} />
       </div>
       <ol className="space-y-2 text-left">
-        {PIPELINE.map((label, i) => {
-          const done = i < stage;
+        {steps.map(({ key, label }, i) => {
+          const done = stage >= 0 && i < stage;
           const active = i === stage;
           return (
             <li
@@ -289,6 +476,12 @@ function ProcessingView({ rec, onStop }: { rec: RecordFull; onStop?: () => void 
           );
         })}
       </ol>
+      {rec.notices && rec.notices.length > 0 && (
+        <div>
+          <div className="mb-1.5 text-xs font-medium text-neutral-400">处理记录</div>
+          <NoticeList notices={rec.notices} />
+        </div>
+      )}
       <div className="text-center text-xs text-neutral-500">已用时 {fmtElapsed(elapsed)} · 串行处理,多个任务会自动排队</div>
       {onStop && (
         <div className="text-center">
@@ -332,6 +525,12 @@ function SettingsPage({
   const [trModel, setTrModel] = useState(config.translate?.model || "");
   const [trSource, setTrSource] = useState(config.translate?.sourceLang || "auto");
   const [trTarget, setTrTarget] = useState(config.translate?.targetLang || "auto");
+  const [enhEnabled, setEnhEnabled] = useState(config.enhance?.enabled ?? false);
+  const [enhModel, setEnhModel] = useState(config.enhance?.model || "");
+  const [bgEnabled, setBgEnabled] = useState(config.background?.enabled ?? false);
+  const [bgDim, setBgDim] = useState(config.background?.dim ?? 40);
+  const [bgHasImg, setBgHasImg] = useState(!!config.background?.mime);
+  const bgFileRef = useRef<HTMLInputElement | null>(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
   const [msg, setMsg] = useState("");
@@ -367,9 +566,42 @@ function SettingsPage({
         models: { stt, align, diar },
         segmentedStt, language, autoTranscribe,
         translate: { enabled: trEnabled, model: trModel, sourceLang: trSource, targetLang: trTarget },
+        enhance: { enabled: enhEnabled, model: enhModel },
+        background: { enabled: bgEnabled, dim: bgDim },
       });
       onSaved(saved);
       setMsg("已保存");
+    } catch (e: any) {
+      setErr(String(e?.message || e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function onPickBg(f: File | null) {
+    if (!f) return;
+    setErr(""); setLoading(true);
+    try {
+      const saved = await api.uploadBackground(f);
+      onSaved(saved);
+      setBgEnabled(true); setBgHasImg(true);
+      setBgDim(saved.background?.dim ?? bgDim);
+      setMsg("背景图已上传");
+    } catch (e: any) {
+      setErr(String(e?.message || e));
+    } finally {
+      setLoading(false);
+      if (bgFileRef.current) bgFileRef.current.value = "";
+    }
+  }
+
+  async function onRemoveBg() {
+    setErr(""); setLoading(true);
+    try {
+      const saved = await api.deleteBackground();
+      onSaved(saved);
+      setBgEnabled(false); setBgHasImg(false);
+      setMsg("背景图已移除");
     } catch (e: any) {
       setErr(String(e?.message || e));
     } finally {
@@ -381,8 +613,8 @@ function SettingsPage({
     const opts = modes[mode] || [];
     return (
       <label className="block text-sm">
-        <span className="mb-1 block text-neutral-400">{label}(mode={mode})</span>
-        <select className="input" value={value} onChange={(e) => set(e.target.value)}>
+        <span className="mb-0.5 block text-xs text-neutral-400">{label} <span className="text-neutral-600">(mode={mode})</span></span>
+        <select className="input !py-1.5" value={value} onChange={(e) => set(e.target.value)}>
           <option value="">{opts.length ? "— 请选择 —" : "(网关无此模型)"}</option>
           {opts.map((o) => (
             <option key={o.id || o.name} value={o.name}>
@@ -427,34 +659,34 @@ function SettingsPage({
       )}
 
       <div className="flex-1 overflow-y-auto px-4 py-3">
-        <div className="mx-auto grid w-full max-w-5xl gap-3 lg:grid-cols-2">
+        <div className="mx-auto grid w-full max-w-6xl auto-rows-min gap-2.5 md:grid-cols-2 xl:grid-cols-3">
           {/* 连接网关 */}
-          <div className="space-y-2 rounded-lg border border-neutral-800 bg-neutral-900/50 p-3">
+          <div className="space-y-1.5 rounded-lg border border-neutral-800 bg-neutral-900/50 p-2.5">
             <div className="text-sm font-medium text-neutral-200">连接网关</div>
             <label className="block text-sm">
-              <span className="mb-1 block text-neutral-400">网关地址(Base URL,含 /v1 前的根)</span>
-              <input className="input" value={base} onChange={(e) => setBase(e.target.value)} placeholder="https://<gateway-host>" />
+              <span className="mb-0.5 block text-xs text-neutral-400">网关地址(Base URL)</span>
+              <input className="input !py-1.5" value={base} onChange={(e) => setBase(e.target.value)} placeholder="https://<gateway-host>" />
             </label>
             <label className="block text-sm">
-              <span className="mb-1 block text-neutral-400">API Key(数据面 Bearer)</span>
-              <input className="input" value={key} onChange={(e) => setKey(e.target.value)} placeholder="sk-..." />
+              <span className="mb-0.5 block text-xs text-neutral-400">API Key(数据面 Bearer)</span>
+              <input className="input !py-1.5" value={key} onChange={(e) => setKey(e.target.value)} placeholder="sk-..." />
             </label>
             <label className="block text-sm">
-              <span className="mb-1 block text-neutral-400">Olares Cookie(本地调试用;部署到 Olares 请留空)</span>
-              <input className="input" value={cookie} onChange={(e) => setCookie(e.target.value)} placeholder="auth_token=..." />
-              <span className="mt-1 block text-xs text-neutral-500">填了就用填的;留空则自动透传浏览器身份(部署在 Olares 时用它,无需手填)。</span>
+              <span className="mb-0.5 block text-xs text-neutral-400">Olares Cookie(本地调试用;部署到 Olares 请留空)</span>
+              <input className="input !py-1.5" value={cookie} onChange={(e) => setCookie(e.target.value)} placeholder="auth_token=..." />
+              <span className="mt-1 block text-[11px] leading-tight text-neutral-500">留空则自动透传浏览器身份(部署在 Olares 时用它)。</span>
             </label>
           </div>
 
           {/* 模型 */}
-          <div className="space-y-2 rounded-lg border border-neutral-800 bg-neutral-900/50 p-3">
+          <div className="space-y-1.5 rounded-lg border border-neutral-800 bg-neutral-900/50 p-2.5">
             <div className="text-sm font-medium text-neutral-200">模型</div>
             <ModelSelect label="转写 STT" mode="stt" value={stt} set={setStt} />
-            <ModelSelect label="强制对齐 Align(词级时间戳)" mode="align" value={align} set={setAlign} />
+            <ModelSelect label="强制对齐 Align" mode="align" value={align} set={setAlign} />
             <ModelSelect label="说话人分离 Diarize" mode="diar" value={diar} set={setDiar} />
             <label className="block text-sm">
-              <span className="mb-1 block text-neutral-400">对齐语言(默认自动识别,无需手填)</span>
-              <select className="input" value={language} onChange={(e) => setLanguage(e.target.value)}>
+              <span className="mb-0.5 block text-xs text-neutral-400">对齐语言(默认自动识别)</span>
+              <select className="input !py-1.5" value={language} onChange={(e) => setLanguage(e.target.value)}>
                 <option value="auto">自动识别(按转写文本判定)</option>
                 <option value="zh">中文 zh</option>
                 <option value="en">English en</option>
@@ -466,45 +698,45 @@ function SettingsPage({
           </div>
 
           {/* 转写默认(新文件) */}
-          <div className="space-y-2 rounded-lg border border-neutral-800 bg-neutral-900/50 p-3">
+          <div className="space-y-1.5 rounded-lg border border-neutral-800 bg-neutral-900/50 p-2.5">
             <div className="text-sm font-medium text-neutral-200">
-              转写默认值 <span className="text-xs font-normal text-neutral-500">· 新文件默认;每个文件可在详情页覆盖</span>
+              转写默认值 <span className="text-[11px] font-normal text-neutral-500">· 详情页可逐文件覆盖</span>
             </div>
-            <label className="flex items-start gap-2.5 text-sm">
+            <label className="flex items-start gap-2 text-sm">
               <input type="checkbox" className="mt-0.5 h-4 w-4" checked={segmentedStt} onChange={(e) => setSegmentedStt(e.target.checked)} />
               <span>
-                <span className="block text-neutral-200">分段转写(按说话人分段逐段调用 STT)</span>
-                <span className="block text-xs leading-snug text-neutral-500">默认关闭 = 整段一次 STT 再切分;开启按 diarization 窗口逐段转写(调用更多、上下文更聚焦)。</span>
+                <span className="block text-neutral-200">分段转写</span>
+                <span className="block text-[11px] leading-tight text-neutral-500">关=整段一次 STT 再切分;开=按 diarization 窗口逐段转写。</span>
               </span>
             </label>
-            <label className="flex items-start gap-2.5 text-sm">
+            <label className="flex items-start gap-2 text-sm">
               <input type="checkbox" className="mt-0.5 h-4 w-4" checked={autoTranscribe} onChange={(e) => setAutoTranscribe(e.target.checked)} />
               <span>
                 <span className="block text-neutral-200">上传后自动转写</span>
-                <span className="block text-xs leading-snug text-neutral-500">开启(默认)= 上传即用默认设置立即转写;关闭 = 仅入库为「待转录」,可先在详情页选好选项再手动转写。</span>
+                <span className="block text-[11px] leading-tight text-neutral-500">开(默认)=上传即转写;关=仅入库「待转录」,可先选选项再手动转写。</span>
               </span>
             </label>
           </div>
 
           {/* 翻译 */}
-          <div className="space-y-2 rounded-lg border border-neutral-800 bg-neutral-900/50 p-3">
-            <label className="flex items-start gap-2.5 text-sm">
+          <div className="space-y-1.5 rounded-lg border border-neutral-800 bg-neutral-900/50 p-2.5">
+            <label className="flex items-start gap-2 text-sm">
               <input type="checkbox" className="mt-0.5 h-4 w-4" checked={trEnabled} onChange={(e) => setTrEnabled(e.target.checked)} />
               <span>
-                <span className="block font-medium text-neutral-200">翻译 Translate(在原文下方显示译文)</span>
-                <span className="block text-xs leading-snug text-neutral-500">默认关闭,关闭时阅读页不显示任何译文/按钮。开启后新文件转写时一并翻译,已转写记录可在详情页「补翻译」;译文支持逐词点击/高亮(词级时间为按段均摊近似)。</span>
+                <span className="block font-medium text-neutral-200">翻译 Translate</span>
+                <span className="block text-[11px] leading-tight text-neutral-500">默认关。开启后转写时一并翻译,已转写记录可在详情页「补翻译」。</span>
               </span>
             </label>
             <ModelSelect label="翻译模型" mode="translate" value={trModel} set={setTrModel} />
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-2 gap-2">
               <label className="block text-sm">
-                <span className="mb-1 block text-neutral-400">源语言(默认自动检测)</span>
-                <select className="input" value={trSource} onChange={(e) => setTrSource(e.target.value)}>{LANG_OPTS}</select>
+                <span className="mb-0.5 block text-xs text-neutral-400">源语言</span>
+                <select className="input !py-1.5" value={trSource} onChange={(e) => setTrSource(e.target.value)}>{LANG_OPTS}</select>
               </label>
               <label className="block text-sm">
-                <span className="mb-1 block text-neutral-400">目标语言(默认自动)</span>
-                <select className="input" value={trTarget} onChange={(e) => setTrTarget(e.target.value)}>
-                  <option value="auto">自动(中文→英文,其他→中文)</option>
+                <span className="mb-0.5 block text-xs text-neutral-400">目标语言</span>
+                <select className="input !py-1.5" value={trTarget} onChange={(e) => setTrTarget(e.target.value)}>
+                  <option value="auto">自动(中→英,其他→中)</option>
                   <option value="zho_Hans">中文(简) zho_Hans</option>
                   <option value="eng_Latn">English eng_Latn</option>
                   <option value="jpn_Jpan">日本語 jpn_Jpan</option>
@@ -512,7 +744,43 @@ function SettingsPage({
                 </select>
               </label>
             </div>
-            <span className="block text-xs leading-snug text-neutral-500">源留「自动检测」逐段判定;目标留「自动」:中文→英文、其他→中文。源与目标相同的段自动跳过。</span>
+          </div>
+
+          {/* 降噪增强 Enhance */}
+          <div className="space-y-1.5 rounded-lg border border-neutral-800 bg-neutral-900/50 p-2.5">
+            <label className="flex items-start gap-2 text-sm">
+              <input type="checkbox" className="mt-0.5 h-4 w-4" checked={enhEnabled} onChange={(e) => setEnhEnabled(e.target.checked)} />
+              <span>
+                <span className="block font-medium text-neutral-200">降噪增强 Enhance</span>
+                <span className="block text-[11px] leading-tight text-neutral-500">
+                  默认关。转写前先降噪(仅用于识别,播放仍原音频)。
+                  <span className="text-amber-400">背景音乐较明显的文件不建议开启</span>——降噪会把音乐当噪声抹除。
+                </span>
+              </span>
+            </label>
+            <ModelSelect label="增强模型" mode="enhance" value={enhModel} set={setEnhModel} />
+          </div>
+
+          {/* 界面 · 背景图 */}
+          <div className="space-y-1.5 rounded-lg border border-neutral-800 bg-neutral-900/50 p-2.5">
+            <div className="text-sm font-medium text-neutral-200">
+              界面 · 背景图 <span className="text-[11px] font-normal text-neutral-500">· 白天/夜晚见右上角 🌙/☀️</span>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <input ref={bgFileRef} type="file" accept="image/*" className="hidden" onChange={(e) => onPickBg(e.target.files?.[0] || null)} />
+              <button className="btn-ghost !py-1.5" onClick={() => bgFileRef.current?.click()} disabled={loading}>上传背景图</button>
+              {bgHasImg && <button className="btn-ghost !py-1.5" onClick={onRemoveBg} disabled={loading}>移除</button>}
+              <span className="text-xs text-neutral-500">{bgHasImg ? "已设置" : "未设置"}</span>
+            </div>
+            <label className="flex items-center gap-2 text-sm">
+              <input type="checkbox" className="h-4 w-4" checked={bgEnabled} onChange={(e) => setBgEnabled(e.target.checked)} disabled={!bgHasImg} />
+              <span className="text-neutral-200">显示背景图</span>
+            </label>
+            <label className="block text-sm">
+              <span className="mb-0.5 block text-xs text-neutral-400">压暗程度 {bgDim}%</span>
+              <input type="range" min={0} max={80} value={bgDim} onChange={(e) => setBgDim(Number(e.target.value))} className="w-full" />
+            </label>
+            <span className="block text-[11px] leading-tight text-neutral-500">上传即生效;显示开关与压暗需点「保存」。</span>
           </div>
         </div>
       </div>
@@ -550,16 +818,23 @@ function RecordDetail({
   const [optLang, setOptLang] = useState("auto");
   const [optSeg, setOptSeg] = useState(false);
   const [optTr, setOptTr] = useState(false);
+  const [optEnh, setOptEnh] = useState(false);
   const [showOpts, setShowOpts] = useState(false);
   // Translation UI is entirely hidden unless the global feature is ON. `available`
   // additionally requires a translate model (needed to actually run 补翻译).
   const showTranslation = !!config?.translate?.enabled;
   const translateAvailable = showTranslation && !!config?.translate?.model;
+  const enhanceAvailable = !!config?.enhance?.model;
   const [activeGi, setActiveGi] = useState<number>(-1);   // active WORD (word-level path)
   const [activeTi, setActiveTi] = useState<number>(-1);   // active TRANSLATION word
   const [activeSeg, setActiveSeg] = useState<number>(-1); // active SEGMENT (fallback path)
+  const [activeCue, setActiveCue] = useState<number>(-1);  // active subtitle clause (original)
+  const [activeTCue, setActiveTCue] = useState<number>(-1); // active subtitle clause (translation)
   const [q, setQ] = useState("");                         // transcript search query
-  const [sideTab, setSideTab] = useState<"info" | "spk">("info"); // audio left sidebar
+  // Video subtitle overlay (CC): show the CURRENT line over the video (bilingual if
+  // a translation exists). Default on, persisted. Feishu-Minutes style.
+  const [subs, setSubs] = useState<boolean>(() => localStorage.getItem("amx.subs") !== "0");
+  useEffect(() => { localStorage.setItem("amx.subs", subs ? "1" : "0"); }, [subs]);
   // Chinese highlight unit: 词 (word, Feishu-style) or 字 (per-char). English is
   // always word-level. Persisted so the choice sticks across records/sessions.
   const [granularity, setGranularity] = useState<"word" | "char">(
@@ -598,6 +873,7 @@ function RecordDetail({
     setOptLang(config.language || "auto");
     setOptSeg(!!config.segmentedStt);
     setOptTr(!!config.translate?.enabled);
+    setOptEnh(!!config.enhance?.enabled);
   }, [rec, config]);
 
   // Normalize word times so EVERY word is clickable/highlightable even on older
@@ -674,6 +950,19 @@ function RecordDetail({
 
   const hasWords = flat.length > 0;
 
+  // Short subtitle clauses (Feishu-style): re-split the word streams on clause
+  // punctuation so the overlay shows ONE clause at a time, not a whole paragraph.
+  const cues = useMemo(() => buildCues(flat), [flat]);
+  const tcues = useMemo(() => buildCues(tflat), [tflat]);
+  const cueStartsRef = useRef<number[]>([]);
+  const tcueStartsRef = useRef<number[]>([]);
+  const cuesRef = useRef<SubCue[]>([]);
+  const tcuesRef = useRef<SubCue[]>([]);
+  useEffect(() => {
+    cuesRef.current = cues; cueStartsRef.current = cues.map((c) => c.start);
+    tcuesRef.current = tcues; tcueStartsRef.current = tcues.map((c) => c.start);
+  }, [cues, tcues]);
+
   // Binary search: last item whose start <= t. Shared by word- and segment-level.
   function lastAtOrBefore(starts: number[], t: number): number {
     let lo = 0, hi = starts.length - 1, ans = -1;
@@ -700,6 +989,17 @@ function RecordDetail({
     setActiveTi((prev) => (prev === ti ? prev : ti));
     const sg = lastAtOrBefore(segStartsRef.current, t);
     setActiveSeg((prev) => (prev === sg ? prev : sg));
+    // Subtitle clauses: hide during long gaps (silence) so a clause doesn't linger.
+    const pick = (starts: number[], arr: SubCue[]) => {
+      const i = lastAtOrBefore(starts, t);
+      if (i < 0) return -1;
+      const c = arr[i];
+      return c && t > c.end + 1.2 ? -1 : i;
+    };
+    const ci = pick(cueStartsRef.current, cuesRef.current);
+    setActiveCue((prev) => (prev === ci ? prev : ci));
+    const tci = pick(tcueStartsRef.current, tcuesRef.current);
+    setActiveTCue((prev) => (prev === tci ? prev : tci));
   }, []);
 
   const onTimeUpdate = useCallback(() => {
@@ -734,6 +1034,10 @@ function RecordDetail({
     ? (activeGi >= 0 && flat[activeGi] ? flat[activeGi].segIdx : -1)
     : activeSeg;
 
+  // Current subtitle clause(s) for the video overlay — one short clause at a time.
+  const subCueText = activeCue >= 0 ? cues[activeCue]?.text || "" : "";
+  const subTCueText = activeTCue >= 0 ? tcues[activeTCue]?.text || "" : "";
+
   // Auto-scroll the active word (or, without word times, the active segment).
   useEffect(() => {
     const sel = hasWords
@@ -754,7 +1058,7 @@ function RecordDetail({
 
   async function doTranscribe() {
     try {
-      await api.transcribeRecord(id, { language: optLang, segmentedStt: optSeg, translate: optTr });
+      await api.transcribeRecord(id, { language: optLang, segmentedStt: optSeg, translate: optTr, enhance: optEnh });
       setShowOpts(false);
       await load(); onChanged();
     } catch (e: any) { setErr(String(e?.message || e)); }
@@ -843,7 +1147,7 @@ function RecordDetail({
   // Chinese; English keeps its real inter-word spaces. Search hits are painted in
   // a distinct amber (different from the emerald/sky playback highlight) and can
   // span word boundaries (see matchLine).
-  const searchHl = "rounded-[3px] bg-amber-400/45 text-amber-50";
+  const searchHl = "rounded-[3px] bg-amber-400/60 text-amber-950";
   const renderUnits = (
     words: Word[],
     base: number,
@@ -895,18 +1199,18 @@ function RecordDetail({
     <>
       {segments.length === 0 && <p className="text-sm text-neutral-600">(无转写内容)</p>}
       {query && matchCount === 0 && <p className="text-sm text-neutral-600">未找到「{q.trim()}」</p>}
-      <div className="space-y-4">
+      <div className="space-y-0.5">
         {segments.map((seg, si) => {
           if (query && !lineMatches(seg)) return null;
           return (
-          <div key={si} data-seg={si} className={`rounded-lg p-2 transition-colors ${si === activeSegIdx ? "bg-neutral-800/40" : ""}`}>
-            <div className="mb-1 flex items-center gap-2">
+          <div key={si} data-seg={si} className={`rounded-md px-2 py-1 transition-colors ${si === activeSegIdx ? "bg-neutral-800/40" : ""}`}>
+            <div className="mb-0.5 flex items-center gap-1.5">
               <SpeakerChip spk={seg.speaker} />
-              <button className="font-mono text-xs tabular-nums text-neutral-500 hover:text-neutral-300" onClick={() => seekTo(seg.start)}>
+              <button className="font-mono text-[11px] tabular-nums text-neutral-500 hover:text-neutral-300" onClick={() => seekTo(seg.start)}>
                 {fmtTC(seg.start)}
               </button>
             </div>
-            <p className="break-words text-[15px] leading-relaxed text-neutral-200">
+            <p className="break-words text-[14px] leading-snug text-neutral-200">
               {seg.words && seg.words.length
                 ? renderUnits(seg.words, segBase[si], activeGi, "data-gi", "bg-emerald-500/70 text-white")
                 : (
@@ -924,7 +1228,7 @@ function RecordDetail({
                 )}
             </p>
             {showTranslation && seg.translation && (
-              <p className="mt-1 break-words border-l-2 border-sky-700/50 pl-2 text-[14px] leading-relaxed text-sky-200/90">
+              <p className="mt-0.5 break-words border-l-2 border-sky-700/50 pl-2 text-[13px] leading-snug text-sky-200/90">
                 {seg.twords && seg.twords.length
                   ? renderUnits(seg.twords, segBaseT[si], activeTi, "data-ti", "bg-sky-500/70 text-white")
                   : (
@@ -1001,6 +1305,10 @@ function RecordDetail({
               <span className={translateAvailable ? "text-neutral-300" : "text-neutral-600"}>转写时翻译</span>
             </label>
           )}
+          <label className="flex items-center gap-2" title={enhanceAvailable ? "背景音乐较明显的文件不建议开启" : "请先在设置中选择增强模型"}>
+            <input type="checkbox" className="h-4 w-4" checked={optEnh} disabled={!enhanceAvailable} onChange={(e) => setOptEnh(e.target.checked)} />
+            <span className={enhanceAvailable ? "text-neutral-300" : "text-neutral-600"}>降噪增强</span>
+          </label>
           <span className="text-xs text-neutral-500">改动后点「{rec.status === "done" ? "重新转写" : "AI 转录"}」生效</span>
         </div>
       )}
@@ -1012,67 +1320,104 @@ function RecordDetail({
           {rec.status === "processing" ? (
             <ProcessingView rec={rec} onStop={doCancel} />
           ) : rec.status === "error" ? (
-            <div className="text-red-400">{rec.error || "失败"}</div>
+            <div className="w-full max-w-md space-y-3">
+              <div className="text-red-400">{rec.error || "失败"}</div>
+              {rec.notices && rec.notices.length > 0 && (
+                <div className="text-left">
+                  <div className="mb-1.5 text-xs font-medium text-neutral-400">处理记录</div>
+                  <NoticeList notices={rec.notices} />
+                </div>
+              )}
+            </div>
           ) : (
             <div className="text-neutral-400">尚未转录,点击右上角「AI 转录」。</div>
           )}
         </div>
       ) : rec.kind === "video" ? (
-        // Video: player on the left, transcript on the right (unchanged).
-        <div className="grid flex-1 gap-4 overflow-hidden p-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)]">
-          <div className="flex min-h-0 flex-col gap-3 overflow-y-auto">
-            <video ref={(el) => { mediaRef.current = el; }} src={mediaSrc} controls className="w-full rounded-lg bg-black" onTimeUpdate={onTimeUpdate} onPlay={startRaf} onPause={stopRaf} onEnded={stopRaf} onSeeking={onTimeUpdate} />
-            <FileInfo rec={rec} />
-            <p className="card text-xs leading-relaxed text-neutral-400">点击文字记录(有词级时间时可点单词,否则点整句)可跳转播放;播放时会高亮当前位置并自动滚动。</p>
-          </div>
-          <div className="flex min-h-0 flex-col">
-            <div className="mb-3 flex items-center gap-2">
-              <div className="min-w-0 flex-1">{searchBox}</div>
-              {granularityToggle}
-            </div>
-            <div ref={scrollRef} className="flex-1 overflow-y-auto rounded-lg border border-neutral-800 bg-black/30 p-4">
-              {transcriptList}
-            </div>
-          </div>
+        // Video (Feishu-Minutes layout): a large player on the left that stays put,
+        // compact metadata below it; the transcript scrolls on the right.
+        <div className="flex flex-1 overflow-hidden p-3">
+          <ResizableSplit
+            storageKey="amx.split.video"
+            defaultPx={720}
+            minPx={360}
+            left={
+              <div className="flex h-full flex-col gap-2 overflow-hidden pr-3">
+                <div className="relative shrink-0">
+                  <video ref={(el) => { mediaRef.current = el; }} src={mediaSrc} controls className="max-h-[52vh] w-full rounded-lg bg-black object-contain" onTimeUpdate={onTimeUpdate} onPlay={startRaf} onPause={stopRaf} onEnded={stopRaf} onSeeking={onTimeUpdate} />
+                  {subs && (subCueText || (showTranslation && subTCueText)) && (
+                    <div className="pointer-events-none absolute inset-x-0 bottom-12 flex flex-col items-center gap-1 px-4 text-center">
+                      {subCueText && (
+                        <span className="max-w-[90%] rounded bg-black/65 px-2 py-0.5 text-[17px] font-medium leading-snug text-white [text-shadow:0_1px_3px_rgba(0,0,0,0.9)]">
+                          {subCueText}
+                        </span>
+                      )}
+                      {showTranslation && subTCueText && (
+                        <span className="max-w-[90%] rounded bg-black/55 px-2 py-0.5 text-[14px] leading-snug text-sky-100 [text-shadow:0_1px_3px_rgba(0,0,0,0.9)]">
+                          {subTCueText}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+                <div className="flex shrink-0 items-center justify-end gap-2 px-1">
+                  <button
+                    onClick={() => setSubs((v) => !v)}
+                    className={`flex items-center gap-1 rounded px-2 py-1 text-xs font-medium ${subs ? "bg-emerald-600/80 text-white" : "bg-neutral-700/60 text-neutral-300"} hover:brightness-110`}
+                    title={subs ? "关闭字幕" : "开启字幕"}
+                  >
+                    <span className="rounded-sm border border-current px-1 text-[10px] leading-tight">CC</span>
+                    字幕 {subs ? "开" : "关"}
+                  </button>
+                </div>
+                <MetaTabs rec={rec} defaultTab="spk" />
+              </div>
+            }
+            right={
+              <div className="flex h-full flex-col overflow-hidden pl-3">
+                <div className="mb-2 flex items-center gap-2">
+                  <span className="text-sm font-medium text-neutral-200">文字记录</span>
+                  <div className="ml-auto flex items-center gap-2">
+                    {granularityToggle}
+                    <div className="w-44 sm:w-56">{searchBox}</div>
+                  </div>
+                </div>
+                <div ref={scrollRef} className="flex-1 overflow-y-auto pr-1">
+                  {transcriptList}
+                </div>
+              </div>
+            }
+          />
         </div>
       ) : (
         // Audio (Feishu-Minutes layout): left sidebar (文件信息 / 发言人) + right
         // transcript (文字记录 with search) as the main body + full-width player bar.
         <div className="flex flex-1 flex-col overflow-hidden">
-          <div className="flex min-h-0 flex-1 overflow-hidden">
-            <aside className="hidden w-60 shrink-0 flex-col border-r border-neutral-800 md:flex">
-              <div className="flex gap-1 border-b border-neutral-800 px-2 py-2 text-xs">
-                <button
-                  className={`rounded px-2 py-1 ${sideTab === "info" ? "bg-neutral-800 text-neutral-100" : "text-neutral-400 hover:text-neutral-200"}`}
-                  onClick={() => setSideTab("info")}
-                >
-                  文件信息
-                </button>
-                <button
-                  className={`rounded px-2 py-1 ${sideTab === "spk" ? "bg-neutral-800 text-neutral-100" : "text-neutral-400 hover:text-neutral-200"}`}
-                  onClick={() => setSideTab("spk")}
-                >
-                  发言人 ({rec.result?.speakers?.length ?? 0})
-                </button>
+          <ResizableSplit
+            storageKey="amx.split.audio"
+            defaultPx={260}
+            minPx={200}
+            maxFrac={0.5}
+            left={
+              <div className="flex h-full flex-col overflow-hidden border-r border-neutral-800">
+                <MetaTabs rec={rec} defaultTab="info" />
               </div>
-              <div className="flex-1 overflow-y-auto p-3">
-                {sideTab === "info" ? <FileInfoRows rec={rec} /> : <SpeakerStats rec={rec} />}
-              </div>
-            </aside>
-
-            <div className="flex min-w-0 flex-1 flex-col">
-              <div className="flex items-center gap-3 border-b border-neutral-800 px-4 py-2">
-                <span className="text-sm font-medium text-neutral-200">文字记录</span>
-                <div className="ml-auto flex items-center gap-2">
-                  {granularityToggle}
-                  <div className="w-48 sm:w-64">{searchBox}</div>
+            }
+            right={
+              <div className="flex h-full min-w-0 flex-col">
+                <div className="flex items-center gap-3 border-b border-neutral-800 px-4 py-2">
+                  <span className="text-sm font-medium text-neutral-200">文字记录</span>
+                  <div className="ml-auto flex items-center gap-2">
+                    {granularityToggle}
+                    <div className="w-48 sm:w-64">{searchBox}</div>
+                  </div>
+                </div>
+                <div ref={scrollRef} className="flex-1 overflow-y-auto px-6 py-3">
+                  <div className="mx-auto w-full max-w-5xl">{transcriptList}</div>
                 </div>
               </div>
-              <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-5">
-                <div className="mx-auto w-full max-w-3xl">{transcriptList}</div>
-              </div>
-            </div>
-          </div>
+            }
+          />
           <div className="border-t border-neutral-800 bg-neutral-900/80 px-4 py-3">
             <audio ref={(el) => { mediaRef.current = el; }} src={mediaSrc} controls className="mx-auto block w-full max-w-4xl" onTimeUpdate={onTimeUpdate} onPlay={startRaf} onPause={stopRaf} onEnded={stopRaf} onSeeking={onTimeUpdate} />
           </div>
@@ -1111,7 +1456,7 @@ function FileInfoRows({ rec }: { rec: RecordFull }) {
     ["原文件", rec.originalName || "—"],
   ];
   return (
-    <dl className="space-y-2 text-xs">
+    <dl className="space-y-1 text-xs leading-snug">
       {rows.map(([k, v]) => (
         <div key={k} className="flex gap-2">
           <dt className="w-14 shrink-0 text-neutral-500">{k}</dt>
@@ -1121,18 +1466,40 @@ function FileInfoRows({ rec }: { rec: RecordFull }) {
     </dl>
   );
 }
-// "文件信息" 卡片（视频左栏用）：元数据 + 说话人色块。
-function FileInfo({ rec }: { rec: RecordFull }) {
+
+// Feishu-style tabbed metadata panel (说话人 / 文件信息 / 处理记录) used in both the
+// audio sidebar and the video left column, so only the transcript needs to scroll —
+// the panel itself is compact and its active tab scrolls internally if needed.
+function MetaTabs({ rec, defaultTab = "info" }: { rec: RecordFull; defaultTab?: "spk" | "info" | "log" }) {
+  const [tab, setTab] = useState<"spk" | "info" | "log">(defaultTab);
+  const spkN = rec.result?.speakers?.length ?? 0;
+  const logN = rec.notices?.length ?? 0;
+  const btn = (id: "spk" | "info" | "log", label: string) => (
+    <button
+      className={`rounded px-2 py-1 ${tab === id ? "bg-neutral-800 text-neutral-100" : "text-neutral-400 hover:text-neutral-200"}`}
+      onClick={() => setTab(id)}
+    >
+      {label}
+    </button>
+  );
   return (
-    <div className="card">
-      <div className="mb-2 text-xs font-medium text-neutral-300">文件信息</div>
-      <FileInfoRows rec={rec} />
-      {(rec.result?.speakers?.length ?? 0) > 0 && (
-        <div className="mt-3 flex flex-wrap items-center gap-1.5 border-t border-neutral-800 pt-2 text-xs">
-          <span className="text-neutral-500">说话人</span>
-          {(rec.result?.speakers || []).map((s) => <SpeakerChip key={s} spk={s} />)}
-        </div>
-      )}
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex gap-1 border-b border-neutral-800 px-1 py-1.5 text-xs">
+        {btn("spk", `说话人 (${spkN})`)}
+        {btn("info", "文件信息")}
+        {btn("log", `处理记录${logN ? ` (${logN})` : ""}`)}
+      </div>
+      <div className="flex-1 overflow-y-auto px-2.5 py-2">
+        {tab === "spk" ? (
+          <SpeakerStats rec={rec} />
+        ) : tab === "info" ? (
+          <FileInfoRows rec={rec} />
+        ) : logN ? (
+          <NoticeList notices={rec.notices} />
+        ) : (
+          <p className="text-xs text-neutral-600">(暂无处理记录)</p>
+        )}
+      </div>
     </div>
   );
 }
@@ -1150,19 +1517,19 @@ function SpeakerStats({ rec }: { rec: RecordFull }) {
   const rows = [...map.entries()].sort((a, b) => b[1].dur - a[1].dur);
   if (!rows.length) return <p className="text-xs text-neutral-600">(暂无说话人)</p>;
   return (
-    <div className="space-y-3">
+    <div className="space-y-2">
       {rows.map(([spk, st]) => {
         const pct = Math.round((100 * st.dur) / total);
         return (
           <div key={spk} className="text-xs">
-            <div className="mb-1 flex items-center gap-2">
+            <div className="mb-0.5 flex items-center gap-2">
               <SpeakerChip spk={spk} />
               <span className="ml-auto tabular-nums text-neutral-400">{pct}%</span>
             </div>
             <div className="h-1.5 w-full overflow-hidden rounded bg-neutral-800">
               <div className="h-full rounded" style={{ width: `${pct}%`, background: spkColor(spk) }} />
             </div>
-            <div className="mt-1 text-neutral-500">{st.count} 段 · {fmtDur(st.dur)}</div>
+            <div className="mt-0.5 text-neutral-500">{st.count} 段 · {fmtDur(st.dur)}</div>
           </div>
         );
       })}
@@ -1195,6 +1562,21 @@ export default function App() {
   const [busyIds, setBusyIds] = useState<Set<string>>(new Set());
   const [err, setErr] = useState("");
   const fileRef = useRef<HTMLInputElement | null>(null);
+  // UI preferences (persisted locally, per browser).
+  const [theme, setTheme] = useState<"dark" | "light">(
+    () => (localStorage.getItem("amx.theme") === "light" ? "light" : "dark"),
+  );
+  const [cardView, setCardView] = useState<"grid" | "list">(
+    () => (localStorage.getItem("amx.cardview") === "list" ? "list" : "grid"),
+  );
+  // Bumped whenever the background image changes so the <img> URL busts its cache.
+  const [bgVer, setBgVer] = useState(0);
+
+  useEffect(() => {
+    document.documentElement.classList.toggle("light", theme === "light");
+    localStorage.setItem("amx.theme", theme);
+  }, [theme]);
+  useEffect(() => { localStorage.setItem("amx.cardview", cardView); }, [cardView]);
 
   const refreshRecords = useCallback(async () => {
     try { setRecords((await api.listRecords()).records); } catch (e: any) { setErr(String(e?.message || e)); }
@@ -1263,8 +1645,93 @@ export default function App() {
     if (fileRef.current) fileRef.current.value = "";
   }
 
+  // Status + primary action for a record — shared by the grid and list views.
+  const statusActions = (r: RecordSummary) => {
+    if (r.status === "processing") {
+      return (
+        <div className="flex flex-1 items-center gap-2">
+          <div className="min-w-0 flex-1">
+            <div className="mb-1 truncate text-xs text-amber-400">{statusText(r)}</div>
+            <div className="h-1.5 w-full overflow-hidden rounded bg-neutral-800">
+              <div className="h-full bg-amber-500 transition-[width] duration-500" style={{ width: `${r.progress}%` }} />
+            </div>
+          </div>
+          <button
+            className="shrink-0 rounded bg-neutral-800 px-2 py-1 text-xs text-red-300 hover:bg-red-950/60 hover:text-red-200 disabled:opacity-40"
+            disabled={busyIds.has(r.id)}
+            title="停止本次转写"
+            onClick={(e) => { e.stopPropagation(); cancel(r.id); }}
+          >
+            {busyIds.has(r.id) ? "…" : "停止"}
+          </button>
+        </div>
+      );
+    }
+    if (r.status === "done") {
+      const warns = (r.notices || []).filter((n) => n.level !== "info").length;
+      return (
+        <>
+          <span className="min-w-0 flex-1 truncate text-xs text-emerald-400">
+            已完成 · {r.speakers} 位说话人
+            {warns > 0 && (
+              <span className="ml-1.5 rounded bg-amber-950/60 px-1 py-0.5 text-[10px] text-amber-300" title="本次处理有提示,点开查看「处理记录」">
+                ⚠ {warns} 条提示
+              </span>
+            )}
+          </span>
+          <button
+            className="shrink-0 rounded bg-neutral-800 px-2 py-1 text-xs text-neutral-200 hover:bg-neutral-700 disabled:opacity-40"
+            disabled={!ready || busyIds.has(r.id)}
+            title={!ready ? "请先在设置里完成网关与模型配置" : "用当前设置(整段/分段)重新跑一遍转写"}
+            onClick={(e) => { e.stopPropagation(); retry(r.id); }}
+          >
+            {busyIds.has(r.id) ? "…" : "重新转写"}
+          </button>
+        </>
+      );
+    }
+    if (r.status === "error") {
+      return (
+        <>
+          <span className="min-w-0 flex-1 truncate text-xs text-red-400" title={r.error}>失败:{r.error}</span>
+          <button
+            className="shrink-0 rounded bg-neutral-800 px-2 py-1 text-xs text-neutral-200 hover:bg-neutral-700 disabled:opacity-40"
+            disabled={!ready || busyIds.has(r.id)}
+            title={!ready ? "请先在设置里完成网关与模型配置" : "重新转录"}
+            onClick={(e) => { e.stopPropagation(); retry(r.id); }}
+          >
+            {busyIds.has(r.id) ? "…" : "重试"}
+          </button>
+        </>
+      );
+    }
+    return (
+      <>
+        <span className="flex-1 text-xs text-neutral-400">待转录</span>
+        <button
+          className="shrink-0 rounded bg-emerald-700 px-2 py-1 text-xs text-white hover:bg-emerald-600 disabled:opacity-40"
+          disabled={!ready || busyIds.has(r.id)}
+          title={!ready ? "请先在设置里完成网关与模型配置" : "开始转录"}
+          onClick={(e) => { e.stopPropagation(); retry(r.id); }}
+        >
+          {busyIds.has(r.id) ? "…" : "转录"}
+        </button>
+      </>
+    );
+  };
+
+  const bg = config?.background;
   return (
-    <div className="mx-auto flex h-screen max-w-6xl flex-col">
+    <div className="flex h-screen flex-col">
+      {bg?.enabled && (
+        <div className="pointer-events-none fixed inset-0 -z-10">
+          <div
+            className="absolute inset-0 bg-cover bg-center"
+            style={{ backgroundImage: `url(/api/background?v=${bgVer})` }}
+          />
+          <div className="absolute inset-0 bg-black" style={{ opacity: (bg.dim || 0) / 100 }} />
+        </div>
+      )}
       <header className="flex items-center gap-3 border-b border-neutral-800 px-4 py-3">
         <button
           className="text-lg font-semibold hover:text-emerald-300"
@@ -1274,6 +1741,13 @@ export default function App() {
           🎙 Audio Minutes <span className="text-neutral-500">X Demo</span>
         </button>
         <div className="ml-auto flex items-center gap-2">
+          <button
+            className="btn-ghost"
+            onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
+            title={theme === "dark" ? "切换到白天模式" : "切换到夜晚模式"}
+          >
+            {theme === "dark" ? "🌙" : "☀️"}
+          </button>
           <button
             className={`btn-ghost ${showSettings ? "text-emerald-300" : ""}`}
             onClick={() => setShowSettings((v) => !v)}
@@ -1291,7 +1765,7 @@ export default function App() {
 
       {showSettings && config ? (
         <div className="flex-1 overflow-hidden">
-          <SettingsPage config={config} onBack={() => setShowSettings(false)} onSaved={(cfg) => setConfig(cfg)} />
+          <SettingsPage config={config} onBack={() => setShowSettings(false)} onSaved={(cfg) => { setConfig(cfg); setBgVer((v) => v + 1); }} />
         </div>
       ) : selectedId ? (
         <div className="flex-1 overflow-hidden">
@@ -1303,6 +1777,22 @@ export default function App() {
             <h2 className="text-base font-semibold">我的内容</h2>
             <div className="ml-auto flex items-center gap-2">
               {uploadPct != null && <span className="text-xs text-neutral-400">上传中 {uploadPct}%</span>}
+              <div className="mr-1 inline-flex overflow-hidden rounded-md border border-neutral-700">
+                <button
+                  className={`px-2 py-1.5 text-sm ${cardView === "grid" ? "bg-neutral-700 text-neutral-100" : "bg-neutral-900 text-neutral-400 hover:bg-neutral-800"}`}
+                  title="大图视图"
+                  onClick={() => setCardView("grid")}
+                >
+                  ▦
+                </button>
+                <button
+                  className={`px-2 py-1.5 text-sm ${cardView === "list" ? "bg-neutral-700 text-neutral-100" : "bg-neutral-900 text-neutral-400 hover:bg-neutral-800"}`}
+                  title="列表视图"
+                  onClick={() => setCardView("list")}
+                >
+                  ☰
+                </button>
+              </div>
               <input
                 ref={fileRef}
                 type="file"
@@ -1311,7 +1801,7 @@ export default function App() {
                 onChange={(e) => onUpload(e.target.files?.[0] || null)}
               />
               <button className="btn-primary" onClick={() => fileRef.current?.click()} disabled={uploadPct != null}>
-                ＋ 上传并转录
+                ＋ {(config?.autoTranscribe ?? true) ? "上传并转录" : "上传音视频"}
               </button>
             </div>
           </div>
@@ -1320,9 +1810,9 @@ export default function App() {
 
           {records.length === 0 ? (
             <div className="card text-center text-sm text-neutral-500">
-              还没有内容。点击「上传并转录」上传一段音频或视频。
+              还没有内容。点击「{(config?.autoTranscribe ?? true) ? "上传并转录" : "上传音视频"}」上传一段音频或视频。
             </div>
-          ) : (
+          ) : cardView === "grid" ? (
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
               {records.map((r) => (
                 <div
@@ -1346,62 +1836,33 @@ export default function App() {
                       ✕
                     </button>
                   </div>
-                  <div className="mt-3 flex items-center gap-2">
-                    {r.status === "processing" ? (
-                      <div className="flex flex-1 items-center gap-2">
-                        <div className="min-w-0 flex-1">
-                          <div className="mb-1 truncate text-xs text-amber-400">{statusText(r)}</div>
-                          <div className="h-1.5 w-full overflow-hidden rounded bg-neutral-800">
-                            <div className="h-full bg-amber-500 transition-[width] duration-500" style={{ width: `${r.progress}%` }} />
-                          </div>
-                        </div>
-                        <button
-                          className="shrink-0 rounded bg-neutral-800 px-2 py-1 text-xs text-red-300 hover:bg-red-950/60 hover:text-red-200 disabled:opacity-40"
-                          disabled={busyIds.has(r.id)}
-                          title="停止本次转写"
-                          onClick={(e) => { e.stopPropagation(); cancel(r.id); }}
-                        >
-                          {busyIds.has(r.id) ? "…" : "停止"}
-                        </button>
-                      </div>
-                    ) : r.status === "done" ? (
-                      <>
-                        <span className="min-w-0 flex-1 truncate text-xs text-emerald-400">已完成 · {r.speakers} 位说话人</span>
-                        <button
-                          className="shrink-0 rounded bg-neutral-800 px-2 py-1 text-xs text-neutral-200 hover:bg-neutral-700 disabled:opacity-40"
-                          disabled={!ready || busyIds.has(r.id)}
-                          title={!ready ? "请先在设置里完成网关与模型配置" : "用当前设置(整段/分段)重新跑一遍转写"}
-                          onClick={(e) => { e.stopPropagation(); retry(r.id); }}
-                        >
-                          {busyIds.has(r.id) ? "…" : "重新转写"}
-                        </button>
-                      </>
-                    ) : r.status === "error" ? (
-                      <>
-                        <span className="min-w-0 flex-1 truncate text-xs text-red-400" title={r.error}>失败:{r.error}</span>
-                        <button
-                          className="shrink-0 rounded bg-neutral-800 px-2 py-1 text-xs text-neutral-200 hover:bg-neutral-700 disabled:opacity-40"
-                          disabled={!ready || busyIds.has(r.id)}
-                          title={!ready ? "请先在设置里完成网关与模型配置" : "重新转录"}
-                          onClick={(e) => { e.stopPropagation(); retry(r.id); }}
-                        >
-                          {busyIds.has(r.id) ? "…" : "重试"}
-                        </button>
-                      </>
-                    ) : (
-                      <>
-                        <span className="flex-1 text-xs text-neutral-400">待转录</span>
-                        <button
-                          className="shrink-0 rounded bg-emerald-700 px-2 py-1 text-xs text-white hover:bg-emerald-600 disabled:opacity-40"
-                          disabled={!ready || busyIds.has(r.id)}
-                          title={!ready ? "请先在设置里完成网关与模型配置" : "开始转录"}
-                          onClick={(e) => { e.stopPropagation(); retry(r.id); }}
-                        >
-                          {busyIds.has(r.id) ? "…" : "转录"}
-                        </button>
-                      </>
-                    )}
+                  <div className="mt-3 flex items-center gap-2">{statusActions(r)}</div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="overflow-hidden rounded-lg border border-neutral-800">
+              {records.map((r, i) => (
+                <div
+                  key={r.id}
+                  onClick={() => setSelectedId(r.id)}
+                  className={`flex cursor-pointer items-center gap-3 px-3 py-2.5 transition-colors hover:bg-neutral-800/40 ${i > 0 ? "border-t border-neutral-800/60" : ""}`}
+                >
+                  <span className="text-lg">{r.kind === "video" ? "🎬" : "🎧"}</span>
+                  <div className="min-w-0 flex-[2]">
+                    <div className="truncate text-sm font-medium text-neutral-100">{r.title}</div>
+                    <div className="mt-0.5 text-xs text-neutral-500">
+                      {fmtDur(r.durationSec)} · {new Date(r.createdAt).toLocaleString()}
+                    </div>
                   </div>
+                  <div className="hidden w-64 shrink-0 items-center gap-2 sm:flex">{statusActions(r)}</div>
+                  <button
+                    className="shrink-0 rounded px-1.5 py-0.5 text-xs text-neutral-500 hover:bg-neutral-800 hover:text-red-400"
+                    title="删除"
+                    onClick={(e) => { e.stopPropagation(); onDelete(r.id); }}
+                  >
+                    ✕
+                  </button>
                 </div>
               ))}
             </div>

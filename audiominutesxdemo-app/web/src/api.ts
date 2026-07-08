@@ -37,6 +37,18 @@ export const translateRecord = (id: string) =>
 export const cancelRecord = (id: string) =>
   jsend<{ ok: boolean }>(`/api/records/${id}/cancel`, "POST", {});
 
+export function uploadBackground(file: File): Promise<GatewayConfig> {
+  const fd = new FormData();
+  fd.append("file", file);
+  return fetch("/api/background", { method: "POST", body: fd }).then(async (r) => {
+    const t = await r.text();
+    let b: any; try { b = JSON.parse(t); } catch { b = t; }
+    if (!r.ok) throw new Error(b?.error || `background ${r.status}`);
+    return b as GatewayConfig;
+  });
+}
+export const deleteBackground = () => jsend<GatewayConfig>("/api/background", "DELETE");
+
 export function uploadFile(
   file: File,
   onProgress?: (pct: number) => void

@@ -7,14 +7,14 @@ metadata:
   description: Feishu-Minutes-style audio notes — diarized, word-timestamped transcripts with player sync, via the LLM Gateway.
   appid: audiominutesxdemo
   title: Audio Minutes X Demo
-  version: '1.0.3'
+  version: '1.0.4'
   categories:
     - Utilities
 permission:
   appData: true
 spec:
   runAsUser: true
-  versionName: '1.0.3'
+  versionName: '1.0.4'
   fullDescription: |
     Audio Minutes X Demo is a Feishu-Minutes (妙记) style app for turning meetings,
     lectures and audiobooks into interactive, searchable transcripts — all powered by
@@ -31,6 +31,9 @@ spec:
       use, all in the app. If a required model is missing, the app tells you it cannot
       transcribe until it is configured.
   upgradeDescription: |
+    1.0.4: 长音频整段转写彻底修复 —— 词级对齐自动分窗(避免网关 413)、时间戳贯穿全程(修复坍缩)；
+    新增降噪增强(Enhance)、白天/夜晚主题、自定义背景图、文件卡大图/列表切换；界面处理记录(降噪/分窗/回退/翻译等事件与失败原因，不再黑箱)；
+    英译中标点自动转全角；界面向飞书妙记靠拢(满屏宽度、视频窗口更大、转写更紧凑)；补翻译处理列表只显示翻译步骤。
     1.0.3: 转写/翻译支持手动「停止」；搜索命中高亮(区别于播放高亮)、支持跨词搜索并覆盖译文；
     中文按词/字渲染改为紧密排列(去除字/词间空隙)；译文分段的空格问题修复。
     1.0.2: 部署后无需手填 Cookie —— 透传浏览器 Olares 会话与 edge 注入的身份
