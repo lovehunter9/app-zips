@@ -917,6 +917,10 @@ function RecordDetail({
   // additionally requires a translate model (needed to actually run 补翻译).
   const showTranslation = !!config?.translate?.enabled;
   const translateAvailable = showTranslation && !!config?.translate?.model;
+  // User toggle for showing 译文 in the transcript + video subtitles. Only meaningful
+  // when the global 翻译 feature is ON *and* this record actually has translations
+  // (see `showTrans` below, computed after hasTranslation is known).
+  const [wantTrans, setWantTrans] = useState(true);
   const enhanceAvailable = !!config?.enhance?.model;
   const [activeGi, setActiveGi] = useState<number>(-1);   // active WORD (word-level path)
   const [activeTi, setActiveTi] = useState<number>(-1);   // active TRANSLATION word
@@ -1163,6 +1167,11 @@ function RecordDetail({
     return base;
   }, [segments]);
   const hasTranslation = tflat.length > 0;
+  // Effective "show 译文" flag for the transcript + subtitles: global 翻译 must be ON,
+  // there must be translations, and the user must not have toggled it off. When the
+  // global feature is off, translation is force-hidden regardless of the toggle.
+  const canToggleTrans = showTranslation && hasTranslation;
+  const showTrans = canToggleTrans && wantTrans;
 
   const hasWords = flat.length > 0;
 
@@ -1178,6 +1187,30 @@ function RecordDetail({
   );
   const cues = useMemo(() => buildCues(flat, noPunct), [flat, noPunct]);
   const tcues = useMemo(() => buildCues(tflat, noPunctT), [tflat, noPunctT]);
+
+  // Display-layer paragraph merge (Feishu-style large blocks). ONLY when the
+  // transcript is punctuated — unpunctuated stays 1 段/块 as-is (merging messy
+  // no-punctuation output would be unreadable). Merge consecutive SAME-speaker
+  // segments, capped by char count and broken on a long pause so a long monologue
+  // doesn't become one giant wall. The UNDERLYING segments are untouched (word
+  // timings / subtitles / seek keep working); this is purely how we group them.
+  const paragraphs = useMemo(() => {
+    const out: { segIdxs: number[]; speaker: string; start: number }[] = [];
+    const MAXCHARS = 160, PAUSE = 3.0;
+    segments.forEach((s, si) => {
+      const last = out[out.length - 1];
+      const lastSegIdx = last ? last.segIdxs[last.segIdxs.length - 1] : -1;
+      const prevSeg = lastSegIdx >= 0 ? segments[lastSegIdx] : null;
+      const chars = last ? last.segIdxs.reduce((n, k) => n + (segments[k].text?.length || 0), 0) : 0;
+      const canMerge =
+        !noPunct && last && last.speaker === s.speaker &&
+        chars < MAXCHARS &&
+        (prevSeg ? +s.start - +prevSeg.end <= PAUSE : true);
+      if (canMerge) last!.segIdxs.push(si);
+      else out.push({ segIdxs: [si], speaker: s.speaker, start: +s.start });
+    });
+    return out;
+  }, [segments, noPunct]);
   const cueStartsRef = useRef<number[]>([]);
   const tcueStartsRef = useRef<number[]>([]);
   const cuesRef = useRef<SubCue[]>([]);
@@ -1375,6 +1408,15 @@ function RecordDetail({
     </div>
   ) : null;
 
+  // 显示译文 toggle — only when the global 翻译 feature is on AND this record has
+  // translations. Off hides 译文 in both the transcript and the video subtitles.
+  const transToggle = canToggleTrans ? (
+    <label className="flex shrink-0 items-center gap-1 text-xs text-neutral-400" title="是否在文字记录与视频字幕中显示译文">
+      <input type="checkbox" className="h-3.5 w-3.5" checked={wantTrans} onChange={(e) => setWantTrans(e.target.checked)} />
+      显示译文
+    </label>
+  ) : null;
+
   // Render one line of clickable, per-unit spans (original OR translation). CJK
   // units carry NO horizontal padding so 字/词 both pack tightly like normal
   // Chinese; English keeps its real inter-word spaces. Search hits are painted in
@@ -1514,50 +1556,65 @@ function RecordDetail({
 
   // The transcript list is shared by both layouts (video: right column; audio:
   // full-width main body). The scroll container that wraps it differs per layout.
+  // Render one segment's ORIGINAL words inline (used inside a merged paragraph). A
+  // leading space is inserted between two segments only when latin word-spacing
+  // needs it (CJK stays tight).
+  const renderSegInline = (si: number, needSpace: boolean) => {
+    const seg = segments[si];
+    const lead = needSpace ? " " : "";
+    if (seg.words && seg.words.length)
+      return <span key={si}>{lead}{renderUnits(seg.words, segBase[si], activeGi, "data-gi", "bg-emerald-500/70 text-white")}</span>;
+    return (
+      <span
+        key={si}
+        data-seg={si}
+        onClick={() => seekTo(seg.start)}
+        className={`cursor-pointer rounded px-0.5 transition-colors ${si === activeSegIdx ? "bg-emerald-500/25 text-emerald-100" : "hover:bg-neutral-700/50"}`}
+      >
+        {lead}{markPlain(seg.text)}
+      </span>
+    );
+  };
+  const renderTransInline = (si: number, needSpace: boolean) => {
+    const seg = segments[si];
+    if (!seg.translation) return null;
+    const lead = needSpace ? " " : "";
+    if (seg.twords && seg.twords.length)
+      return <span key={si}>{lead}{renderUnits(seg.twords, segBaseT[si], activeTi, "data-ti", "bg-sky-500/70 text-white")}</span>;
+    return <span key={si} onClick={() => seekTo(seg.start)} className="cursor-pointer">{lead}{markPlain(seg.translation)}</span>;
+  };
+  const spaceBetween = (aIdx: number, bIdx: number, field: "words" | "twords") => {
+    const a = segments[aIdx]?.[field], b = segments[bIdx]?.[field];
+    if (a && a.length && b && b.length) return needsSpaceBefore(a[a.length - 1], b[0]);
+    return false;
+  };
+
   const transcriptList = (
     <>
       {segments.length === 0 && <p className="text-sm text-neutral-600">(无转写内容)</p>}
       {query && matchCount === 0 && <p className="text-sm text-neutral-600">未找到「{q.trim()}」</p>}
       <div className="space-y-0.5">
-        {segments.map((seg, si) => {
-          if (query && !lineMatches(seg)) return null;
+        {paragraphs.map((p, pi) => {
+          if (query && !p.segIdxs.some((si) => lineMatches(segments[si]))) return null;
+          const activeIn = p.segIdxs.includes(activeSegIdx);
+          const hasTrans = showTrans && p.segIdxs.some((si) => segments[si].translation);
           return (
-          <div key={si} data-seg={si} className={`rounded-md px-2 py-1 transition-colors ${si === activeSegIdx ? "bg-neutral-800/40" : ""}`}>
-            <div className="mb-0.5 flex items-center gap-1.5">
-              <SpeakerChip spk={seg.speaker} names={speakerNames} onClick={() => setSpkEdit(si)} />
-              <button className="font-mono text-[11px] tabular-nums text-neutral-500 hover:text-neutral-300" onClick={() => seekTo(seg.start)}>
-                {fmtTC(seg.start)}
-              </button>
-            </div>
-            <p className="break-words text-[14px] leading-snug text-neutral-200">
-              {seg.words && seg.words.length
-                ? renderUnits(seg.words, segBase[si], activeGi, "data-gi", "bg-emerald-500/70 text-white")
-                : (
-                  // No word-level timings (align returned nothing): fall back to
-                  // segment-level — click the whole line to seek, highlight the
-                  // active segment during playback.
-                  <span
-                    onClick={() => seekTo(seg.start)}
-                    className={`cursor-pointer rounded px-0.5 transition-colors ${
-                      si === activeSegIdx ? "bg-emerald-500/25 text-emerald-100" : "hover:bg-neutral-700/50"
-                    }`}
-                  >
-                    {markPlain(seg.text)}
-                  </span>
-                )}
-            </p>
-            {showTranslation && seg.translation && (
-              <p className="mt-0.5 break-words border-l-2 border-sky-700/50 pl-2 text-[13px] leading-snug text-sky-200/90">
-                {seg.twords && seg.twords.length
-                  ? renderUnits(seg.twords, segBaseT[si], activeTi, "data-ti", "bg-sky-500/70 text-white")
-                  : (
-                    <span onClick={() => seekTo(seg.start)} className="cursor-pointer">
-                      {markPlain(seg.translation)}
-                    </span>
-                  )}
+            <div key={pi} className={`rounded-md px-2 py-1 transition-colors ${activeIn ? "bg-neutral-800/40" : ""}`}>
+              <div className="mb-0.5 flex items-center gap-1.5">
+                <SpeakerChip spk={p.speaker} names={speakerNames} onClick={() => setSpkEdit(p.segIdxs[0])} />
+                <button className="font-mono text-[11px] tabular-nums text-neutral-500 hover:text-neutral-300" onClick={() => seekTo(p.start)}>
+                  {fmtTC(p.start)}
+                </button>
+              </div>
+              <p className="break-words text-[14px] leading-snug text-neutral-200">
+                {p.segIdxs.map((si, k) => renderSegInline(si, k > 0 && spaceBetween(p.segIdxs[k - 1], si, "words")))}
               </p>
-            )}
-          </div>
+              {hasTrans && (
+                <p className="mt-0.5 break-words border-l-2 border-sky-700/50 pl-2 text-[13px] leading-snug text-sky-200/90">
+                  {p.segIdxs.map((si, k) => renderTransInline(si, k > 0 && spaceBetween(p.segIdxs[k - 1], si, "twords")))}
+                </p>
+              )}
+            </div>
           );
         })}
       </div>
@@ -1669,14 +1726,14 @@ function RecordDetail({
               <div className="flex h-full flex-col gap-2 overflow-hidden pr-3">
                 <div className="relative shrink-0">
                   <video ref={(el) => { mediaRef.current = el; }} src={mediaSrc} controls className="max-h-[52vh] w-full rounded-lg bg-black object-contain" onTimeUpdate={onTimeUpdate} onPlay={startRaf} onPause={stopRaf} onEnded={stopRaf} onSeeking={onTimeUpdate} />
-                  {subs && (subCueText || (showTranslation && subTCueText)) && (
+                  {subs && (subCueText || (showTrans && subTCueText)) && (
                     <div className="pointer-events-none absolute inset-x-0 bottom-12 flex flex-col items-center gap-1 px-4 text-center">
                       {subCueText && (
                         <span className="max-w-[90%] rounded bg-black/65 px-2 py-0.5 text-[17px] font-medium leading-snug text-white [text-shadow:0_1px_3px_rgba(0,0,0,0.9)]">
                           {subCueText}
                         </span>
                       )}
-                      {showTranslation && subTCueText && (
+                      {showTrans && subTCueText && (
                         <span className="max-w-[90%] rounded bg-black/55 px-2 py-0.5 text-[14px] leading-snug text-sky-100 [text-shadow:0_1px_3px_rgba(0,0,0,0.9)]">
                           {subTCueText}
                         </span>
@@ -1694,6 +1751,7 @@ function RecordDetail({
                   <span className="text-sm font-medium text-neutral-200">文字记录</span>
                   {editing ? editToolbar : (
                     <div className="ml-auto flex items-center gap-2">
+                      {transToggle}
                       {granularityToggle}
                       <div className="w-44 sm:w-56">{searchBox}</div>
                       <button className="btn-ghost !py-1" onClick={enterEdit} title="编辑转录文字 / 译文">编辑</button>
@@ -1727,6 +1785,7 @@ function RecordDetail({
                   <span className="text-sm font-medium text-neutral-200">文字记录</span>
                   {editing ? editToolbar : (
                     <div className="ml-auto flex items-center gap-2">
+                      {transToggle}
                       {granularityToggle}
                       <div className="w-48 sm:w-64">{searchBox}</div>
                       <button className="btn-ghost !py-1" onClick={enterEdit} title="编辑转录文字 / 译文">编辑</button>
