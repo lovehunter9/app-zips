@@ -658,6 +658,29 @@ app.patch("/api/records/:id/result", (req, res) => {
   res.json({ ...rec, hasCover: !!rec.cover, coverVer: rec.cover?.at || "" });
 });
 
+// Delete a single processing-record notice (by index) or clear them all. The
+// card badge (⚠ N 条提示) reads from the same list, so removing entries clears it.
+app.delete("/api/records/:id/notices/:idx", (req, res) => {
+  const rec = readRecord(req.params.id);
+  if (!rec) return res.status(404).json({ error: "not found" });
+  const idx = parseInt(req.params.idx, 10);
+  if (Array.isArray(rec.notices) && idx >= 0 && idx < rec.notices.length) {
+    rec.notices.splice(idx, 1);
+    rec.updatedAt = nowIso();
+    writeRecord(rec);
+  }
+  res.json({ ...rec, hasCover: !!rec.cover, coverVer: rec.cover?.at || "" });
+});
+
+app.delete("/api/records/:id/notices", (req, res) => {
+  const rec = readRecord(req.params.id);
+  if (!rec) return res.status(404).json({ error: "not found" });
+  rec.notices = [];
+  rec.updatedAt = nowIso();
+  writeRecord(rec);
+  res.json({ ...rec, hasCover: !!rec.cover, coverVer: rec.cover?.at || "" });
+});
+
 // ---------------------------------------------------------------------------
 // Cover image — a per-record thumbnail shown on the library cards. Accepts either
 // an uploaded image file (multipart "file") or a captured video frame as a base64
@@ -1371,15 +1394,18 @@ async function runRediarizeJob(id, target) {
     setP(10, "重新识别说话人");
     const workAudio = rec.audioPath;
     timer.begin("说话人分离");
-    // Hint the gateway with an upper bound; we ALSO cap client-side below so the
-    // contract holds even if the backend ignores max_speakers.
-    const diar = await gwAudioOp(cfg, "diarization", workAudio, cfg.models.diar, { max_speakers: N, num_speakers: N });
+    // Hint the gateway with an UPPER BOUND only (max_speakers). Never num_speakers —
+    // that forces EXACTLY N and would split a single speaker into N. We ALSO cap
+    // client-side below so the contract holds even if the backend ignores the hint.
+    const diar = await gwAudioOp(cfg, "diarization", workAudio, cfg.models.diar, { max_speakers: N });
     timer.finish();
     ckCancel(id);
     let dseg = (Array.isArray(diar?.segments) ? diar.segments : [])
       .map((s) => ({ start: +s.start, end: +s.end, speaker: String(s.speaker ?? "SPEAKER_00") }))
       .filter((s) => Number.isFinite(s.start) && Number.isFinite(s.end) && s.end > s.start);
     if (!dseg.length) throw new Error("说话人分离未返回任何片段");
+    const rawSpk = [...new Set(dseg.map((d) => d.speaker))];
+    console.log(`[${id}] 重新识别：max_speakers=${N} → diar 返回 ${dseg.length} 段 / ${rawSpk.length} 位说话人 (${rawSpk.join(",")})`);
 
     // Cap to the top-N speakers by total speaking time; drop the rest so segments
     // fall back onto the nearest KEPT speaker. No-op when the backend already
@@ -1420,12 +1446,14 @@ async function runRediarizeJob(id, target) {
   } catch (e) {
     if ((e && e.cancelled) || cancelled.has(id)) revertStopped(id, rec);
     else {
+      const cause = e?.cause ? `（${e.cause.code || e.cause.message || e.cause}）` : "";
+      console.error(`[${id}] (ERROR) 重新识别失败：${e?.message || e}`, e?.cause || "");
       const out = readRecord(id) || rec;
       out.status = "done"; // record still has its transcript
       out.progress = 100; out.phase = "";
-      out.error = String(e.message || e);
+      out.error = String(e.message || e) + cause;
       writeRecord(out);
-      addNotice(id, "error", `重新识别失败：${e?.message || e}`);
+      addNotice(id, "error", `重新识别失败：${e?.message || e}${cause}`);
     }
   } finally {
     running.delete(id);

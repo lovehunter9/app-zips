@@ -48,6 +48,10 @@ export const cancelRecord = (id: string) =>
   jsend<{ ok: boolean }>(`/api/records/${id}/cancel`, "POST", {});
 export const rediarize = (id: string, speakers: number) =>
   jsend<{ ok: boolean }>(`/api/records/${id}/rediarize`, "POST", { speakers });
+export const deleteNotice = (id: string, idx: number) =>
+  jsend<RecordFull>(`/api/records/${id}/notices/${idx}`, "DELETE");
+export const clearNotices = (id: string) =>
+  jsend<RecordFull>(`/api/records/${id}/notices`, "DELETE");
 
 export function uploadBackground(file: File): Promise<GatewayConfig> {
   const fd = new FormData();

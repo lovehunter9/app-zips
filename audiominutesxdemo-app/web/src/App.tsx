@@ -326,7 +326,7 @@ function fmtElapsed(ms: number): string {
 // user it is still working).
 // Processing event/notice log — surfaces WHAT happened during a run (denoise fell
 // back, alignment auto-split, a step failed) so the pipeline isn't a black box.
-function NoticeList({ notices, className = "" }: { notices?: Notice[]; className?: string }) {
+function NoticeList({ notices, className = "", onDelete }: { notices?: Notice[]; className?: string; onDelete?: (index: number) => void }) {
   if (!notices || notices.length === 0) return null;
   const box = (l: string) =>
     l === "error"
@@ -350,6 +350,15 @@ function NoticeList({ notices, className = "" }: { notices?: Notice[]; className
           </span>
           <span className="flex-1 break-words leading-snug">{n.msg}</span>
           <span className="shrink-0 tabular-nums text-[10px] opacity-50">{clock(n.at)}</span>
+          {onDelete && (
+            <button
+              className="shrink-0 text-neutral-500 hover:text-red-400"
+              title="删除这条记录"
+              onClick={() => onDelete(i)}
+            >
+              ✕
+            </button>
+          )}
         </div>
       ))}
     </div>
@@ -1676,7 +1685,7 @@ function RecordDetail({
                   )}
                 </div>
                 <PlayerBar kind="video" subs={subs} setSubs={setSubs} skip={skip} onSetCover={() => setCoverOpen(true)} />
-                <MetaTabs rec={rec} defaultTab="spk" />
+                <MetaTabs rec={rec} defaultTab="spk" onReload={load} />
               </div>
             }
             right={
@@ -1709,7 +1718,7 @@ function RecordDetail({
             maxFrac={0.5}
             left={
               <div className="flex h-full flex-col overflow-hidden border-r border-neutral-800">
-                <MetaTabs rec={rec} defaultTab="info" />
+                <MetaTabs rec={rec} defaultTab="info" onReload={load} />
               </div>
             }
             right={
@@ -2188,10 +2197,12 @@ function FileInfoRows({ rec }: { rec: RecordFull }) {
 // Feishu-style tabbed metadata panel (说话人 / 文件信息 / 处理记录) used in both the
 // audio sidebar and the video left column, so only the transcript needs to scroll —
 // the panel itself is compact and its active tab scrolls internally if needed.
-function MetaTabs({ rec, defaultTab = "info" }: { rec: RecordFull; defaultTab?: "spk" | "info" | "log" }) {
+function MetaTabs({ rec, defaultTab = "info", onReload }: { rec: RecordFull; defaultTab?: "spk" | "info" | "log"; onReload?: () => void }) {
   const [tab, setTab] = useState<"spk" | "info" | "log">(defaultTab);
   const spkN = rec.result?.speakers?.length ?? 0;
   const logN = rec.notices?.length ?? 0;
+  const delOne = async (i: number) => { try { await api.deleteNotice(rec.id, i); onReload?.(); } catch { /* ignore */ } };
+  const clearAll = async () => { try { await api.clearNotices(rec.id); onReload?.(); } catch { /* ignore */ } };
   const btn = (id: "spk" | "info" | "log", label: string) => (
     <button
       className={`rounded px-2 py-1 ${tab === id ? "bg-neutral-800 text-neutral-100" : "text-neutral-400 hover:text-neutral-200"}`}
@@ -2215,7 +2226,12 @@ function MetaTabs({ rec, defaultTab = "info" }: { rec: RecordFull; defaultTab?: 
         ) : logN || rec.timings ? (
           <>
             <TimingsPanel timings={rec.timings} />
-            <NoticeList notices={rec.notices} />
+            {logN > 0 && onReload && (
+              <div className="mb-1.5 flex justify-end">
+                <button className="text-[11px] text-neutral-500 hover:text-red-400" onClick={clearAll}>清空全部</button>
+              </div>
+            )}
+            <NoticeList notices={rec.notices} onDelete={onReload ? delOne : undefined} />
           </>
         ) : (
           <p className="text-xs text-neutral-600">(暂无处理记录)</p>
