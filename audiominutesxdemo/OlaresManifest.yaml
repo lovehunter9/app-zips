@@ -7,14 +7,14 @@ metadata:
   description: Feishu-Minutes-style audio notes — diarized, word-timestamped transcripts with player sync, via the LLM Gateway.
   appid: audiominutesxdemo
   title: Audio Minutes X Demo
-  version: '1.0.4'
+  version: '1.0.5'
   categories:
     - Utilities
 permission:
   appData: true
 spec:
   runAsUser: true
-  versionName: '1.0.4'
+  versionName: '1.0.5'
   fullDescription: |
     Audio Minutes X Demo is a Feishu-Minutes (妙记) style app for turning meetings,
     lectures and audiobooks into interactive, searchable transcripts — all powered by
@@ -31,6 +31,9 @@ spec:
       use, all in the app. If a required model is missing, the app tells you it cannot
       transcribe until it is configured.
   upgradeDescription: |
+    1.0.5: 文字记录展示向飞书妙记靠拢(大段落合并、有标点按句编辑、只重排改动句时间轴)；
+    参与者管理(增删、删除后其发言转“未知”待逐条重指派)、重新识别说话人(仅重跑分离并保留文字)；
+    处理记录可单条删除/清空；「显示译文」改为按文件记忆；编辑进行中禁用重跑类操作，避免与自动保存冲突。
     1.0.4: 长音频整段转写彻底修复 —— 词级对齐自动分窗(避免网关 413)、时间戳贯穿全程(修复坍缩)；
     新增降噪增强(Enhance)、白天/夜晚主题、自定义背景图、文件卡大图/列表切换；界面处理记录(降噪/分窗/回退/翻译等事件与失败原因，不再黑箱)；
     英译中标点自动转全角；界面向飞书妙记靠拢(满屏宽度、视频窗口更大、转写更紧凑)；补翻译处理列表只显示翻译步骤。
