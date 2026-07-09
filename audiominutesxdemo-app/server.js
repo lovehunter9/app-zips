@@ -632,13 +632,20 @@ app.patch("/api/records/:id/result", (req, res) => {
     for (let i = 0; i < segs.length && i < b.segments.length; i++) {
       const src = b.segments[i] || {};
       const seg = segs[i];
-      if (typeof src.text === "string" && src.text !== seg.text) {
+      // Sentence-unit editing sends precomputed `words`/`twords` (only changed
+      // sentences were re-timed client-side); use them verbatim. Otherwise re-derive
+      // char-proportional word timings from the new text (whole-segment).
+      const cleanWords = (arr) =>
+        (Array.isArray(arr) ? arr : [])
+          .map((w) => ({ text: String(w?.text ?? ""), start: Number(w?.start) || 0, end: Number(w?.end) || 0 }))
+          .filter((w) => w.text !== "");
+      if (typeof src.text === "string" && (src.text !== seg.text || Array.isArray(src.words))) {
         seg.text = src.text;
-        seg.words = spreadWords(src.text, seg.start, seg.end);
+        seg.words = Array.isArray(src.words) ? cleanWords(src.words) : spreadWords(src.text, seg.start, seg.end);
       }
-      if (typeof src.translation === "string" && src.translation !== (seg.translation || "")) {
+      if (typeof src.translation === "string" && (src.translation !== (seg.translation || "") || Array.isArray(src.twords))) {
         seg.translation = src.translation;
-        seg.twords = src.translation ? spreadWords(src.translation, seg.start, seg.end) : [];
+        seg.twords = Array.isArray(src.twords) ? cleanWords(src.twords) : (src.translation ? spreadWords(src.translation, seg.start, seg.end) : []);
       }
       if (typeof src.speaker === "string" && src.speaker) seg.speaker = src.speaker;
     }

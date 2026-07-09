@@ -1,4 +1,4 @@
-import type { GatewayConfig, ModelOpt, RecordFull, RecordOptions, RecordSummary } from "./types";
+import type { GatewayConfig, ModelOpt, RecordFull, RecordOptions, RecordSummary, Word } from "./types";
 
 async function jget<T>(url: string): Promise<T> {
   const r = await fetch(url);
@@ -38,7 +38,10 @@ export const translateRecord = (id: string) =>
 // Save manual edits (transcript editor): per-segment text/translation/speaker,
 // speaker display names, and the participant roster. Returns the updated record.
 export interface ResultPatch {
-  segments?: { text?: string; translation?: string; speaker?: string }[];
+  // When `words`/`twords` are provided, the server uses them verbatim (sentence-unit
+  // editing recomputes only the changed sentences' timings client-side); otherwise it
+  // re-derives word timings from `text`/`translation`.
+  segments?: { text?: string; translation?: string; speaker?: string; words?: Word[]; twords?: Word[] }[];
   speakerNames?: Record<string, string>;
   participants?: string[];
 }

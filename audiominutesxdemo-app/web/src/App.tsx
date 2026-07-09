@@ -117,6 +117,88 @@ const hasPunctuationText = (s: string) => {
   const chars = s.replace(/\s/g, "").length || 1;
   return marks >= 3 && marks / chars >= 0.01;
 };
+// --- Sentence-unit editing helpers (punctuated transcripts only) -------------
+// A sentence ends at 。！？!?… optionally followed by closing quotes/brackets.
+const SENT_END_RE = /[。！？!?…]+[”’"')\]）」』]*$/;
+// Join word tokens back into a display string with latin spacing (mirror render).
+function joinWords(words: Word[]): string {
+  let s = "";
+  words.forEach((w, i) => { if (i > 0 && needsSpaceBefore(words[i - 1], w)) s += " "; s += w.text || ""; });
+  return s;
+}
+type Sent = { text: string; start: number; end: number; words: Word[] };
+// Split a segment's word stream into sentences at sentence-ending punctuation.
+function splitSentencesByWords(words: Word[]): Sent[] {
+  const out: Sent[] = [];
+  let cur: Word[] = [];
+  for (const w of words) {
+    cur.push(w);
+    if (SENT_END_RE.test((w.text || "").trim())) {
+      out.push({ words: cur, text: joinWords(cur), start: cur[0].start, end: cur[cur.length - 1].end });
+      cur = [];
+    }
+  }
+  if (cur.length) out.push({ words: cur, text: joinWords(cur), start: cur[0].start, end: cur[cur.length - 1].end });
+  return out;
+}
+// Split plain text into sentences (fallback when a segment has no word timings),
+// proportionally assigning each a slice of [start,end].
+function splitSentencesByText(text: string, start: number, end: number): Sent[] {
+  const parts = (text.match(/[^。！？!?…]*[。！？!?…]+[”’"')\]）」』]*|[^。！？!?…]+$/g) || [text]).filter((p) => p.trim());
+  const total = text.length || 1;
+  const span = Math.max(0, end - start);
+  let acc = 0;
+  return parts.map((p) => {
+    const s = start + (span * acc) / total;
+    acc += p.length;
+    const e = start + (span * acc) / total;
+    return { text: p, start: round3(s), end: round3(e), words: spreadWordsClient(p, s, e) };
+  });
+}
+// Client mirror of the server sliceToWords + spreadWords: char-proportional timing
+// for an edited line (real alignment is gone once text changed). Keeps click-to-seek.
+function spreadWordsClient(text: string, start: number, end: number): Word[] {
+  const t = text || "";
+  const n = t.length || 1;
+  const s = Number(start) || 0;
+  const span = Math.max(0, (Number(end) || 0) - s);
+  const timeAtChar = (c: number) => s + (span * Math.min(n, Math.max(0, c))) / n;
+  const PUNCT = /[。！？，、；：,.!?;:"'”’」』）)\]…—·]/;
+  const APOS = /['’]/;
+  const out: Word[] = [];
+  let i = 0;
+  while (i < t.length) {
+    if (/\s/.test(t[i])) { i++; continue; }
+    let j: number;
+    if (isCJKChar(t[i])) j = i + 1;
+    else {
+      j = i;
+      while (j < t.length && !/\s/.test(t[j]) && !isCJKChar(t[j])) {
+        if (PUNCT.test(t[j])) {
+          if (APOS.test(t[j]) && j > i && WORDLIKE_RE.test(t[j - 1]) && j + 1 < t.length && WORDLIKE_RE.test(t[j + 1])) { j++; continue; }
+          break;
+        }
+        j++;
+      }
+      if (j === i) j = i + 1;
+    }
+    while (j < t.length && PUNCT.test(t[j])) j++;
+    const seg = t.slice(i, j);
+    if (seg.trim()) out.push({ text: seg, start: round3(timeAtChar(i)), end: round3(timeAtChar(j)) });
+    i = j;
+  }
+  return fixWordTimes(out, s, s + span);
+}
+// Join edited sentences back into one segment string (latin spacing at boundaries).
+function joinSentences(texts: string[]): string {
+  let s = "";
+  texts.forEach((t) => {
+    if (s && t) { const a = s[s.length - 1], b = t[0]; if (!isCJKChar(a) && !isCJKChar(b) && !/\s$/.test(s)) s += " "; }
+    s += t;
+  });
+  return s;
+}
+
 function buildCues(
   words: { segIdx: number; text: string; start: number; end: number }[],
   noPunct = false,
@@ -1062,10 +1144,18 @@ function RecordDetail({
     catch (e: any) { setErr(String(e?.message || e)); }
   }, [id, onChanged]);
 
-  type Draft = { text: string; translation: string };
+  // Editing model. When the transcript is PUNCTUATED, editing is by SENTENCE:
+  // each segment's text is split into sentences (one textarea each), and only the
+  // sentences you actually change get their word timings recomputed — untouched
+  // sentences keep their real alignment. When UNPUNCTUATED, `sents` is just the whole
+  // segment text (one textarea), i.e. the previous per-segment behavior.
+  type Draft = { sents: string[]; translation: string };
+  type SentMeta = { start: number; end: number; origText: string; origWords: Word[] };
   const [editing, setEditing] = useState(false);
   const [editTrans, setEditTrans] = useState(false);
   const [draft, setDraft] = useState<Draft[]>([]);
+  const sentMetaRef = useRef<SentMeta[][]>([]);        // per segment → per sentence
+  const origTransRef = useRef<{ text: string; twords: Word[] }[]>([]);
   const undoRef = useRef<Draft[][]>([]);
   const redoRef = useRef<Draft[][]>([]);
   const [, setHistTick] = useState(0); // force re-render when undo/redo depth changes
@@ -1073,30 +1163,87 @@ function RecordDetail({
   const saveTimer = useRef<number | null>(null);
   const lastEditRef = useRef<{ key: string; t: number }>({ key: "", t: 0 });
 
+  // Reconstruct the PATCH segments from the draft: reuse original words for unchanged
+  // sentences, recompute (char-proportional within the sentence's own window) only
+  // for changed ones. Unchanged segments emit {} so the server keeps them intact.
+  const buildPatchSegments = useCallback(
+    (draftArr: Draft[]): api.ResultPatch["segments"] => {
+      const segs = rec?.result?.segments || [];
+      return segs.map((seg, si) => {
+        const d = draftArr[si];
+        if (!d) return {};
+        const meta = sentMetaRef.current[si] || [];
+        let words: Word[] = [];
+        let srcChanged = false;
+        d.sents.forEach((txt, k) => {
+          const m = meta[k];
+          if (m && txt === m.origText) words = words.concat(m.origWords);
+          else { srcChanged = true; const st = m ? m.start : seg.start, en = m ? m.end : seg.end; words = words.concat(spreadWordsClient(txt, st, en)); }
+        });
+        const text = joinSentences(d.sents);
+        const ot = origTransRef.current[si] || { text: seg.translation || "", twords: seg.twords || [] };
+        const transChanged = d.translation !== ot.text;
+        const out: { text?: string; words?: Word[]; translation?: string; twords?: Word[] } = {};
+        if (srcChanged) { out.text = text; out.words = words; }
+        if (transChanged) { out.translation = d.translation; out.twords = d.translation ? spreadWordsClient(d.translation, seg.start, seg.end) : []; }
+        return out;
+      });
+    },
+    [rec],
+  );
+
   const scheduleSave = useCallback(
     (next: Draft[]) => {
       setSaveState("saving");
       if (saveTimer.current) window.clearTimeout(saveTimer.current);
       saveTimer.current = window.setTimeout(async () => {
-        try { await api.saveResult(id, { segments: next, speakerNames, participants }); setSaveState("saved"); }
+        try { await api.saveResult(id, { segments: buildPatchSegments(next), speakerNames, participants }); setSaveState("saved"); }
         catch (e: any) { setErr(String(e?.message || e)); setSaveState("idle"); }
       }, 500);
     },
-    [id, speakerNames, participants],
+    [id, speakerNames, participants, buildPatchSegments],
   );
   const enterEdit = () => {
-    setDraft((rec?.result?.segments || []).map((s) => ({ text: s.text || "", translation: s.translation || "" })));
+    const segs = rec?.result?.segments || [];
+    const bySentence = !noPunct;
+    const metas: SentMeta[][] = [];
+    const otrans: { text: string; twords: Word[] }[] = [];
+    const d: Draft[] = segs.map((s) => {
+      let sents: Sent[];
+      if (bySentence) {
+        sents = s.words && s.words.length ? splitSentencesByWords(s.words) : splitSentencesByText(s.text || "", +s.start, +s.end);
+        if (!sents.length) sents = [{ text: s.text || "", start: +s.start, end: +s.end, words: s.words || [] }];
+      } else {
+        sents = [{ text: s.text || "", start: +s.start, end: +s.end, words: s.words || [] }];
+      }
+      metas.push(sents.map((x) => ({ start: x.start, end: x.end, origText: x.text, origWords: x.words })));
+      otrans.push({ text: s.translation || "", twords: s.twords || [] });
+      return { sents: sents.map((x) => x.text), translation: s.translation || "" };
+    });
+    sentMetaRef.current = metas;
+    origTransRef.current = otrans;
+    setDraft(d);
     undoRef.current = []; redoRef.current = []; setHistTick((t) => t + 1);
     setSaveState("saved");
     setEditing(true);
   };
-  const editSeg = (i: number, field: "text" | "translation", value: string) => {
-    const key = i + ":" + field;
+  const editSent = (si: number, sentIdx: number, value: string) => {
+    const key = si + ":s" + sentIdx;
     const now = Date.now();
     const coalesce = lastEditRef.current.key === key && now - lastEditRef.current.t < 1500;
     lastEditRef.current = { key, t: now };
     if (!coalesce) { undoRef.current.push(draft); redoRef.current = []; setHistTick((t) => t + 1); }
-    const next = draft.map((d, k) => (k === i ? { ...d, [field]: value } : d));
+    const next = draft.map((dd, k) => (k === si ? { ...dd, sents: dd.sents.map((t, j) => (j === sentIdx ? value : t)) } : dd));
+    setDraft(next);
+    scheduleSave(next);
+  };
+  const editSegTrans = (si: number, value: string) => {
+    const key = si + ":t";
+    const now = Date.now();
+    const coalesce = lastEditRef.current.key === key && now - lastEditRef.current.t < 1500;
+    lastEditRef.current = { key, t: now };
+    if (!coalesce) { undoRef.current.push(draft); redoRef.current = []; setHistTick((t) => t + 1); }
+    const next = draft.map((dd, k) => (k === si ? { ...dd, translation: value } : dd));
     setDraft(next);
     scheduleSave(next);
   };
@@ -1116,7 +1263,7 @@ function RecordDetail({
   };
   const finishEdit = async () => {
     if (saveTimer.current) { window.clearTimeout(saveTimer.current); saveTimer.current = null; }
-    try { const up = await api.saveResult(id, { segments: draft, speakerNames, participants }); setRec(up); onChanged(); }
+    try { const up = await api.saveResult(id, { segments: buildPatchSegments(draft), speakerNames, participants }); setRec(up); onChanged(); }
     catch (e: any) { setErr(String(e?.message || e)); }
     setEditing(false);
   };
@@ -1533,19 +1680,24 @@ function RecordDetail({
               <SpeakerChip spk={seg.speaker} names={speakerNames} />
               <span className="font-mono text-[11px] tabular-nums text-neutral-500">{fmtTC(seg.start)}</span>
             </div>
-            <textarea
-              className="w-full resize-none rounded border border-neutral-700 bg-neutral-900/60 px-2 py-1 text-[14px] leading-snug text-neutral-100 focus:border-emerald-500 focus:outline-none"
-              rows={Math.max(1, Math.ceil((d.text.length || 1) / 34))}
-              value={d.text}
-              onChange={(e) => editSeg(i, "text", e.target.value)}
-            />
+            <div className="space-y-1">
+              {d.sents.map((txt, si) => (
+                <textarea
+                  key={si}
+                  className="w-full resize-none rounded border border-neutral-700 bg-neutral-900/60 px-2 py-1 text-[14px] leading-snug text-neutral-100 focus:border-emerald-500 focus:outline-none"
+                  rows={Math.max(1, Math.ceil((txt.length || 1) / 34))}
+                  value={txt}
+                  onChange={(e) => editSent(i, si, e.target.value)}
+                />
+              ))}
+            </div>
             {editTrans && hasTranslation && (
               <textarea
                 className="mt-1 w-full resize-none rounded border border-sky-800/60 bg-sky-950/20 px-2 py-1 text-[13px] leading-snug text-sky-100 focus:border-sky-500 focus:outline-none"
                 rows={Math.max(1, Math.ceil((d.translation.length || 1) / 34))}
                 value={d.translation}
                 placeholder="(无译文)"
-                onChange={(e) => editSeg(i, "translation", e.target.value)}
+                onChange={(e) => editSegTrans(i, e.target.value)}
               />
             )}
           </div>
