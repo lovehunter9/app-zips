@@ -35,6 +35,12 @@ export interface Notice {
   msg: string;
 }
 
+// Processing-time breakdown for a run: total wall-clock + per-step durations (ms).
+export interface Timings {
+  totalMs: number;
+  steps: { name: string; ms: number }[];
+}
+
 export interface RecordOptions {
   language: string;
   segmentedStt: boolean;
@@ -64,11 +70,13 @@ export interface RecordSummary {
   notices?: Notice[];
   hasCover?: boolean;
   coverVer?: string; // changes when the cover is (re)set, used to bust the <img> cache
+  totalMs?: number | null; // total processing time of the last run (ms)
 }
 
 export interface RecordFull extends RecordSummary {
   mime: string;
   result: RecordResult | null;
+  timings?: Timings | null;
 }
 
 export interface ModelOpt {

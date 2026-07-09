@@ -7,7 +7,7 @@
 //     from what the gateway actually serves). Missing a required model => the app
 //     tells you it cannot transcribe.
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { GatewayConfig, ModelOpt, Notice, RecordFull, RecordSummary, Segment, Word } from "./types";
+import type { GatewayConfig, ModelOpt, Notice, RecordFull, RecordSummary, Segment, Timings, Word } from "./types";
 import * as api from "./api";
 import { ensureJieba, jiebaCut, jiebaState } from "./jieba";
 
@@ -29,6 +29,15 @@ function fmtDur(sec: number | null): string {
   if (h > 0) return `${h} 时 ${m} 分`;
   if (m > 0) return `${m} 分 ${ss} 秒`;
   return `${ss} 秒`;
+}
+// Compact processing-duration (ms → "12.3秒" / "1分23秒").
+function fmtMs(ms?: number | null): string {
+  if (ms == null) return "";
+  const s = ms / 1000;
+  if (s < 60) return `${s.toFixed(1)}秒`;
+  const m = Math.floor(s / 60);
+  const r = Math.round(s - m * 60);
+  return `${m}分${r}秒`;
 }
 const round3 = (x: number) => Math.round(x * 1000) / 1000;
 // Client mirror of the server finalizeWords: clamp into [lo,hi] and make word
@@ -88,6 +97,11 @@ const needsSpaceBefore = (prev: Word, cur: Word) => {
 // speaker paragraph — so we re-split the word stream on clause punctuation (and a
 // hard width cap for run-ons), independent of how the transcript groups segments.
 type SubCue = { start: number; end: number; text: string };
+// Per-file language labels (mirrors the 转写设置 selector) for the header badge.
+const LANG_LABEL: Record<string, string> = {
+  auto: "自动", zh: "中文", en: "English", ja: "日本語", ko: "한국어", yue: "粤语",
+};
+const langLabel = (code?: string) => LANG_LABEL[code || "auto"] || code || "自动";
 const CLAUSE_END = /[，。！？；、,.!?;:…]$/;
 // Display width: CJK glyphs are ~2x a latin char. ~40 ≈ 20 Chinese chars / line.
 const cueWidth = (s: string) => {
@@ -95,7 +109,18 @@ const cueWidth = (s: string) => {
   for (const ch of s) w += isCJKChar(ch) ? 2 : 1;
   return w;
 };
-function buildCues(words: { segIdx: number; text: string; start: number; end: number }[]): SubCue[] {
+// When the transcript has no punctuation (e.g. Whisper Chinese) there's nothing to
+// split clauses on, so also break the subtitle where the words show a real pause.
+// Gated on `noPunct` so punctuated subtitles behave exactly as before.
+const hasPunctuationText = (s: string) => {
+  const marks = (s.match(/[。！？，、；：…,.!?;:]/g) || []).length;
+  const chars = s.replace(/\s/g, "").length || 1;
+  return marks >= 3 && marks / chars >= 0.01;
+};
+function buildCues(
+  words: { segIdx: number; text: string; start: number; end: number }[],
+  noPunct = false,
+): SubCue[] {
   const cues: SubCue[] = [];
   let cur: { segIdx: number; text: string; start: number; end: number }[] = [];
   const flush = () => {
@@ -110,11 +135,18 @@ function buildCues(words: { segIdx: number; text: string; start: number; end: nu
     cur = [];
   };
   for (const w of words) {
-    if (cur.length && w.segIdx !== cur[cur.length - 1].segIdx) flush(); // speaker turn
+    if (cur.length) {
+      const prev = cur[cur.length - 1];
+      const curWidth = cueWidth(cur.map((x) => x.text).join(""));
+      if (w.segIdx !== prev.segIdx) flush(); // speaker turn
+      // pause (no punctuation): only once the cue has enough substance, else slow
+      // singing (a gap after every character) would shatter it into one-char cues.
+      else if (noPunct && w.start - prev.end > 1.0 && curWidth >= 8) flush();
+    }
     cur.push(w);
     const t = w.text || "";
     const width = cueWidth(cur.map((x) => x.text).join(""));
-    if (CLAUSE_END.test(t) || width >= 40) flush();
+    if (CLAUSE_END.test(t) || width >= (noPunct ? 28 : 40)) flush();
   }
   flush();
   return cues;
@@ -304,6 +336,27 @@ function NoticeList({ notices, className = "" }: { notices?: Notice[]; className
           <span className="shrink-0 tabular-nums text-[10px] opacity-50">{clock(n.at)}</span>
         </div>
       ))}
+    </div>
+  );
+}
+
+// Processing-time breakdown: total + per-step durations (shown atop 处理记录).
+function TimingsPanel({ timings }: { timings?: Timings | null }) {
+  if (!timings || !timings.totalMs) return null;
+  return (
+    <div className="mb-2 rounded-lg border border-neutral-800 bg-neutral-900/50 p-2 text-xs">
+      <div className="mb-1 flex items-center justify-between">
+        <span className="font-medium text-neutral-300">处理耗时</span>
+        <span className="tabular-nums font-medium text-emerald-400">总计 {fmtMs(timings.totalMs)}</span>
+      </div>
+      <div className="space-y-0.5">
+        {timings.steps.map((s, i) => (
+          <div key={i} className="flex items-center justify-between text-neutral-400">
+            <span className="truncate pr-2">{s.name}</span>
+            <span className="shrink-0 tabular-nums">{fmtMs(s.ms)}</span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -685,7 +738,7 @@ function SettingsPage({
             <ModelSelect label="强制对齐 Align" mode="align" value={align} set={setAlign} />
             <ModelSelect label="说话人分离 Diarize" mode="diar" value={diar} set={setDiar} />
             <label className="block text-sm">
-              <span className="mb-0.5 block text-xs text-neutral-400">对齐语言(默认自动识别)</span>
+              <span className="mb-0.5 block text-xs text-neutral-400">语言(对齐 + Whisper 转写)</span>
               <select className="input !py-1.5" value={language} onChange={(e) => setLanguage(e.target.value)}>
                 <option value="auto">自动识别(按转写文本判定)</option>
                 <option value="zh">中文 zh</option>
@@ -694,6 +747,9 @@ function SettingsPage({
                 <option value="ko">한국어 ko</option>
                 <option value="yue">粤语 yue</option>
               </select>
+              <span className="mt-0.5 block text-[11px] leading-tight text-neutral-500">
+                自动识别:仅用于对齐(按转写文本判定)。选具体语言时,Whisper 会据此解码(更准);Whisper 中文无标点会自动改用「停顿/说话人/长度」分句。
+              </span>
             </label>
           </div>
 
@@ -860,20 +916,22 @@ function RecordDetail({
     return () => clearInterval(t);
   }, [rec, load]);
 
-  // Seed the per-file option controls from the CURRENT GLOBAL settings (so changing
-  // 总设置 is reflected here — otherwise the global toggle feels ineffective). You can
-  // still tweak this bar per run before clicking 重新转写. Seeded once we have both
-  // the record and the config; RecordDetail remounts when returning from 设置, so a
-  // fresh global value is picked up automatically.
+  // Seed the per-file option controls. Language/分段/翻译/降噪 are STICKY PER FILE
+  // (Feishu-style 源语言): a never-run file (status "uploaded") follows the current
+  // GLOBAL defaults so recent 总设置 changes are reflected, but once a file has been
+  // transcribed we seed from ITS OWN saved options so each file remembers its choice.
+  // Seeded once per record; RecordDetail remounts when returning from 设置.
   const seededId = useRef<string>("");
   useEffect(() => {
     if (!rec || !config) return;
     if (seededId.current === rec.id) return;
     seededId.current = rec.id;
-    setOptLang(config.language || "auto");
-    setOptSeg(!!config.segmentedStt);
-    setOptTr(!!config.translate?.enabled);
-    setOptEnh(!!config.enhance?.enabled);
+    const fresh = rec.status === "uploaded"; // not yet run → follow global default
+    const o = rec.options;
+    setOptLang((fresh ? config.language : o?.language) || config.language || "auto");
+    setOptSeg(fresh ? !!config.segmentedStt : (o?.segmentedStt ?? !!config.segmentedStt));
+    setOptTr(fresh ? !!config.translate?.enabled : (o?.translate ?? !!config.translate?.enabled));
+    setOptEnh(fresh ? !!config.enhance?.enabled : (o?.enhance ?? !!config.enhance?.enabled));
   }, [rec, config]);
 
   // Normalize word times so EVERY word is clickable/highlightable even on older
@@ -952,8 +1010,16 @@ function RecordDetail({
 
   // Short subtitle clauses (Feishu-style): re-split the word streams on clause
   // punctuation so the overlay shows ONE clause at a time, not a whole paragraph.
-  const cues = useMemo(() => buildCues(flat), [flat]);
-  const tcues = useMemo(() => buildCues(tflat), [tflat]);
+  const noPunct = useMemo(
+    () => segments.length > 0 && !hasPunctuationText(segments.map((s) => s.text || "").join(" ")),
+    [segments],
+  );
+  const noPunctT = useMemo(
+    () => segments.length > 0 && !hasPunctuationText(segments.map((s) => s.translation || "").join(" ")),
+    [segments],
+  );
+  const cues = useMemo(() => buildCues(flat, noPunct), [flat, noPunct]);
+  const tcues = useMemo(() => buildCues(tflat, noPunctT), [tflat, noPunctT]);
   const cueStartsRef = useRef<number[]>([]);
   const tcueStartsRef = useRef<number[]>([]);
   const cuesRef = useRef<SubCue[]>([]);
@@ -1263,7 +1329,7 @@ function RecordDetail({
           <div className="text-xs text-neutral-500">
             {fmtDur(rec.durationSec)} · {statusText(rec)}
             {rec.status === "done"
-              ? ` · ${rec.result?.speakers?.length ?? 0} 位说话人 · ${rec.result?.segments?.length ?? 0} 段`
+              ? ` · ${rec.result?.speakers?.length ?? 0} 位说话人 · ${rec.result?.segments?.length ?? 0} 段 · 语言 ${langLabel(rec.options?.language)}`
               : ""}
           </div>
         </div>
@@ -1693,6 +1759,7 @@ function FileInfoRows({ rec }: { rec: RecordFull }) {
     ["语言", rec.result?.language || "—"],
     ["说话人", `${rec.result?.speakers?.length ?? 0} 位`],
     ["段落", `${rec.result?.segments?.length ?? 0} 段`],
+    ["处理耗时", rec.timings?.totalMs ? fmtMs(rec.timings.totalMs) : "—"],
     ["原文件", rec.originalName || "—"],
   ];
   return (
@@ -1734,8 +1801,11 @@ function MetaTabs({ rec, defaultTab = "info" }: { rec: RecordFull; defaultTab?: 
           <SpeakerStats rec={rec} />
         ) : tab === "info" ? (
           <FileInfoRows rec={rec} />
-        ) : logN ? (
-          <NoticeList notices={rec.notices} />
+        ) : logN || rec.timings ? (
+          <>
+            <TimingsPanel timings={rec.timings} />
+            <NoticeList notices={rec.notices} />
+          </>
         ) : (
           <p className="text-xs text-neutral-600">(暂无处理记录)</p>
         )}
@@ -2112,6 +2182,7 @@ export default function App() {
                       <div className="truncate font-medium text-neutral-100">{r.title}</div>
                       <div className="mt-0.5 text-xs text-neutral-500">
                         {new Date(r.createdAt).toLocaleString()}
+                        {r.totalMs ? <span title="处理耗时"> · ⏱{fmtMs(r.totalMs)}</span> : null}
                       </div>
                     </div>
                     <button
@@ -2139,6 +2210,7 @@ export default function App() {
                     <div className="truncate text-sm font-medium text-neutral-100">{r.title}</div>
                     <div className="mt-0.5 text-xs text-neutral-500">
                       {fmtDur(r.durationSec)} · {new Date(r.createdAt).toLocaleString()}
+                      {r.totalMs ? <span title="处理耗时"> · ⏱{fmtMs(r.totalMs)}</span> : null}
                     </div>
                   </div>
                   <div className="hidden w-64 shrink-0 items-center gap-2 sm:flex">{statusActions(r)}</div>

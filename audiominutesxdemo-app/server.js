@@ -214,6 +214,34 @@ function addNotice(id, level, msg) {
   const tag = level === "error" ? "ERROR" : level === "warn" ? "WARN" : "INFO";
   console.log(`[${id}] (${tag}) ${msg}`);
 }
+// Human-friendly duration (Chinese) for processing-time notices.
+function fmtMs(ms) {
+  const s = Math.max(0, ms) / 1000;
+  if (s < 60) return `${s.toFixed(1)} 秒`;
+  const m = Math.floor(s / 60);
+  const r = Math.round(s - m * 60);
+  return `${m} 分 ${r} 秒`;
+}
+// A tiny sequential stopwatch for the transcription pipeline. begin(name) closes
+// the current step and opens a new one; durations for the SAME name accumulate
+// (so a step visited twice — e.g. 整理结果 — shows one summed entry). finish()
+// returns { steps:[{name,ms}], totalMs }.
+function makeTimer() {
+  const steps = [];
+  const start0 = Date.now();
+  let curName = null, curStart = 0;
+  const close = () => {
+    if (curName == null) return;
+    const ms = Date.now() - curStart;
+    const ex = steps.find((s) => s.name === curName);
+    if (ex) ex.ms += ms; else steps.push({ name: curName, ms });
+    curName = null;
+  };
+  return {
+    begin(name) { close(); curName = name; curStart = Date.now(); },
+    finish() { close(); return { steps, totalMs: Date.now() - start0 }; },
+  };
+}
 function listRecords() {
   let files = [];
   try {
@@ -253,6 +281,7 @@ function recordSummary(rec) {
     notices: Array.isArray(rec.notices) ? rec.notices : [],
     hasCover: !!rec.cover,
     coverVer: rec.cover?.at || "",
+    totalMs: rec.timings?.totalMs ?? null,
   };
 }
 
@@ -866,6 +895,78 @@ function punctLineBreaks(refText, c0, c1, maxLen) {
   return cuts;
 }
 
+// Does this transcript carry usable punctuation? Whisper punctuates English but
+// NOT Chinese, so this is decided per-RESULT (not per-model). Punctuated → keep the
+// existing punctuation-driven segmentation untouched; unpunctuated → use the
+// pause/speaker/length fallback below so timestamps don't collapse.
+function hasPunctuation(text) {
+  const t = text || "";
+  if (!t) return true; // empty: don't change behavior
+  const marks = (t.match(/[。！？，、；：…,.!?;:]/g) || []).length;
+  const chars = t.replace(/\s/g, "").length || 1;
+  return marks >= 3 && marks / chars >= 0.01;
+}
+
+// Line cuts for UNPUNCTUATED text. With no punctuation to lean on we break on the
+// aligned pauses — but a pause ALONE would shatter slow singing (every drawn-out
+// character has a >0.6s gap) into one-char lines. So a pause only cuts once the line
+// has enough substance (minChars / minSec); a hard length/duration cap always cuts.
+// Mirrors punctLineBreaks' contract: exclusive char ends within [c0,c1), last == c1.
+function pauseLineCuts(units, map, c0, c1, opts = {}, speakerAt = null) {
+  // CHARACTER-COUNT driven on purpose: forced aligners stretch single characters
+  // across held notes / instrumental gaps (one char can span 3–20s), so DURATION is
+  // unreliable and word "pauses" are usually 0 (times are made contiguous). Char
+  // count is the only trustworthy signal. Genuine gaps / speaker turns still break,
+  // but only once the line has enough characters (so a stretched char can't split).
+  const { pauseS = 1.0, minChars = 10, maxChars = 36 } = opts;
+  const idx = [];
+  for (let i = 0; i < units.length; i++) {
+    const m = map[i];
+    if (m && m.ci >= c0 && m.ci < c1) idx.push(i);
+  }
+  if (idx.length === 0) return [c1];
+  const spkOf = (i) => (speakerAt ? speakerAt((units[i].start + units[i].end) / 2) : null);
+  const cuts = [];
+  let lineStartCi = c0;
+  let lineSpk = spkOf(idx[0]);
+  let prevEnd = units[idx[0]].end;
+  let prevCj = Math.min(c1, map[idx[0]].cj);
+  for (let k = 1; k < idx.length; k++) {
+    const i = idx[k];
+    const gap = units[i].start - prevEnd;
+    const chars = map[i].ci - lineStartCi;
+    const spk = spkOf(i);
+    const spkChanged = lineSpk !== null && spk !== lineSpk;
+    const cutHere = chars >= maxChars || ((gap > pauseS || spkChanged) && chars >= minChars);
+    if (cutHere) {
+      const cut = Math.max(lineStartCi + 1, Math.min(c1, prevCj));
+      cuts.push(cut);
+      lineStartCi = cut;
+      lineSpk = spk;
+    }
+    prevEnd = units[i].end;
+    prevCj = Math.min(c1, map[i].cj);
+  }
+  if (!cuts.length || cuts[cuts.length - 1] !== c1) cuts.push(c1);
+  return cuts;
+}
+
+// Optional STT params. For Whisper, pass `language` when the user picked one so it
+// decodes the right language (higher accuracy). We DELIBERATELY DO NOT send an
+// `initial_prompt` to coax Chinese punctuation: Whisper doesn't follow instructions,
+// it treats the prompt as preceding transcript and HALLUCINATES it back into the
+// output (the prompt text literally leaked into transcripts of music/gappy audio).
+// Unpunctuated Chinese is instead handled by the robust pause/speaker/length split.
+// Qwen already punctuates → plain params. "auto" → nothing added.
+function sttParams(cfg) {
+  const p = { response_format: "json" };
+  const isWhisper = /whisper/i.test(cfg.models?.stt || "");
+  if (!isWhisper) return p;
+  const lang = (cfg.language || "auto").toLowerCase();
+  if (lang && lang !== "auto") p.language = lang; // let Whisper decode the chosen language
+  return p;
+}
+
 // Tokenize refText[c0,c1) into clickable words WITH punctuation, each timed by
 // char→time. CJK = one char + trailing punctuation; Latin = a word + trailing
 // punctuation; spaces separate.
@@ -1123,6 +1224,7 @@ async function runTranslateJob(id) {
   jobAbort.set(id, ac);
   cfg._signal = ac.signal; // gateway fetches abort immediately on stop
   const startedAt = nowIso();
+  const timer = makeTimer();
   const setP = (progress, phase, stepDone = 0, stepTotal = 0) => {
     const r = readRecord(id);
     if (!r) return;
@@ -1139,7 +1241,9 @@ async function runTranslateJob(id) {
     ckCancel(id);
     const out = readRecord(id);
     const segments = out.result.segments;
+    timer.begin("翻译");
     const tr = await translateSegments(cfg, segments, setP, id);
+    const timings = timer.finish();
     addNotice(id, "info", `补翻译完成：${tr.translated}/${segments.length} 段（模型 ${cfg.translate.model}）。`);
     out.result.segments = segments;
     out.options = { ...(out.options || {}), translate: true };
@@ -1147,7 +1251,9 @@ async function runTranslateJob(id) {
     out.progress = 100;
     out.phase = "";
     out.error = "";
+    out.timings = timings;
     writeRecord(out);
+    addNotice(id, "info", `处理完成：总用时 ${fmtMs(timings.totalMs)}（${timings.steps.map((s) => `${s.name} ${fmtMs(s.ms)}`).join("、")}）。`);
   } catch (e) {
     if ((e && e.cancelled) || cancelled.has(id)) {
       // Stopped by the user (CancelError OR an aborted in-flight fetch): this
@@ -1193,6 +1299,7 @@ async function runJob(id) {
   cfg._signal = ac.signal; // gateway fetches abort immediately on stop
   console.log(`[${id}] 开始转写 "${rec.title}" 时长=${rec.durationSec ?? "?"}s options=${JSON.stringify(rec.options || {})} models=${JSON.stringify(cfg.models)} enhanceModel=${cfg.enhance?.model || "-"}`);
   const startedAt = nowIso();
+  const timer = makeTimer();
   // Persist progress with a granular step counter so the UI can show
   // "阶段 · 第 done/total" and an elapsed timer (see setP calls below).
   const setP = (progress, phase, stepDone = 0, stepTotal = 0) => {
@@ -1216,6 +1323,7 @@ async function runJob(id) {
     let workAudio = rec.audioPath;
     if (rec.options?.enhance && cfg.enhance?.model) {
       try {
+        timer.begin("降噪增强");
         setP(2, "降噪增强（整段处理中）");
         const enhPath = path.join(UPLOAD_DIR, `${id}-enh.wav`);
         tmp.push(enhPath);
@@ -1237,6 +1345,7 @@ async function runJob(id) {
         workAudio = rec.audioPath;
       }
     }
+    timer.begin("说话人分离");
     setP(3, "说话人分离（整段分析中）");
     // 1) diarization over the whole clip
     const diar = await gwAudioOp(cfg, "diarization", workAudio, cfg.models.diar);
@@ -1311,7 +1420,7 @@ async function runJob(id) {
         await sliceWav(workAudio, w.start, w.end, slicePath);
         let text = "";
         try {
-          const stt = await gwAudioOp(cfg, "transcriptions", slicePath, cfg.models.stt, { response_format: "json" });
+          const stt = await gwAudioOp(cfg, "transcriptions", slicePath, cfg.models.stt, sttParams(cfg));
           text = (typeof stt === "string" ? stt : stt?.text ?? "").trim();
         } catch { text = ""; }
         // align only for timing; DISPLAY text (with punctuation) stays the STT text
@@ -1324,6 +1433,7 @@ async function runJob(id) {
     };
 
     if (segmented) {
+      timer.begin("分段转写与对齐");
       segsOut = await runWindows();
     } else {
       // 整段转写 (默认): Qwen3-ASR has NO verbose_json, so STT can't segment. We
@@ -1335,15 +1445,29 @@ async function runJob(id) {
       // path so a result is always produced.
       try {
         ckCancel(id);
+        timer.begin("整段转写");
         setP(20, "整段转写");
         console.log(`[${id}] 整段转写：单次 STT 整段音频 (${path.basename(workAudio)}, 时长≈${rec.durationSec ?? "?"}s, model=${cfg.models.stt})`);
         const t0 = Date.now();
-        const stt = await gwAudioOp(cfg, "transcriptions", workAudio, cfg.models.stt, { response_format: "json" });
+        const stt = await gwAudioOp(cfg, "transcriptions", workAudio, cfg.models.stt, sttParams(cfg));
         console.log(`[${id}] 整段 STT 返回，用时 ${((Date.now() - t0) / 1000).toFixed(1)}s`);
         const fullText = (typeof stt === "string" ? stt : stt?.text ?? "").trim();
         if (!fullText) throw new Error("STT 无文本");
         ckCancel(id);
 
+        // Whole-clip punctuation decision (once). Punctuated → keep the existing
+        // punctuation-driven segmentation exactly as-is. Unpunctuated (e.g. Whisper
+        // Chinese) → cut by pause/speaker/length so timestamps don't collapse.
+        const punctuated = hasPunctuation(fullText);
+        console.log(`[${id}] 标点检测：${punctuated ? "有标点，按标点分句" : "无标点，改用停顿/说话人/长度分句"}`);
+        if (!punctuated) {
+          addNotice(id, "info", "转写结果缺少标点，已自动改用「停顿/说话人/长度」分句（不依赖标点），以避免时间戳错乱。");
+          if (/whisper/i.test(cfg.models?.stt || "")) {
+            addNotice(id, "info", "该转写模型（Whisper）对中文不输出标点；如需带标点的中文转写，建议改用 Qwen 系列模型。");
+          }
+        }
+
+        timer.begin("词级对齐");
         setP(55, "词级对齐");
         // Forced alignment respects the aligner's native ~300s / upload-size cap and
         // handles length on OUR side (the audiostudioxdemo strategy): a single call
@@ -1403,6 +1527,7 @@ async function runJob(id) {
         }
         if (!units.length) throw new Error("对齐无结果");
 
+        timer.begin("整理结果");
         setP(85, "整理结果");
         // char<->time over the punctuated reference, then cut along diar windows
         // (boundaries snapped to punctuation) and re-wrap into readable, timed,
@@ -1418,38 +1543,64 @@ async function runJob(id) {
           }
           return fullText.length;
         };
-        const bounds = punctBounds(fullText);
         const wins = buildWindows(diarSegs, rec.durationSec).sort((a, b) => a.start - b.start);
-        const ci = [0];
-        let last = 0;
-        for (let k = 1; k < wins.length; k++) {
-          const target = timeToChar(wins[k].start);
-          let cand = -1, bd = Infinity;
-          for (const b of bounds) {
-            if (b <= last) continue;
-            const d = Math.abs(b - target);
-            if (d < bd) { bd = d; cand = b; }
-          }
-          ci.push(cand < 0 ? fullText.length : cand);
-          last = ci[ci.length - 1];
-        }
-        ci.push(fullText.length);
-
         segsOut = [];
-        for (let k = 0; k < wins.length; k++) {
-          const c0 = ci[k], c1 = ci[k + 1];
-          if (c1 <= c0 || !fullText.slice(c0, c1).trim()) continue;
-          const cuts = punctLineBreaks(fullText, c0, c1, 48);
-          let prev = c0;
+        if (punctuated) {
+          // HAS PUNCTUATION (unchanged): cut along diar windows (boundaries snapped to
+          // punctuation), then re-wrap each window into punctuation-preserving lines.
+          const bounds = punctBounds(fullText);
+          const ci = [0];
+          let last = 0;
+          for (let k = 1; k < wins.length; k++) {
+            const target = timeToChar(wins[k].start);
+            let cand = -1, bd = Infinity;
+            for (const b of bounds) {
+              if (b <= last) continue;
+              const d = Math.abs(b - target);
+              if (d < bd) { bd = d; cand = b; }
+            }
+            ci.push(cand < 0 ? fullText.length : cand);
+            last = ci[ci.length - 1];
+          }
+          ci.push(fullText.length);
+          for (let k = 0; k < wins.length; k++) {
+            const c0 = ci[k], c1 = ci[k + 1];
+            if (c1 <= c0 || !fullText.slice(c0, c1).trim()) continue;
+            const cuts = punctLineBreaks(fullText, c0, c1, 48);
+            let prev = c0;
+            for (const e of cuts) {
+              const text = fullText.slice(prev, e).trim();
+              // clamp this line's word times into the diar speech window so words
+              // never land in a non-vocal intro/gap, then make them hittable.
+              const words = finalizeWords(sliceToWords(fullText, prev, e, timeAtChar), wins[k].start, wins[k].end);
+              if (text || words.length) {
+                const start = words.length ? words[0].start : round3(Math.max(wins[k].start, timeAtChar(prev)));
+                const end = words.length ? words[words.length - 1].end : round3(Math.min(wins[k].end, timeAtChar(e)));
+                segsOut.push({ start, end, speaker: wins[k].speaker, text, words });
+              }
+              prev = e;
+            }
+          }
+        } else {
+          // NO PUNCTUATION: do ONE pause/length/speaker pass over the WHOLE text — do
+          // NOT cut along the fine diar windows (singing produces dozens of tiny
+          // windows that would shatter the transcript into one-char lines). Segment
+          // count is driven by pauses/length; the speaker of each line is assigned by
+          // diar time-overlap, and a speaker change also breaks a (substantial) line.
+          const spkAt = (t) => pickSpeaker(t - 0.25, t + 0.25);
+          const cuts = pauseLineCuts(
+            units, map, 0, fullText.length,
+            { pauseS: 1.0, minChars: 10, maxChars: 36 }, spkAt,
+          );
+          let prev = 0;
           for (const e of cuts) {
+            if (e <= prev) continue;
             const text = fullText.slice(prev, e).trim();
-            // clamp this line's word times into the diar speech window so words
-            // never land in a non-vocal intro/gap, then make them hittable.
-            const words = finalizeWords(sliceToWords(fullText, prev, e, timeAtChar), wins[k].start, wins[k].end);
+            const words = finalizeWords(sliceToWords(fullText, prev, e, timeAtChar), timeAtChar(prev), timeAtChar(e));
             if (text || words.length) {
-              const start = words.length ? words[0].start : round3(Math.max(wins[k].start, timeAtChar(prev)));
-              const end = words.length ? words[words.length - 1].end : round3(Math.min(wins[k].end, timeAtChar(e)));
-              segsOut.push({ start, end, speaker: wins[k].speaker, text, words });
+              const start = words.length ? words[0].start : round3(timeAtChar(prev));
+              const end = words.length ? words[words.length - 1].end : round3(timeAtChar(e));
+              segsOut.push({ start, end, speaker: pickSpeaker(start, end), text, words });
             }
             prev = e;
           }
@@ -1466,10 +1617,12 @@ async function runJob(id) {
         // 分段转写 was enabled. LOG the real reason (gateway status/body, etc.).
         console.error(`[${id}] 整段转写失败，回退逐段转写与对齐 — 原因: ${e && e.stack ? e.stack : (e?.message || e)}`);
         addNotice(id, "warn", `整段转写失败，已自动回退为逐段转写与对齐（结果仍可用）。原因：${e?.message || e}`);
+        timer.begin("回退逐段转写与对齐");
         segsOut = await runWindows("整段转写失败，回退逐段转写与对齐");
       }
     }
 
+    timer.begin("整理结果");
     setP(94, "整理结果");
     const segments = segsOut
       .filter((s) => s.text || (s.words && s.words.length))
@@ -1481,6 +1634,7 @@ async function runJob(id) {
     // (translate is the last 5% — no reason to throw the transcript away).
     if (rec.options?.translate && cfg.translate?.model && !cancelled.has(id)) {
       try {
+        timer.begin("翻译");
         const tr = await translateSegments(cfg, segments, setP, id);
         addNotice(id, "info", `翻译完成：${tr.translated}/${segments.length} 段（模型 ${cfg.translate.model}）。`);
       } catch (e) {
@@ -1489,13 +1643,16 @@ async function runJob(id) {
       }
     }
 
+    const timings = timer.finish();
     const out = readRecord(id);
     out.result = { language: language || "", speakers, segments };
     out.status = "done";
     out.progress = 100;
     out.phase = "";
     out.error = "";
+    out.timings = timings;
     writeRecord(out);
+    addNotice(id, "info", `处理完成：总用时 ${fmtMs(timings.totalMs)}（${timings.steps.map((s) => `${s.name} ${fmtMs(s.ms)}`).join("、")}）。`);
   } catch (e) {
     if ((e && e.cancelled) || cancelled.has(id)) {
       // Stopped mid-transcribe (CancelError OR an aborted in-flight fetch): no
@@ -1530,15 +1687,18 @@ app.post("/api/records/:id/transcribe", (req, res) => {
   // cookie. Not a secret; falls back to any existing value / env.
   const bfl = (req.headers["x-bfl-user"] || "").toString();
   if (bfl) rec.bflUser = bfl;
-  // Options for THIS run: explicit body values win (the detail-page bar sends
-  // them); otherwise fall back to the CURRENT GLOBAL defaults (not a stale per-file
-  // snapshot) so changing 总设置 takes effect for card-level 重新转写 / 上传自动转写.
+  // Options for THIS run are STICKY PER FILE: explicit body values win (the detail
+  // bar sends them); otherwise fall back to the file's OWN saved options (seeded from
+  // the global defaults at upload), NOT the live global — so a file keeps the language
+  // it was last transcribed with even for card-level 重新转写. New files pick up the
+  // current global at upload time.
   const b = req.body || {};
+  const prev = rec.options || {};
   rec.options = {
-    language: (b.language ?? cfg.language ?? "auto").toString().trim() || "auto",
-    segmentedStt: b.segmentedStt !== undefined ? !!b.segmentedStt : !!cfg.segmentedStt,
-    translate: b.translate !== undefined ? !!b.translate : !!cfg.translate?.enabled,
-    enhance: b.enhance !== undefined ? !!b.enhance : !!cfg.enhance?.enabled,
+    language: (b.language ?? prev.language ?? cfg.language ?? "auto").toString().trim() || "auto",
+    segmentedStt: b.segmentedStt !== undefined ? !!b.segmentedStt : (prev.segmentedStt ?? !!cfg.segmentedStt),
+    translate: b.translate !== undefined ? !!b.translate : (prev.translate ?? !!cfg.translate?.enabled),
+    enhance: b.enhance !== undefined ? !!b.enhance : (prev.enhance ?? !!cfg.enhance?.enabled),
   };
   rec.status = "processing";
   rec.progress = 1;
@@ -1546,6 +1706,7 @@ app.post("/api/records/:id/transcribe", (req, res) => {
   rec.error = "";
   rec.jobKind = "full"; // full transcription pipeline (drives the processing step list)
   rec.notices = []; // fresh run → fresh event log
+  delete rec.timings; // fresh run → recompute step/total durations
   writeRecord(rec);
   enqueueJob(rec.id); // queued; the serial pump runs it when its turn comes
   res.json({ ok: true, queued: true });
