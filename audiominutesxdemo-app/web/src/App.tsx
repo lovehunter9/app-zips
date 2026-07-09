@@ -1001,8 +1001,20 @@ function RecordDetail({
   const translateAvailable = showTranslation && !!config?.translate?.model;
   // User toggle for showing 译文 in the transcript + video subtitles. Only meaningful
   // when the global 翻译 feature is ON *and* this record actually has translations
-  // (see `showTrans` below, computed after hasTranslation is known).
-  const [wantTrans, setWantTrans] = useState(true);
+  // (see `showTrans` below, computed after hasTranslation is known). Persisted
+  // PER FILE (keyed by record id); falls back to the legacy global default for files
+  // never toggled before. Write only via toggleTrans() to avoid a stale-write race
+  // when switching records.
+  const [wantTrans, setWantTrans] = useState<boolean>(true);
+  useEffect(() => {
+    if (!rec?.id) return;
+    const v = localStorage.getItem("amx.showTrans." + rec.id);
+    setWantTrans(v !== null ? v !== "0" : localStorage.getItem("amx.showTrans") !== "0");
+  }, [rec?.id]);
+  const toggleTrans = (v: boolean) => {
+    setWantTrans(v);
+    if (rec?.id) localStorage.setItem("amx.showTrans." + rec.id, v ? "1" : "0");
+  };
   const enhanceAvailable = !!config?.enhance?.model;
   const [activeGi, setActiveGi] = useState<number>(-1);   // active WORD (word-level path)
   const [activeTi, setActiveTi] = useState<number>(-1);   // active TRANSLATION word
@@ -1559,7 +1571,7 @@ function RecordDetail({
   // translations. Off hides 译文 in both the transcript and the video subtitles.
   const transToggle = canToggleTrans ? (
     <label className="flex shrink-0 items-center gap-1 text-xs text-neutral-400" title="是否在文字记录与视频字幕中显示译文">
-      <input type="checkbox" className="h-3.5 w-3.5" checked={wantTrans} onChange={(e) => setWantTrans(e.target.checked)} />
+      <input type="checkbox" className="h-3.5 w-3.5" checked={wantTrans} onChange={(e) => toggleTrans(e.target.checked)} />
       显示译文
     </label>
   ) : null;
@@ -1789,28 +1801,29 @@ function RecordDetail({
         {rec.status === "done" && <ExportButtons rec={rec} />}
         {(rec.status === "done" || rec.status === "uploaded" || rec.status === "error") && (
           <button
-            className={`btn-ghost ${showOpts ? "text-emerald-300" : ""}`}
+            className={`btn-ghost ${showOpts ? "text-emerald-300" : ""} disabled:opacity-40 disabled:cursor-not-allowed`}
+            disabled={editing}
+            title={editing ? "编辑中不可用，请先点「完成」" : "选择该文件的转写语言 / 分段 / 是否翻译"}
             onClick={() => setShowOpts((v) => !v)}
-            title="选择该文件的转写语言 / 分段 / 是否翻译"
           >
             转写设置
           </button>
         )}
         {rec.status === "done" && translateAvailable && (
-          <button className="btn-ghost" onClick={doTranslate} title="仅对现有转写补一遍翻译(不重跑 STT)">
+          <button className="btn-ghost disabled:opacity-40 disabled:cursor-not-allowed" disabled={editing} onClick={doTranslate} title={editing ? "编辑中不可用，请先点「完成」" : "仅对现有转写补一遍翻译(不重跑 STT)"}>
             {rec.translated ? "重新翻译" : "补翻译"}
           </button>
         )}
         {rec.status === "done" && (
-          <button className="btn-ghost" onClick={() => setRediarOpen(true)} title="仅重跑说话人分离并重新指派(保留文字)">重新识别说话人</button>
+          <button className="btn-ghost disabled:opacity-40 disabled:cursor-not-allowed" disabled={editing} onClick={() => setRediarOpen(true)} title={editing ? "编辑中不可用，请先点「完成」" : "仅重跑说话人分离并重新指派(保留文字)"}>重新识别说话人</button>
         )}
         {rec.status === "done" && (
-          <button className="btn-ghost" onClick={doTranscribe} title="用下方「转写设置」重新跑一遍转写">重新转写</button>
+          <button className="btn-ghost disabled:opacity-40 disabled:cursor-not-allowed" disabled={editing} onClick={doTranscribe} title={editing ? "编辑中不可用，请先点「完成」" : "用下方「转写设置」重新跑一遍转写"}>重新转写</button>
         )}
         {(rec.status === "uploaded" || rec.status === "error") && (
           <button className="btn-primary" onClick={doTranscribe}>AI 转录</button>
         )}
-        <button className="btn-ghost" onClick={doDelete}>删除</button>
+        <button className="btn-ghost disabled:opacity-40 disabled:cursor-not-allowed" disabled={editing} onClick={doDelete} title={editing ? "编辑中不可用，请先点「完成」" : ""}>删除</button>
       </div>
 
       {participantsBar}
