@@ -352,6 +352,16 @@ function spkColor(spk: string): string {
   if (spk === "UNKNOWN") return "#9ca3af";
   return SPK_COLORS[spkIdx(spk) % SPK_COLORS.length];
 }
+// Effective color: an explicit custom color wins, else the auto color by index.
+function colorFor(spk: string, colors?: Record<string, string>): string {
+  const c = colors?.[spk];
+  return c && /^#[0-9a-fA-F]{3,8}$/.test(c) ? c : spkColor(spk);
+}
+// Pick a palette color not already used by any roster member (for new participants).
+function nextFreeColor(usedColors: string[]): string {
+  const used = new Set(usedColors.map((c) => c.toLowerCase()));
+  return SPK_COLORS.find((c) => !used.has(c.toLowerCase())) || SPK_COLORS[usedColors.length % SPK_COLORS.length];
+}
 // Sentinel speaker id for segments whose speaker was removed from the roster: they
 // show as 未知 and must be reassigned per-segment (no chained rename).
 const UNKNOWN_SPK = "UNKNOWN";
@@ -371,8 +381,8 @@ function spkInitial(spk: string, names?: Record<string, string>): string {
   return m ? String(parseInt(m[1], 10) + 1) : "?";
 }
 
-function SpeakerChip({ spk, names, onClick }: { spk: string; names?: Record<string, string>; onClick?: () => void }) {
-  const c = spkColor(spk);
+function SpeakerChip({ spk, names, colors, onClick }: { spk: string; names?: Record<string, string>; colors?: Record<string, string>; onClick?: () => void }) {
+  const c = colorFor(spk, colors);
   return (
     <span
       onClick={onClick}
@@ -393,6 +403,7 @@ function statusText(r: RecordSummary): string {
   if (r.status === "uploaded") return "待转录";
   if (r.status === "done") return "已完成";
   if (r.status === "error") return "失败";
+  if (r.status === "generating") return "生成中";
   return r.status;
 }
 
@@ -977,15 +988,21 @@ interface FlatWord {
 function RecordDetail({
   id,
   config,
+  records,
   onBack,
   onChanged,
+  onOpen,
 }: {
   id: string;
   config: GatewayConfig | null;
+  records: RecordSummary[];
   onBack: () => void;
   onChanged: () => void;
+  onOpen: (id: string) => void;
 }) {
   const [rec, setRec] = useState<RecordFull | null>(null);
+  const [flash, setFlash] = useState("");
+  useEffect(() => { if (!flash) return; const t = setTimeout(() => setFlash(""), 4500); return () => clearTimeout(t); }, [flash]);
   const [err, setErr] = useState("");
   // Per-file transcription options (seeded from the record; user can override then
   // (re)transcribe). `optTouched` tracks whether the user changed anything so we
@@ -1026,6 +1043,28 @@ function RecordDetail({
   // a translation exists). Default on, persisted. Feishu-Minutes style.
   const [subs, setSubs] = useState<boolean>(() => localStorage.getItem("amx.subs") !== "0");
   useEffect(() => { localStorage.setItem("amx.subs", subs ? "1" : "0"); }, [subs]);
+  // 跳过空白片段：播放时自动跳过没有人说话的空档。Per-file sticky (fallback to global default).
+  const [skipBlanks, setSkipBlanks] = useState<boolean>(() => {
+    const per = localStorage.getItem(`amx.skipBlanks.${id}`);
+    return per != null ? per === "1" : localStorage.getItem("amx.skipBlanks") === "1";
+  });
+  const skipBlanksRef = useRef(skipBlanks);
+  useEffect(() => { skipBlanksRef.current = skipBlanks; }, [skipBlanks]);
+  const toggleSkipBlanks = useCallback(() => setSkipBlanks((v) => {
+    const nv = !v;
+    localStorage.setItem(`amx.skipBlanks.${id}`, nv ? "1" : "0");
+    localStorage.setItem("amx.skipBlanks", nv ? "1" : "0");
+    return nv;
+  }), [id]);
+  // Toast shown ONCE when 跳过空白 is switched ON: the TOTAL silence that will be
+  // skipped across the whole media (not a per-jump running total during playback).
+  const [skipToast, setSkipToast] = useState<number | null>(null);
+  const skipTimerRef = useRef<number | null>(null);
+  const flashSkipTotal = useCallback((sec: number) => {
+    setSkipToast(Math.max(1, Math.round(sec)));
+    if (skipTimerRef.current) window.clearTimeout(skipTimerRef.current);
+    skipTimerRef.current = window.setTimeout(() => setSkipToast(null), 2600);
+  }, []);
   // Chinese highlight unit: 词 (word, Feishu-style) or 字 (per-char). English is
   // always word-level. Persisted so the choice sticks across records/sessions.
   const [granularity, setGranularity] = useState<"word" | "char">(
@@ -1044,9 +1083,9 @@ function RecordDetail({
 
   useEffect(() => { load(); }, [load]);
 
-  // Poll while processing.
+  // Poll while processing / uploaded / (clip) generating.
   useEffect(() => {
-    if (!rec || (rec.status !== "processing" && rec.status !== "uploaded")) return;
+    if (!rec || (rec.status !== "processing" && rec.status !== "uploaded" && rec.status !== "generating")) return;
     const t = setInterval(load, 1500);
     return () => clearInterval(t);
   }, [rec, load]);
@@ -1099,6 +1138,7 @@ function RecordDetail({
   // applied immediately (small; autosaved and rec refreshed). Transcript/translation
   // text edits use a LOCAL draft with undo/redo, autosaved, committed on 完成.
   const speakerNames: Record<string, string> = rec?.result?.speakerNames || {};
+  const speakerColors: Record<string, string> = rec?.result?.speakerColors || {};
   const speakerIds = useMemo(() => {
     const set = new Set<string>();
     (rec?.result?.speakers || []).forEach((s) => set.add(s));
@@ -1117,11 +1157,24 @@ function RecordDetail({
     },
     [id, onChanged],
   );
-  const renameSpeaker = (spk: string, name: string) =>
-    saveMeta({ speakerNames: { ...speakerNames, [spk]: name.trim() }, participants });
-  const addParticipant = (name: string) => {
+  // Colors currently in use across the roster (effective: custom-or-auto), so a new
+  // participant can grab a distinct one.
+  const usedColors = () => participants.map((p) => colorFor(p, speakerColors));
+  const renameSpeaker = (spk: string, name: string, color?: string) =>
+    saveMeta({
+      speakerNames: { ...speakerNames, [spk]: name.trim() },
+      participants,
+      ...(color ? { speakerColors: { ...speakerColors, [spk]: color } } : {}),
+    });
+  const setSpeakerColor = (spk: string, color: string) =>
+    saveMeta({ speakerColors: { ...speakerColors, [spk]: color }, participants });
+  const addParticipant = (name: string, color?: string) => {
     const pid = "P" + Date.now().toString(36);
-    saveMeta({ speakerNames: { ...speakerNames, [pid]: name.trim() }, participants: [...participants, pid] });
+    saveMeta({
+      speakerNames: { ...speakerNames, [pid]: name.trim() },
+      participants: [...participants, pid],
+      speakerColors: { ...speakerColors, [pid]: color || nextFreeColor(usedColors()) },
+    });
   };
   // Removing a participant who actually spoke: their segments become 未知 (UNKNOWN)
   // and must be re-assigned per-segment afterwards (no chained rename). A participant
@@ -1136,20 +1189,22 @@ function RecordDetail({
   };
   // Re-assign ONE segment's speaker (no chained rename). Adds the target to the roster
   // if it isn't there yet. `spk` may be an existing id or a brand-new participant id.
-  const reassignSegment = (segIdx: number, spk: string, name?: string) => {
+  const reassignSegment = (segIdx: number, spk: string, name?: string, color?: string) => {
     const segs = rec?.result?.segments || [];
     const patch: api.ResultPatch = {
       segments: segs.map((_, k) => (k === segIdx ? { speaker: spk } : {})),
       speakerNames: name && name.trim() ? { ...speakerNames, [spk]: name.trim() } : speakerNames,
       participants: participants.includes(spk) ? participants : [...participants, spk],
+      ...(color ? { speakerColors: { ...speakerColors, [spk]: color } } : {}),
     };
     saveMeta(patch);
   };
   // { spk } to rename an existing speaker; { spk:null } to add a new participant.
-  const [nameModal, setNameModal] = useState<{ spk: string | null; initial: string } | null>(null);
+  const [nameModal, setNameModal] = useState<{ spk: string | null; initial: string; color?: string } | null>(null);
   // Transcript speaker-chip popover: rename (chains) + re-assign THIS segment.
   const [spkEdit, setSpkEdit] = useState<number | null>(null);
   const [rediarOpen, setRediarOpen] = useState(false);
+  const [clipOpen, setClipOpen] = useState(false); // 创建片段 editor modal
   const doRediar = useCallback(async (speakers: number) => {
     setRediarOpen(false);
     try { await api.rediarize(id, speakers); onChanged(); load(); }
@@ -1429,12 +1484,52 @@ function RecordDetail({
   // than the gap between two events (you'd see the highlight jump over words even
   // though clicking them still worked). At 60fps every word — even short ones —
   // gets sampled while it is current, so nothing is skipped.
+  // Silence gaps (leading + internal) from segment timings, used by 跳过空白 during
+  // playback. A gap counts only if it's at least MIN_GAP long, so we don't stutter
+  // over natural micro-pauses between sentences.
+  const gaps = useMemo(() => {
+    const MIN_GAP = 0.8;
+    const segs = [...(rec?.result?.segments || [])].sort((a, b) => a.start - b.start);
+    const g: { start: number; end: number }[] = [];
+    let prevEnd = 0;
+    for (const s of segs) {
+      if (s.start - prevEnd >= MIN_GAP) g.push({ start: prevEnd, end: s.start });
+      if (s.end > prevEnd) prevEnd = s.end;
+    }
+    return g;
+  }, [rec]);
+  const gapsRef = useRef(gaps);
+  useEffect(() => { gapsRef.current = gaps; }, [gaps]);
+  // When 跳过空白 flips ON (by the user, not on initial mount), flash the total
+  // silence that will be skipped across the whole media.
+  const skipMountRef = useRef(true);
+  useEffect(() => {
+    if (skipMountRef.current) { skipMountRef.current = false; return; }
+    if (skipBlanks) {
+      const total = gapsRef.current.reduce((a, g) => a + (g.end - g.start), 0);
+      if (total >= 1) flashSkipTotal(total);
+      else { setSkipToast(0); if (skipTimerRef.current) window.clearTimeout(skipTimerRef.current); skipTimerRef.current = window.setTimeout(() => setSkipToast(null), 2600); }
+    } else {
+      setSkipToast(null);
+    }
+  }, [skipBlanks, flashSkipTotal]);
+  // If the playhead is inside a silent gap, jump to the next speech (no toast here —
+  // the total is shown once when the toggle is turned on).
+  const maybeSkip = useCallback((m: HTMLMediaElement) => {
+    // Only audio skips blanks — video keeps its visuals during silence.
+    if (!skipBlanksRef.current || !(m instanceof HTMLAudioElement)) return;
+    const t = m.currentTime;
+    for (const g of gapsRef.current) {
+      if (t >= g.start && t < g.end - 0.05) { m.currentTime = g.end; return; }
+    }
+  }, []);
+
   const rafRef = useRef<number | null>(null);
   const rafTick = useCallback(() => {
     const m = mediaRef.current;
-    if (m) syncToTime(m.currentTime);
+    if (m) { maybeSkip(m); syncToTime(m.currentTime); }
     rafRef.current = requestAnimationFrame(rafTick);
-  }, [syncToTime]);
+  }, [syncToTime, maybeSkip]);
   const startRaf = useCallback(() => {
     if (rafRef.current == null) rafRef.current = requestAnimationFrame(rafTick);
   }, [rafTick]);
@@ -1635,16 +1730,19 @@ function RecordDetail({
     <div className="flex flex-wrap items-center gap-1.5 border-b border-neutral-800 bg-neutral-900/40 px-4 py-2">
       <span className="mr-1 text-xs text-neutral-500">参与者 ({participants.length})</span>
       {participants.map((spk) => {
-        const c = spkColor(spk);
+        const c = colorFor(spk, speakerColors);
         return (
           <span key={spk} className="group inline-flex items-center gap-1 rounded-full py-0.5 pl-0.5 pr-1.5 text-xs" style={{ backgroundColor: c + "22", border: `1px solid ${c}55` }}>
-            <span className="flex h-5 w-5 items-center justify-center rounded-full text-[10px] font-semibold text-white" style={{ backgroundColor: c }}>
+            <label className="relative flex h-5 w-5 cursor-pointer items-center justify-center rounded-full text-[10px] font-semibold text-white" style={{ backgroundColor: c }} title="点击改颜色">
               {spkInitial(spk, speakerNames)}
-            </span>
+              {!editing && (
+                <input type="color" value={c} className="absolute inset-0 cursor-pointer opacity-0" onChange={(e) => setSpeakerColor(spk, e.target.value)} />
+              )}
+            </label>
             <span className="text-neutral-200">{spkLabel(spk, speakerNames)}</span>
             {!editing && (
               <>
-                <button className="ml-0.5 text-neutral-500 hover:text-neutral-200" title="重命名" onClick={() => setNameModal({ spk, initial: spkLabel(spk, speakerNames) })}>✎</button>
+                <button className="ml-0.5 text-neutral-500 hover:text-neutral-200" title="重命名" onClick={() => setNameModal({ spk, initial: spkLabel(spk, speakerNames), color: c })}>✎</button>
                 <button className="text-neutral-500 hover:text-red-400" title="移除参与者" onClick={() => { if (window.confirm(`移除参与者「${spkLabel(spk, speakerNames)}」？其发言将变为「未知」，需逐条重新指派。`)) removeParticipant(spk); }}>✕</button>
               </>
             )}
@@ -1652,7 +1750,7 @@ function RecordDetail({
         );
       })}
       {!editing && (
-        <button className="rounded-full border border-dashed border-neutral-600 px-2 py-0.5 text-xs text-neutral-400 hover:border-neutral-400 hover:text-neutral-200" onClick={() => setNameModal({ spk: null, initial: "" })}>
+        <button className="rounded-full border border-dashed border-neutral-600 px-2 py-0.5 text-xs text-neutral-400 hover:border-neutral-400 hover:text-neutral-200" onClick={() => setNameModal({ spk: null, initial: "", color: nextFreeColor(usedColors()) })}>
           + 添加参与者
         </button>
       )}
@@ -1689,7 +1787,7 @@ function RecordDetail({
         return (
           <div key={i} className="rounded-md px-2 py-1">
             <div className="mb-0.5 flex items-center gap-1.5">
-              <SpeakerChip spk={seg.speaker} names={speakerNames} />
+              <SpeakerChip spk={seg.speaker} names={speakerNames} colors={speakerColors} />
               <span className="font-mono text-[11px] tabular-nums text-neutral-500">{fmtTC(seg.start)}</span>
             </div>
             <div className="space-y-1">
@@ -1765,7 +1863,7 @@ function RecordDetail({
           return (
             <div key={pi} className={`rounded-md px-2 py-1 transition-colors ${activeIn ? "bg-neutral-800/40" : ""}`}>
               <div className="mb-0.5 flex items-center gap-1.5">
-                <SpeakerChip spk={p.speaker} names={speakerNames} onClick={() => setSpkEdit(p.segIdxs[0])} />
+                <SpeakerChip spk={p.speaker} names={speakerNames} colors={speakerColors} onClick={() => setSpkEdit(p.segIdxs[0])} />
                 <button className="font-mono text-[11px] tabular-nums text-neutral-500 hover:text-neutral-300" onClick={() => seekTo(p.start)}>
                   {fmtTC(p.start)}
                 </button>
@@ -1785,21 +1883,44 @@ function RecordDetail({
     </>
   );
 
+  const isClip = !!rec.clipOf;
+  // Clips generated FROM this record (shown as an "关联片段" strip). Derived from the
+  // library list (App polls it while a clip is generating, so 生成中→已完成 updates live).
+  const childClips = isClip ? [] : records.filter((r) => r.clipOf === rec.id);
   return (
     <div className="flex h-full flex-col">
       <div className="flex items-center gap-3 border-b border-neutral-800 px-4 py-3">
         <button className="btn-ghost" onClick={onBack}>← 返回</button>
         <div className="min-w-0 flex-1">
-          <div className="truncate text-base font-semibold">{rec.title}</div>
-          <div className="text-xs text-neutral-500">
-            {fmtDur(rec.durationSec)} · {statusText(rec)}
-            {rec.status === "done"
-              ? ` · ${rec.result?.speakers?.length ?? 0} 位说话人 · ${rec.result?.segments?.length ?? 0} 段 · 语言 ${langLabel(rec.options?.language)}`
-              : ""}
+          <div className="flex items-center gap-2">
+            {isClip && (
+              <span className="shrink-0 rounded bg-sky-900/60 px-1.5 py-0.5 text-[11px] font-medium text-sky-300" title={rec.continuous ? "由原文件的单个连续区间生成" : "由原文件的多个区间拼接生成"}>
+                片段 · {rec.continuous ? "连续" : "非连续"}
+              </span>
+            )}
+            <div className="truncate text-base font-semibold">{rec.title}</div>
+          </div>
+          <div className="flex items-center gap-2 text-xs text-neutral-500">
+            <span>
+              {fmtDur(rec.durationSec)} · {statusText(rec)}
+              {rec.status === "done"
+                ? ` · ${rec.result?.speakers?.length ?? 0} 位说话人 · ${rec.result?.segments?.length ?? 0} 段 · 语言 ${langLabel(rec.options?.language)}`
+                : ""}
+              {isClip && rec.clipRanges ? ` · ${rec.clipRanges.length} 段区间` : ""}
+            </span>
+            {isClip && rec.clipOf && (
+              <button
+                className="rounded px-1.5 py-0.5 text-sky-400 hover:bg-neutral-800 hover:text-sky-300"
+                title="回到该片段的原始文件"
+                onClick={() => onOpen(rec.clipOf!)}
+              >
+                ↩ 跳回原出处
+              </button>
+            )}
           </div>
         </div>
         {rec.status === "done" && <ExportButtons rec={rec} />}
-        {(rec.status === "done" || rec.status === "uploaded" || rec.status === "error") && (
+        {(rec.status === "done" || rec.status === "uploaded" || rec.status === "error") && !isClip && (
           <button
             className={`btn-ghost ${showOpts ? "text-emerald-300" : ""} disabled:opacity-40 disabled:cursor-not-allowed`}
             disabled={editing}
@@ -1809,18 +1930,21 @@ function RecordDetail({
             转写设置
           </button>
         )}
-        {rec.status === "done" && translateAvailable && (
+        {rec.status === "done" && !isClip && (
+          <button className="btn-ghost disabled:opacity-40 disabled:cursor-not-allowed" disabled={editing} onClick={() => setClipOpen(true)} title={editing ? "编辑中不可用，请先点「完成」" : "从本文件截取一段或多段，生成独立片段"}>创建片段</button>
+        )}
+        {rec.status === "done" && translateAvailable && !isClip && (
           <button className="btn-ghost disabled:opacity-40 disabled:cursor-not-allowed" disabled={editing} onClick={doTranslate} title={editing ? "编辑中不可用，请先点「完成」" : "仅对现有转写补一遍翻译(不重跑 STT)"}>
             {rec.translated ? "重新翻译" : "补翻译"}
           </button>
         )}
-        {rec.status === "done" && (
+        {rec.status === "done" && !isClip && (
           <button className="btn-ghost disabled:opacity-40 disabled:cursor-not-allowed" disabled={editing} onClick={() => setRediarOpen(true)} title={editing ? "编辑中不可用，请先点「完成」" : "仅重跑说话人分离并重新指派(保留文字)"}>重新识别说话人</button>
         )}
-        {rec.status === "done" && (
+        {rec.status === "done" && !isClip && (
           <button className="btn-ghost disabled:opacity-40 disabled:cursor-not-allowed" disabled={editing} onClick={doTranscribe} title={editing ? "编辑中不可用，请先点「完成」" : "用下方「转写设置」重新跑一遍转写"}>重新转写</button>
         )}
-        {(rec.status === "uploaded" || rec.status === "error") && (
+        {(rec.status === "uploaded" || rec.status === "error") && !isClip && (
           <button className="btn-primary" onClick={doTranscribe}>AI 转录</button>
         )}
         <button className="btn-ghost disabled:opacity-40 disabled:cursor-not-allowed" disabled={editing} onClick={doDelete} title={editing ? "编辑中不可用，请先点「完成」" : ""}>删除</button>
@@ -1859,12 +1983,23 @@ function RecordDetail({
         </div>
       )}
 
-      {err && <p className="mx-4 mt-3 rounded bg-red-950/60 px-3 py-2 text-sm text-red-300">{err}</p>}
+      {err && (
+        <div className="mx-4 mt-3 flex items-start gap-2 rounded bg-red-950/60 px-3 py-2 text-sm text-red-300">
+          <span className="min-w-0 flex-1">{err}</span>
+          <button className="shrink-0 rounded px-1 text-red-300 hover:bg-red-900/60 hover:text-red-100" title="关闭" onClick={() => setErr("")}>✕</button>
+        </div>
+      )}
 
       {rec.status !== "done" ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center">
           {rec.status === "processing" ? (
             <ProcessingView rec={rec} onStop={doCancel} />
+          ) : rec.status === "generating" ? (
+            <div className="flex flex-col items-center gap-3 text-neutral-300">
+              <div className="text-3xl animate-pulse">✂️</div>
+              <div className="text-sm">片段生成中…（正在裁剪并重新编码媒体）</div>
+              <div className="text-xs text-neutral-500">完成后会成为一个独立文件</div>
+            </div>
           ) : rec.status === "error" ? (
             <div className="w-full max-w-md space-y-3">
               <div className="text-red-400">{rec.error || "失败"}</div>
@@ -1906,8 +2041,8 @@ function RecordDetail({
                     </div>
                   )}
                 </div>
-                <PlayerBar kind="video" subs={subs} setSubs={setSubs} skip={skip} onSetCover={() => setCoverOpen(true)} />
-                <MetaTabs rec={rec} defaultTab="spk" onReload={load} />
+                <PlayerBar kind="video" subs={subs} setSubs={setSubs} skip={skip} onSetCover={() => setCoverOpen(true)} skipBlanks={skipBlanks} onToggleSkipBlanks={toggleSkipBlanks} />
+                <MetaTabs rec={rec} defaultTab="spk" onReload={load} clips={childClips} onOpen={onOpen} onCreateClip={!isClip && rec.status === "done" ? () => setClipOpen(true) : undefined} />
               </div>
             }
             right={
@@ -1935,13 +2070,13 @@ function RecordDetail({
         // transcript (文字记录 with search) as the main body + full-width player bar.
         <div className="flex flex-1 flex-col overflow-hidden">
           <ResizableSplit
-            storageKey="amx.split.audio"
-            defaultPx={260}
-            minPx={200}
-            maxFrac={0.5}
+            storageKey="amx.split.audio.v2"
+            defaultPx={430}
+            minPx={220}
+            maxFrac={0.55}
             left={
               <div className="flex h-full flex-col overflow-hidden border-r border-neutral-800">
-                <MetaTabs rec={rec} defaultTab="info" onReload={load} />
+                <MetaTabs rec={rec} defaultTab="info" onReload={load} clips={childClips} onOpen={onOpen} onCreateClip={!isClip && rec.status === "done" ? () => setClipOpen(true) : undefined} />
               </div>
             }
             right={
@@ -1967,6 +2102,7 @@ function RecordDetail({
             <div className="mx-auto flex max-w-5xl items-center gap-2">
               <button onClick={() => skip(-15)} className="flex shrink-0 items-center gap-1 rounded px-2 py-1 text-xs font-medium bg-neutral-700/60 text-neutral-300 hover:brightness-110" title="后退 15 秒">⏪ 15s</button>
               <button onClick={() => skip(15)} className="flex shrink-0 items-center gap-1 rounded px-2 py-1 text-xs font-medium bg-neutral-700/60 text-neutral-300 hover:brightness-110" title="前进 15 秒">15s ⏩</button>
+              <button onClick={toggleSkipBlanks} className={`flex shrink-0 items-center gap-1 rounded px-2 py-1 text-xs font-medium ${skipBlanks ? "bg-emerald-600/80 text-white" : "bg-neutral-700/60 text-neutral-300"} hover:brightness-110`} title="播放时自动跳过没有人说话的空白片段">⏭ 跳过空白 {skipBlanks ? "开" : "关"}</button>
               <audio ref={(el) => { mediaRef.current = el; }} src={mediaSrc} controls className="min-w-0 flex-1" onTimeUpdate={onTimeUpdate} onPlay={startRaf} onPause={stopRaf} onEnded={stopRaf} onSeeking={onTimeUpdate} />
               <button onClick={() => setCoverOpen(true)} className="flex shrink-0 items-center gap-1 rounded px-2 py-1 text-xs font-medium bg-neutral-700/60 text-neutral-300 hover:brightness-110" title="设置封面">🖼 设置封面</button>
             </div>
@@ -1985,10 +2121,11 @@ function RecordDetail({
         <NameModal
           title={nameModal.spk === null ? "添加参与者" : "重命名说话人"}
           initial={nameModal.initial}
+          initialColor={nameModal.color}
           onClose={() => setNameModal(null)}
-          onSave={(name) => {
-            if (nameModal.spk === null) addParticipant(name);
-            else renameSpeaker(nameModal.spk, name);
+          onSave={(name, color) => {
+            if (nameModal.spk === null) addParticipant(name, color);
+            else renameSpeaker(nameModal.spk, name, color);
             setNameModal(null);
           }}
         />
@@ -1997,10 +2134,11 @@ function RecordDetail({
         <SpeakerPopover
           spk={rec.result.segments[spkEdit].speaker}
           names={speakerNames}
+          colors={speakerColors}
           participants={participants}
           onRename={(name) => { renameSpeaker(rec.result!.segments![spkEdit].speaker, name); setSpkEdit(null); }}
           onReassign={(target) => { reassignSegment(spkEdit, target); setSpkEdit(null); }}
-          onReassignNew={(name) => { reassignSegment(spkEdit, "P" + Date.now().toString(36), name); setSpkEdit(null); }}
+          onReassignNew={(name, color) => { reassignSegment(spkEdit, "P" + Date.now().toString(36), name, color); setSpkEdit(null); }}
           onClose={() => setSpkEdit(null)}
         />
       )}
@@ -2010,6 +2148,24 @@ function RecordDetail({
           onClose={() => setRediarOpen(false)}
           onConfirm={doRediar}
         />
+      )}
+      {clipOpen && rec && (
+        <ClipEditor
+          rec={rec}
+          mediaSrc={mediaSrc}
+          onClose={() => setClipOpen(false)}
+          onCreated={() => { setClipOpen(false); setFlash("片段已开始生成，完成后会出现在列表中，也会关联在本文件下方。"); onChanged(); load(); }}
+        />
+      )}
+      {flash && (
+        <div className="fixed bottom-4 left-1/2 z-[60] -translate-x-1/2 rounded-lg border border-sky-700 bg-sky-950/90 px-4 py-2 text-sm text-sky-200 shadow-xl">
+          {flash}
+        </div>
+      )}
+      {skipToast != null && (
+        <div className="fixed left-1/2 top-16 z-[60] -translate-x-1/2 rounded-lg border border-emerald-700 bg-emerald-950/90 px-4 py-2 text-sm text-emerald-200 shadow-xl">
+          {skipToast > 0 ? `✓ 已开启，本文件共将跳过约 ${skipToast} 秒空白` : "本文件没有明显空白可跳过"}
+        </div>
       )}
     </div>
   );
@@ -2052,24 +2208,355 @@ function RediarizeModal({
   );
 }
 
+// Merge selected segments into ranges by CONSECUTIVE TRANSCRIPT INDEX: a contiguous
+// run of selected sentences becomes ONE range [first.start, last.end] — including the
+// small silences between sentences — so it is 连续. A gap in the selection (an
+// unselected sentence in between) splits into separate ranges → 非连续.
+function mergeSelToRanges(sel: Set<number>, segs: Segment[]): { start: number; end: number }[] {
+  const idxs = [...sel].filter((i) => segs[i] != null).sort((a, b) => a - b);
+  const out: { start: number; end: number }[] = [];
+  let runStart = -1, runEnd = -1;
+  for (const i of idxs) {
+    if (runStart === -1) { runStart = i; runEnd = i; continue; }
+    if (i === runEnd + 1) { runEnd = i; continue; }
+    out.push({ start: segs[runStart].start, end: segs[runEnd].end });
+    runStart = i; runEnd = i;
+  }
+  if (runStart !== -1) out.push({ start: segs[runStart].start, end: segs[runEnd].end });
+  return out;
+}
+// Speech-only ranges from a selection: each selected segment's [start,end], coalescing
+// neighbours whose gap is under minGap. Silences ≥ minGap (unselected segs or true
+// silence) are dropped — used when 跳过空白 is on for clip generation.
+function selToSpeechRanges(sel: Set<number>, segs: Segment[], minGap = 0.8): { start: number; end: number }[] {
+  const idxs = [...sel].filter((i) => segs[i] != null).sort((a, b) => a - b);
+  const out: { start: number; end: number }[] = [];
+  for (const i of idxs) {
+    const s = segs[i];
+    const last = out[out.length - 1];
+    if (last && s.start - last.end < minGap) { if (s.end > last.end) last.end = s.end; }
+    else out.push({ start: s.start, end: s.end });
+  }
+  return out;
+}
+
+// 创建片段 (Feishu-Minutes style): the SELECTED TRANSCRIPT SEGMENTS are the single
+// source of truth. Check segments on the right (with search / 全选), or rubber-band
+// select on the bottom filmstrip — the two stay in sync. Contiguous selected segments
+// merge into ranges; a gap makes the clip 非连续. Generates an independent clip record.
+function ClipEditor({
+  rec, mediaSrc, onClose, onCreated,
+}: {
+  rec: RecordFull;
+  mediaSrc: string;
+  onClose: () => void;
+  onCreated: () => void;
+}) {
+  const isVideo = rec.kind === "video";
+  const segs = rec.result?.segments || [];
+  const names = rec.result?.speakerNames;
+  const colors = rec.result?.speakerColors;
+  const [dur, setDur] = useState<number>(rec.durationSec || 0);
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [past, setPast] = useState<number[][]>([]);
+  const [future, setFuture] = useState<number[][]>([]);
+  const [q, setQ] = useState("");
+  const [title, setTitle] = useState(`${rec.title} · 片段`);
+  const [thumbs, setThumbs] = useState<string[]>([]);
+  const [curT, setCurT] = useState(0);
+  const [tentative, setTentative] = useState<{ start: number; end: number } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [skipBlanks, setSkipBlanks] = useState<boolean>(() => localStorage.getItem("amx.clipSkipBlanks") === "1");
+  const toggleSkipBlanks = () => setSkipBlanks((v) => { const nv = !v; localStorage.setItem("amx.clipSkipBlanks", nv ? "1" : "0"); return nv; });
+  const skipOn = skipBlanks && !isVideo; // 视频保留画面，不跳空白
+  const barRef = useRef<HTMLDivElement | null>(null);
+  const previewRef = useRef<HTMLVideoElement | HTMLAudioElement | null>(null);
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const dragRef = useRef<{ anchor: number } | null>(null);
+
+  const NTHUMB = 16;
+  const clock = (t: number) => {
+    const s = Math.max(0, t);
+    const m = Math.floor(s / 60);
+    const ss = Math.floor(s % 60);
+    return `${m}:${String(ss).padStart(2, "0")}`;
+  };
+  // groups = contiguous selection blocks (drives the 连续/非连续 label). ranges = what
+  // actually gets cut: with 跳过空白 on, silence between segments is removed.
+  const groups = useMemo(() => mergeSelToRanges(selected, segs), [selected, segs]);
+  const ranges = useMemo(() => (skipOn ? selToSpeechRanges(selected, segs) : groups), [skipOn, selected, segs, groups]);
+  const continuous = groups.length <= 1;
+  const total = ranges.reduce((a, r) => a + (r.end - r.start), 0);
+  const savedSec = Math.max(0, groups.reduce((a, r) => a + (r.end - r.start), 0) - total);
+  // Silence gaps across the whole media, for skip-during-preview.
+  const previewGaps = useMemo(() => {
+    const MIN = 0.8;
+    const ss = [...segs].sort((a, b) => a.start - b.start);
+    const g: { start: number; end: number }[] = [];
+    let pe = 0;
+    for (const s of ss) { if (s.start - pe >= MIN) g.push({ start: pe, end: s.start }); if (s.end > pe) pe = s.end; }
+    return g;
+  }, [segs]);
+  const onPrevTime = (el: HTMLMediaElement) => {
+    if (skipOn) {
+      for (const gp of previewGaps) {
+        if (el.currentTime >= gp.start && el.currentTime < gp.end - 0.05) { el.currentTime = gp.end; break; }
+      }
+    }
+    setCurT(el.currentTime);
+  };
+
+  // --- selection with undo/redo ---------------------------------------------
+  const commit = (next: Set<number>) => {
+    setPast((p) => [...p, [...selected]]);
+    setFuture([]);
+    setSelected(next);
+  };
+  const undo = () => {
+    if (!past.length) return;
+    const prev = past[past.length - 1];
+    setFuture((f) => [[...selected], ...f]);
+    setPast((p) => p.slice(0, -1));
+    setSelected(new Set(prev));
+  };
+  const redo = () => {
+    if (!future.length) return;
+    const nx = future[0];
+    setPast((p) => [...p, [...selected]]);
+    setFuture((f) => f.slice(1));
+    setSelected(new Set(nx));
+  };
+  const toggle = (i: number) => {
+    const n = new Set(selected);
+    n.has(i) ? n.delete(i) : n.add(i);
+    commit(n);
+  };
+  const allSelected = segs.length > 0 && selected.size === segs.length;
+  const toggleAll = () => commit(allSelected ? new Set() : new Set(segs.map((_, i) => i)));
+  const clearSel = () => { if (selected.size) commit(new Set()); };
+
+  // Video filmstrip: capture NTHUMB evenly-spaced frames from a detached <video>.
+  useEffect(() => {
+    if (!isVideo) return;
+    let alive = true;
+    const v = document.createElement("video");
+    v.src = mediaSrc; v.muted = true; (v as any).playsInline = true; v.preload = "auto";
+    const run = async () => {
+      await new Promise<void>((res) => { if (v.readyState >= 1) return res(); v.addEventListener("loadedmetadata", () => res(), { once: true }); });
+      const d = Number.isFinite(v.duration) ? v.duration : (rec.durationSec || 0);
+      if (d && !rec.durationSec) setDur(d);
+      const out: string[] = [];
+      for (let i = 0; i < NTHUMB; i++) {
+        if (!alive) return;
+        const url = await seekAndCapture(v, (d * (i + 0.5)) / NTHUMB, 200);
+        if (url) out.push(url);
+        if (alive) setThumbs([...out]);
+      }
+    };
+    run().catch(() => {});
+    return () => { alive = false; try { v.src = ""; } catch { /* ignore */ } };
+  }, [isVideo, mediaSrc, rec.durationSec]);
+
+  const timeAtX = (clientX: number): number => {
+    const el = barRef.current;
+    if (!el || !dur) return 0;
+    const rect = el.getBoundingClientRect();
+    const p = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+    return p * dur;
+  };
+  const pct = (t: number) => (dur ? (t / dur) * 100 : 0);
+
+  // Filmstrip rubber-band → select every segment overlapping the drawn window
+  // (down-side of the two-way sync: 下方圈定 → 上方勾选).
+  const onDown = (e: React.PointerEvent) => {
+    if (!dur) return;
+    const t = timeAtX(e.clientX);
+    dragRef.current = { anchor: t };
+    setTentative({ start: t, end: t });
+    try { barRef.current?.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+  };
+  const onMove = (e: React.PointerEvent) => {
+    const d = dragRef.current;
+    if (!d || !dur) return;
+    const t = timeAtX(e.clientX);
+    setTentative({ start: Math.min(d.anchor, t), end: Math.max(d.anchor, t) });
+  };
+  const onUp = (e: React.PointerEvent) => {
+    const d = dragRef.current;
+    dragRef.current = null;
+    try { barRef.current?.releasePointerCapture(e.pointerId); } catch { /* ignore */ }
+    if (d && tentative) {
+      const a = tentative.start, b = tentative.end;
+      const el = previewRef.current;
+      if (b - a < 0.2) {
+        // treat as a click: seek preview there
+        if (el) { try { el.currentTime = a; } catch { /* ignore */ } }
+      } else {
+        const n = new Set(selected);
+        segs.forEach((s, i) => { if (s.end > a && s.start < b) n.add(i); });
+        if (n.size !== selected.size) commit(n);
+      }
+    }
+    setTentative(null);
+  };
+
+  const seekTo = (t: number) => { const el = previewRef.current; if (el) { try { el.currentTime = t; el.play?.(); } catch { /* ignore */ } } };
+
+  async function create() {
+    if (!ranges.length) { setErr("请至少勾选一段转录内容，或在时间轴上框选"); return; }
+    setBusy(true); setErr("");
+    try {
+      await api.createClip(rec.id, ranges, title.trim() || undefined, continuous);
+      onCreated();
+    } catch (e: any) { setErr(String(e?.message || e)); setBusy(false); }
+  }
+
+  const shown = segs.map((s, i) => ({ s, i })).filter(({ s }) => !q.trim() || s.text.toLowerCase().includes(q.trim().toLowerCase()));
+
+  const transcriptPane = (
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+      <div className="mb-2 flex items-center gap-2">
+        <div className="flex flex-1 items-center gap-1.5 rounded-md border border-emerald-700/60 bg-neutral-800 px-2 focus-within:border-emerald-500">
+          <span className="shrink-0 text-xs text-emerald-400">片段名称</span>
+          <input className="min-w-0 flex-1 bg-transparent py-1.5 text-sm text-neutral-100 focus:outline-none" placeholder="给这个片段起个名字" value={title} onChange={(e) => setTitle(e.target.value)} />
+        </div>
+        <div className="relative w-52 shrink-0">
+          <svg className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <circle cx="11" cy="11" r="7" /><path d="m21 21-4.3-4.3" />
+          </svg>
+          <input className="input w-full py-1.5 pl-8 text-sm" placeholder="搜索转录内容" value={q} onChange={(e) => setQ(e.target.value)} />
+        </div>
+      </div>
+      <label className="mb-1 flex cursor-pointer items-center gap-2 border-b border-neutral-800 pb-1.5 text-xs text-neutral-300">
+        <input type="checkbox" className="h-4 w-4" checked={allSelected} ref={(el) => { if (el) el.indeterminate = selected.size > 0 && !allSelected; }} onChange={toggleAll} />
+        全选
+        <span className="ml-auto text-neutral-500">已选 {selected.size} / {segs.length} 段</span>
+      </label>
+      <div ref={listRef} className="min-h-0 flex-1 space-y-0.5 overflow-y-auto pr-1">
+        {shown.map(({ s, i }) => {
+          const on = selected.has(i);
+          const c = colorFor(s.speaker, colors);
+          return (
+            <div
+              key={i}
+              className={`flex cursor-pointer items-start gap-2 rounded px-1.5 py-1 text-[13px] ${on ? "bg-sky-950/40" : "hover:bg-neutral-800/60"}`}
+              onClick={() => seekTo(s.start)}
+            >
+              <input type="checkbox" className="mt-0.5 h-4 w-4 shrink-0" checked={on} onClick={(e) => e.stopPropagation()} onChange={() => toggle(i)} />
+              <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold text-white" style={{ backgroundColor: c }}>{spkInitial(s.speaker, names)}</span>
+              <div className="min-w-0 flex-1">
+                <div className="text-[11px] text-neutral-500">{spkLabel(s.speaker, names)} · {fmtTC(s.start)}</div>
+                <div className="break-words leading-snug text-neutral-200">{s.text}</div>
+              </div>
+            </div>
+          );
+        })}
+        {shown.length === 0 && <div className="py-8 text-center text-xs text-neutral-500">无匹配内容</div>}
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
+      <div className="flex h-[88vh] w-full max-w-5xl flex-col overflow-hidden rounded-xl border border-neutral-700 bg-neutral-900 shadow-xl" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between border-b border-neutral-800 px-4 py-3">
+          <div className="text-base font-medium text-neutral-100">创建片段</div>
+          <button className="rounded px-2 text-neutral-400 hover:bg-neutral-800" onClick={onClose}>✕</button>
+        </div>
+
+        {/* main: (video) player | transcript ; (audio) audio bar + transcript */}
+        <div className="flex min-h-0 flex-1 overflow-hidden">
+          {isVideo ? (
+            <>
+              <div className="flex w-[46%] shrink-0 flex-col gap-2 border-r border-neutral-800 p-3">
+                <video ref={(el) => { previewRef.current = el; }} src={mediaSrc} controls className="max-h-[46vh] w-full rounded-lg bg-black object-contain" onTimeUpdate={(e) => onPrevTime(e.target as HTMLVideoElement)} onLoadedMetadata={(e) => { const d = (e.target as HTMLVideoElement).duration; if (Number.isFinite(d) && !rec.durationSec) setDur(d); }} />
+                <div className="text-[11px] leading-relaxed text-neutral-500">勾选右侧转录内容，或在下方时间轴拖拽框选 —— 两侧双向联动。</div>
+              </div>
+              <div className="flex min-w-0 flex-1 flex-col p-3">{transcriptPane}</div>
+            </>
+          ) : (
+            <div className="flex min-w-0 flex-1 flex-col p-3">
+              <audio ref={(el) => { previewRef.current = el; }} src={mediaSrc} controls className="mb-2 w-full" onTimeUpdate={(e) => onPrevTime(e.target as HTMLAudioElement)} onLoadedMetadata={(e) => { const d = (e.target as HTMLAudioElement).duration; if (Number.isFinite(d) && !rec.durationSec) setDur(d); }} />
+              {transcriptPane}
+            </div>
+          )}
+        </div>
+
+        {/* bottom: filmstrip timeline + toolbar */}
+        <div className="border-t border-neutral-800 p-3">
+          <div
+            ref={barRef}
+            className="relative h-14 w-full cursor-crosshair select-none overflow-hidden rounded-md border border-neutral-700 bg-neutral-800"
+            onPointerDown={onDown}
+            onPointerMove={onMove}
+            onPointerUp={onUp}
+          >
+            <div className="pointer-events-none absolute inset-0 flex">
+              {isVideo
+                ? Array.from({ length: NTHUMB }).map((_, i) => (
+                    <div key={i} className="h-full flex-1 border-r border-black/30 bg-neutral-900/40">
+                      {thumbs[i] && <img src={thumbs[i]} className="h-full w-full object-cover opacity-70" />}
+                    </div>
+                  ))
+                : <div className="h-full w-full bg-gradient-to-r from-neutral-800 to-neutral-700" />}
+            </div>
+            {ranges.map((r, i) => (
+              <div key={i} className="pointer-events-none absolute top-0 h-full bg-sky-500/30 ring-1 ring-inset ring-sky-400" style={{ left: `${pct(r.start)}%`, width: `${pct(r.end - r.start)}%` }}>
+                <span className="absolute left-1 top-0.5 rounded bg-black/60 px-1 text-[10px] text-white">{i + 1}</span>
+              </div>
+            ))}
+            {tentative && tentative.end > tentative.start && (
+              <div className="pointer-events-none absolute top-0 h-full bg-emerald-500/30 ring-1 ring-inset ring-emerald-400" style={{ left: `${pct(tentative.start)}%`, width: `${pct(tentative.end - tentative.start)}%` }} />
+            )}
+            <div className="pointer-events-none absolute top-0 h-full w-0.5 bg-red-500" style={{ left: `${pct(curT)}%` }} />
+          </div>
+          <div className="mt-0.5 flex justify-between text-[10px] text-neutral-500"><span>0:00</span><span>{clock(dur)}</span></div>
+
+          <div className="mt-2.5 flex items-center gap-2">
+            <button className="rounded border border-neutral-700 px-2 py-1 text-xs text-neutral-300 hover:bg-neutral-800 disabled:opacity-40" disabled={!selected.size} onClick={clearSel} title="清空选择">🗑 移除选中</button>
+            <button className="rounded border border-neutral-700 px-2 py-1 text-xs text-neutral-300 hover:bg-neutral-800 disabled:opacity-40" disabled={!past.length} onClick={undo}>↶ 撤销</button>
+            <button className="rounded border border-neutral-700 px-2 py-1 text-xs text-neutral-300 hover:bg-neutral-800 disabled:opacity-40" disabled={!future.length} onClick={redo}>↷ 恢复</button>
+            {!isVideo && (
+              <button onClick={toggleSkipBlanks} className={`rounded px-2 py-1 text-xs font-medium ${skipOn ? "bg-emerald-600/80 text-white" : "border border-neutral-700 text-neutral-300 hover:bg-neutral-800"}`} title="生成片段时自动剔除没有人说话的空白，预览也会跳过">⏭ 跳过空白 {skipOn ? "开" : "关"}</button>
+            )}
+            <span className="ml-2 text-xs text-neutral-400">
+              {ranges.length ? `${ranges.length} 段区间 · 合计 ${clock(total)} · ${continuous ? "连续" : "非连续"}${skipOn && savedSec >= 1 ? ` · 已省 ${clock(savedSec)}` : ""}` : "未选择"}
+            </span>
+            <button className="btn-ghost ml-auto" onClick={onClose} disabled={busy}>取消</button>
+            <button className="btn-primary disabled:opacity-40" onClick={create} disabled={busy || !ranges.length}>{busy ? "生成中…" : "保存"}</button>
+          </div>
+          {err && <div className="mt-2 rounded bg-red-950/60 px-3 py-2 text-sm text-red-300">{err}</div>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Transcript speaker-chip popover. Two independent actions:
 //   • 重命名说话人 — renames this speaker everywhere (chained; only for known speakers).
 //   • 指派本段给 — changes ONLY this segment's speaker (no chain). Used to fix 未知
 //     segments one-by-one after a participant was removed.
 function SpeakerPopover({
-  spk, names, participants, onRename, onReassign, onReassignNew, onClose,
+  spk, names, colors, participants, onRename, onReassign, onReassignNew, onClose,
 }: {
   spk: string;
   names: Record<string, string>;
+  colors?: Record<string, string>;
   participants: string[];
   onRename: (name: string) => void;
   onReassign: (target: string) => void;
-  onReassignNew: (name: string) => void;
+  onReassignNew: (name: string, color?: string) => void;
   onClose: () => void;
 }) {
   const isUnknown = spk === UNKNOWN_SPK;
   const [name, setName] = useState(isUnknown ? "" : spkLabel(spk, names));
   const others = participants.filter((p) => p !== spk);
+  // Inline "新建参与者" form (name + color), replacing the old window.prompt.
+  const [adding, setAdding] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [newColor, setNewColor] = useState(() => nextFreeColor(participants.map((p) => colorFor(p, colors))));
+  const submitNew = () => { if (newName.trim()) onReassignNew(newName.trim(), newColor); };
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
       <div className="w-80 rounded-lg border border-neutral-700 bg-neutral-900 p-4 shadow-xl" onClick={(e) => e.stopPropagation()}>
@@ -2094,7 +2581,7 @@ function SpeakerPopover({
           <div className="mb-1 text-[11px] text-neutral-500">仅改变当前这一段的说话人</div>
           <div className="flex flex-wrap gap-1.5">
             {others.map((p) => {
-              const c = spkColor(p);
+              const c = colorFor(p, colors);
               return (
                 <button key={p} className="inline-flex items-center gap-1 rounded-full py-0.5 pl-0.5 pr-2 text-xs hover:brightness-125" style={{ backgroundColor: c + "22", border: `1px solid ${c}55` }} onClick={() => onReassign(p)}>
                   <span className="flex h-5 w-5 items-center justify-center rounded-full text-[10px] font-semibold text-white" style={{ backgroundColor: c }}>{spkInitial(p, names)}</span>
@@ -2102,13 +2589,45 @@ function SpeakerPopover({
                 </button>
               );
             })}
-            <button
-              className="rounded-full border border-dashed border-neutral-600 px-2 py-0.5 text-xs text-neutral-400 hover:border-neutral-400 hover:text-neutral-200"
-              onClick={() => { const n = window.prompt("新参与者名字"); if (n && n.trim()) onReassignNew(n.trim()); }}
-            >
-              + 新建参与者
-            </button>
+            {!adding && (
+              <button
+                className="rounded-full border border-dashed border-neutral-600 px-2 py-0.5 text-xs text-neutral-400 hover:border-neutral-400 hover:text-neutral-200"
+                onClick={() => setAdding(true)}
+              >
+                + 新建参与者
+              </button>
+            )}
           </div>
+          {adding && (
+            <div className="mt-2 rounded-md border border-neutral-800 bg-neutral-800/40 p-2">
+              <div className="flex gap-2">
+                <input
+                  autoFocus
+                  className="min-w-0 flex-1 rounded border border-neutral-700 bg-neutral-800 px-2 py-1 text-sm text-neutral-100 focus:border-emerald-500 focus:outline-none"
+                  placeholder="新参与者名字"
+                  value={newName}
+                  onChange={(e) => setNewName(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") submitNew(); if (e.key === "Escape") setAdding(false); }}
+                />
+                <button className="shrink-0 whitespace-nowrap rounded bg-emerald-600 px-3 py-1 text-sm text-white hover:bg-emerald-500 disabled:opacity-40" disabled={!newName.trim()} onClick={submitNew}>创建并指派</button>
+              </div>
+              <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                {SPK_COLORS.map((c) => (
+                  <button
+                    key={c}
+                    onClick={() => setNewColor(c)}
+                    className={`h-5 w-5 rounded-full transition ${newColor.toLowerCase() === c.toLowerCase() ? "ring-2 ring-white ring-offset-2 ring-offset-neutral-900" : "hover:brightness-125"}`}
+                    style={{ backgroundColor: c }}
+                    title={c}
+                  />
+                ))}
+                <label className="relative flex h-5 w-5 cursor-pointer items-center justify-center rounded-full border border-dashed border-neutral-500 text-[10px] text-neutral-400" title="自定义颜色" style={{ backgroundColor: SPK_COLORS.includes(newColor) ? undefined : newColor }}>
+                  {SPK_COLORS.includes(newColor) ? "+" : ""}
+                  <input type="color" value={newColor} className="absolute inset-0 cursor-pointer opacity-0" onChange={(e) => setNewColor(e.target.value)} />
+                </label>
+              </div>
+            </div>
+          )}
         </div>
         <div className="mt-3 text-right">
           <button className="rounded px-3 py-1 text-sm text-neutral-400 hover:text-neutral-200" onClick={onClose}>关闭</button>
@@ -2120,15 +2639,17 @@ function SpeakerPopover({
 
 // Small centered modal to enter/edit a speaker or participant name (Feishu-style).
 function NameModal({
-  title, initial, onSave, onClose,
+  title, initial, initialColor, onSave, onClose,
 }: {
   title: string;
   initial: string;
-  onSave: (name: string) => void;
+  initialColor?: string;
+  onSave: (name: string, color?: string) => void;
   onClose: () => void;
 }) {
   const [name, setName] = useState(initial);
-  const submit = () => { if (name.trim()) onSave(name.trim()); };
+  const [color, setColor] = useState(initialColor || SPK_COLORS[0]);
+  const submit = () => { if (name.trim()) onSave(name.trim(), color); };
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
       <div className="w-80 rounded-lg border border-neutral-700 bg-neutral-900 p-4 shadow-xl" onClick={(e) => e.stopPropagation()}>
@@ -2141,6 +2662,24 @@ function NameModal({
           onChange={(e) => setName(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter") submit(); if (e.key === "Escape") onClose(); }}
         />
+        <div className="mt-3">
+          <div className="mb-1.5 text-xs text-neutral-500">颜色</div>
+          <div className="flex flex-wrap items-center gap-1.5">
+            {SPK_COLORS.map((c) => (
+              <button
+                key={c}
+                onClick={() => setColor(c)}
+                className={`h-6 w-6 rounded-full transition ${color.toLowerCase() === c.toLowerCase() ? "ring-2 ring-white ring-offset-2 ring-offset-neutral-900" : "hover:brightness-125"}`}
+                style={{ backgroundColor: c }}
+                title={c}
+              />
+            ))}
+            <label className="relative flex h-6 w-6 cursor-pointer items-center justify-center rounded-full border border-dashed border-neutral-500 text-[10px] text-neutral-400" title="自定义颜色" style={{ backgroundColor: SPK_COLORS.includes(color) ? undefined : color }}>
+              {SPK_COLORS.includes(color) ? "+" : ""}
+              <input type="color" value={color} className="absolute inset-0 cursor-pointer opacity-0" onChange={(e) => setColor(e.target.value)} />
+            </label>
+          </div>
+        </div>
         <div className="mt-3 flex justify-end gap-2">
           <button className="btn-ghost" onClick={onClose}>取消</button>
           <button className="btn-primary" disabled={!name.trim()} onClick={submit}>确认</button>
@@ -2154,13 +2693,15 @@ function NameModal({
 // (video only) the CC subtitle toggle, and 设置封面. Native <video>/<audio>
 // controls can't host custom buttons, so these live in a row right below.
 function PlayerBar({
-  kind, subs, setSubs, skip, onSetCover,
+  kind, subs, setSubs, skip, onSetCover, skipBlanks, onToggleSkipBlanks,
 }: {
   kind: "audio" | "video";
   subs: boolean;
   setSubs: (fn: (v: boolean) => boolean) => void;
   skip: (delta: number) => void;
   onSetCover: () => void;
+  skipBlanks: boolean;
+  onToggleSkipBlanks: () => void;
 }) {
   const btn = "flex items-center gap-1 rounded px-2 py-0.5 text-xs font-medium bg-neutral-700/60 text-neutral-300 hover:brightness-110";
   return (
@@ -2176,6 +2717,15 @@ function PlayerBar({
           >
             <span className="rounded-sm border border-current px-1 text-[10px] leading-tight">CC</span>
             字幕 {subs ? "开" : "关"}
+          </button>
+        )}
+        {kind === "audio" && (
+          <button
+            onClick={onToggleSkipBlanks}
+            className={`flex items-center gap-1 rounded px-2 py-0.5 text-xs font-medium ${skipBlanks ? "bg-emerald-600/80 text-white" : "bg-neutral-700/60 text-neutral-300"} hover:brightness-110`}
+            title="播放时自动跳过没有人说话的空白片段"
+          >
+            ⏭ 跳过空白 {skipBlanks ? "开" : "关"}
           </button>
         )}
       </div>
@@ -2214,6 +2764,7 @@ function CoverModal({
   const isVideo = rec.kind === "video";
   const [tab, setTab] = useState<"rec" | "pick" | "upload">(isVideo ? "rec" : "upload");
   const [recs, setRecs] = useState<string[]>([]);       // system-recommended thumbnails (dataUrls)
+  const [strip, setStrip] = useState<{ t: number; url: string }[]>([]); // filmstrip for 从视频中选
   const [sel, setSel] = useState<string | null>(null);  // chosen dataUrl (recommend/pick/preset)
   const [file, setFile] = useState<File | null>(null);  // chosen upload file
   const [filePrev, setFilePrev] = useState<string>("");
@@ -2244,6 +2795,32 @@ function CoverModal({
         const url = await seekAndCapture(v, dur * f, 960);
         if (url) out.push(url);
         if (alive) setRecs([...out]);
+      }
+    };
+    run().catch(() => {});
+    return () => { alive = false; try { v.src = ""; } catch { /* ignore */ } };
+  }, [isVideo, mediaSrc]);
+
+  // Filmstrip for 从视频中选: evenly-spaced small thumbnails. Clicking one seeks the
+  // scrubber there AND selects that frame as the cover (one-click pick), while the
+  // scrubber + 截取当前画面 stays for precise frames. (Same filmstrip idea as 创建片段.)
+  useEffect(() => {
+    if (!isVideo) return;
+    let alive = true;
+    const v = document.createElement("video");
+    v.src = mediaSrc; v.muted = true; (v as any).playsInline = true; v.preload = "auto";
+    const NST = 16;
+    const run = async () => {
+      await new Promise<void>((res) => { if (v.readyState >= 1) return res(); v.addEventListener("loadedmetadata", () => res(), { once: true }); });
+      const d = Number.isFinite(v.duration) ? v.duration : 0;
+      if (!d) return;
+      const out: { t: number; url: string }[] = [];
+      for (let i = 0; i < NST; i++) {
+        if (!alive) return;
+        const t = (d * (i + 0.5)) / NST;
+        const url = await seekAndCapture(v, t, 200);
+        if (url) out.push({ t, url });
+        if (alive) setStrip([...out]);
       }
     };
     run().catch(() => {});
@@ -2313,6 +2890,20 @@ function CoverModal({
           {tab === "pick" && isVideo && (
             <div className="flex flex-col gap-3">
               <video ref={pickRef} src={mediaSrc} controls className="max-h-[42vh] w-full rounded-lg bg-black object-contain" />
+              {/* Filmstrip: click a thumbnail to pick that frame (and seek there). */}
+              <div className="flex gap-1 overflow-x-auto pb-1">
+                {strip.length === 0 && <div className="py-4 text-xs text-neutral-500">正在生成缩略图…</div>}
+                {strip.map((s, i) => (
+                  <button
+                    key={i}
+                    onClick={() => { setSel(s.url); const v = pickRef.current; if (v) { try { v.currentTime = s.t; } catch { /* ignore */ } } }}
+                    className={`shrink-0 overflow-hidden rounded border-2 ${sel === s.url ? "border-emerald-500" : "border-transparent hover:border-neutral-600"}`}
+                    title={fmtTC(s.t)}
+                  >
+                    <img src={s.url} className="h-12 w-20 object-cover" />
+                  </button>
+                ))}
+              </div>
               <div className="flex items-center gap-2">
                 <button
                   className="rounded bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:brightness-110"
@@ -2320,11 +2911,11 @@ function CoverModal({
                 >
                   截取当前画面
                 </button>
-                <span className="text-xs text-neutral-500">拖动播放条到想要的画面,再点「截取当前画面」。</span>
+                <span className="text-xs text-neutral-500">点下方缩略图快速选帧，或拖播放条到想要的画面再点「截取当前画面」。</span>
               </div>
               {sel && tab === "pick" && (
                 <div className="flex items-center gap-2">
-                  <span className="text-xs text-neutral-400">已截取:</span>
+                  <span className="text-xs text-neutral-400">已选:</span>
                   <img src={sel} className="h-16 rounded border border-emerald-500 object-cover" />
                 </div>
               )}
@@ -2421,13 +3012,15 @@ function FileInfoRows({ rec }: { rec: RecordFull }) {
 // Feishu-style tabbed metadata panel (说话人 / 文件信息 / 处理记录) used in both the
 // audio sidebar and the video left column, so only the transcript needs to scroll —
 // the panel itself is compact and its active tab scrolls internally if needed.
-function MetaTabs({ rec, defaultTab = "info", onReload }: { rec: RecordFull; defaultTab?: "spk" | "info" | "log"; onReload?: () => void }) {
-  const [tab, setTab] = useState<"spk" | "info" | "log">(defaultTab);
+function MetaTabs({ rec, defaultTab = "info", onReload, clips, onOpen, onCreateClip }: { rec: RecordFull; defaultTab?: "spk" | "info" | "log" | "clip"; onReload?: () => void; clips?: RecordSummary[]; onOpen?: (id: string) => void; onCreateClip?: () => void }) {
+  const [tab, setTab] = useState<"spk" | "info" | "log" | "clip">(defaultTab);
   const spkN = rec.result?.speakers?.length ?? 0;
   const logN = rec.notices?.length ?? 0;
+  const clipN = clips?.length ?? 0;
+  const showClipTab = clipN > 0 || !!onCreateClip;
   const delOne = async (i: number) => { try { await api.deleteNotice(rec.id, i); onReload?.(); } catch { /* ignore */ } };
   const clearAll = async () => { try { await api.clearNotices(rec.id); onReload?.(); } catch { /* ignore */ } };
-  const btn = (id: "spk" | "info" | "log", label: string) => (
+  const btn = (id: "spk" | "info" | "log" | "clip", label: string) => (
     <button
       className={`rounded px-2 py-1 ${tab === id ? "bg-neutral-800 text-neutral-100" : "text-neutral-400 hover:text-neutral-200"}`}
       onClick={() => setTab(id)}
@@ -2440,10 +3033,13 @@ function MetaTabs({ rec, defaultTab = "info", onReload }: { rec: RecordFull; def
       <div className="flex gap-1 border-b border-neutral-800 px-1 py-1.5 text-xs">
         {btn("spk", `说话人 (${spkN})`)}
         {btn("info", "文件信息")}
+        {showClipTab && btn("clip", `片段 (${clipN})`)}
         {btn("log", `处理记录${logN ? ` (${logN})` : ""}`)}
       </div>
       <div className="flex-1 overflow-y-auto px-2.5 py-2">
-        {tab === "spk" ? (
+        {tab === "clip" ? (
+          <ClipList clips={clips || []} onOpen={onOpen} kind={rec.kind} onCreate={onCreateClip} />
+        ) : tab === "spk" ? (
           <SpeakerStats rec={rec} />
         ) : tab === "info" ? (
           <FileInfoRows rec={rec} />
@@ -2464,10 +3060,92 @@ function MetaTabs({ rec, defaultTab = "info", onReload }: { rec: RecordFull; def
     </div>
   );
 }
+// 「片段」列表（妙记「会议片段」对应）：本文件生成的所有片段，点开即跳转，含一个
+// 「创建片段」入口。卡片视图用响应式栅格（视频每行至少 3、音频至少 2，面板拖宽自动
+// 显示更多）；也可切到列表视图。视图偏好记忆在 localStorage。
+function ClipList({ clips, onOpen, kind, onCreate }: { clips: RecordSummary[]; onOpen?: (id: string) => void; kind?: "audio" | "video"; onCreate?: () => void }) {
+  const [view, setView] = useState<"card" | "list">(() => (localStorage.getItem("amx.clipView") as "card" | "list") || "card");
+  const setV = (v: "card" | "list") => { setView(v); localStorage.setItem("amx.clipView", v); };
+  const meta = (c: RecordSummary) =>
+    c.status === "generating" ? <span className="text-sky-400">生成中…</span>
+      : c.status === "error" ? <span className="text-red-400">生成失败</span>
+      : <>{fmtDur(c.durationSec)} · {c.continuous === false ? "非连续" : "连续"}</>;
+  // Feishu-sized cards: 16:9 thumbnail + title + meta below. auto-fill so the panel
+  // shows more per row as it gets wider. Audio a touch wider than video.
+  const minW = kind === "audio" ? 190 : 168;
+  if (!clips.length && !onCreate) return <p className="text-xs text-neutral-600">(暂无片段)</p>;
+  // Feishu-style: the ONLY clickable/hover surface is the 16:9 tile with a big ＋;
+  // 创建片段 is a plain caption underneath (not part of the clickable card).
+  const createCard = onCreate && (
+    <div className="w-full">
+      <button
+        onClick={onCreate}
+        className="flex aspect-video w-full items-center justify-center rounded-lg border border-neutral-800 bg-neutral-800/40 text-4xl font-light leading-none text-sky-400 transition hover:border-sky-700"
+        title="创建片段"
+      >
+        ＋
+      </button>
+      <div className="mt-1.5 px-2 text-center text-xs font-medium text-neutral-300">创建片段</div>
+    </div>
+  );
+  const createRow = onCreate && (
+    <button
+      onClick={onCreate}
+      className="flex w-full items-center gap-2 rounded-lg border border-dashed border-neutral-700 bg-neutral-800/30 p-1.5 text-left text-neutral-400 hover:border-sky-600 hover:text-sky-300"
+    >
+      <span className="flex h-12 w-20 items-center justify-center rounded-md border border-dashed border-neutral-700 text-xl">＋</span>
+      <span className="text-sm font-medium">创建片段</span>
+    </button>
+  );
+  return (
+    <div>
+      <div className="mb-2 flex items-center justify-end gap-1 text-xs">
+        <button className={`rounded px-1.5 py-0.5 ${view === "card" ? "bg-neutral-800 text-neutral-100" : "text-neutral-500 hover:text-neutral-300"}`} title="卡片视图" onClick={() => setV("card")}>▦ 卡片</button>
+        <button className={`rounded px-1.5 py-0.5 ${view === "list" ? "bg-neutral-800 text-neutral-100" : "text-neutral-500 hover:text-neutral-300"}`} title="列表视图" onClick={() => setV("list")}>☰ 列表</button>
+      </div>
+      {view === "card" ? (
+        <div className="grid gap-3" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${minW}px, 1fr))` }}>
+          {clips.map((c) => (
+            <button
+              key={c.id}
+              onClick={() => onOpen?.(c.id)}
+              className="block w-full overflow-hidden rounded-lg border border-neutral-800 bg-neutral-800/40 text-left transition hover:border-sky-700"
+            >
+              <CoverThumb r={c} className="aspect-video w-full text-2xl" />
+              <div className="px-2 py-1.5">
+                <div className="truncate text-xs font-medium text-neutral-100">{c.title}</div>
+                <div className="mt-0.5 text-[11px] text-neutral-500">{meta(c)}</div>
+              </div>
+            </button>
+          ))}
+          {createCard}
+        </div>
+      ) : (
+        <div className="space-y-1.5">
+          {clips.map((c) => (
+            <button
+              key={c.id}
+              onClick={() => onOpen?.(c.id)}
+              className="flex w-full items-center gap-2 rounded-lg border border-neutral-800 bg-neutral-800/40 p-1.5 text-left hover:border-sky-700"
+            >
+              <CoverThumb r={c} className="h-12 w-20 text-lg" />
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-xs font-medium text-neutral-100">{c.title}</div>
+                <div className="mt-0.5 text-[11px] text-neutral-500">{meta(c)}</div>
+              </div>
+            </button>
+          ))}
+          {createRow}
+        </div>
+      )}
+    </div>
+  );
+}
 // 「发言人」统计（妙记左栏对应）：每位说话人的发言占比（时长）+ 段数。
 function SpeakerStats({ rec }: { rec: RecordFull }) {
   const segs = rec.result?.segments || [];
   const names = rec.result?.speakerNames || {};
+  const colors = rec.result?.speakerColors || {};
   const total = segs.reduce((n, s) => n + Math.max(0, s.end - s.start), 0) || 1;
   const map = new Map<string, { dur: number; count: number }>();
   for (const s of segs) {
@@ -2485,11 +3163,11 @@ function SpeakerStats({ rec }: { rec: RecordFull }) {
         return (
           <div key={spk} className="text-xs">
             <div className="mb-0.5 flex items-center gap-2">
-              <SpeakerChip spk={spk} names={names} />
+              <SpeakerChip spk={spk} names={names} colors={colors} />
               <span className="ml-auto tabular-nums text-neutral-400">{pct}%</span>
             </div>
             <div className="h-1.5 w-full overflow-hidden rounded bg-neutral-800">
-              <div className="h-full rounded" style={{ width: `${pct}%`, background: spkColor(spk) }} />
+              <div className="h-full rounded" style={{ width: `${pct}%`, background: colorFor(spk, colors) }} />
             </div>
             <div className="mt-0.5 text-neutral-500">{st.count} 段 · {fmtDur(st.dur)}</div>
           </div>
@@ -2529,6 +3207,16 @@ function CoverThumb({ r, className }: { r: RecordSummary; className?: string }) 
         <div className="flex h-full w-full items-center justify-center opacity-80">
           <span className="text-[1.6em]">{r.kind === "video" ? "🎬" : "🎙"}</span>
         </div>
+      )}
+      {r.clipOf && (
+        <span className="absolute left-0.5 top-0.5 rounded bg-sky-600/90 px-1 text-[10px] font-medium leading-tight text-white" title={r.continuous ? "连续片段" : "非连续片段"}>
+          ✂️ 片段{r.continuous === false ? "·非连续" : ""}
+        </span>
+      )}
+      {r.status === "generating" && (
+        <span className="absolute inset-0 flex items-center justify-center bg-black/45 text-xs text-sky-200">
+          <span className="animate-pulse">生成中…</span>
+        </span>
       )}
       {r.durationSec != null && (
         <span className="absolute bottom-0.5 right-0.5 rounded bg-black/70 px-1 text-[10px] leading-tight text-white">
@@ -2615,9 +3303,9 @@ export default function App() {
     })();
   }, [refreshRecords]);
 
-  // Poll the library while anything is processing.
+  // Poll the library while anything is processing OR a clip is being generated.
   useEffect(() => {
-    const anyBusy = records.some((r) => r.status === "processing");
+    const anyBusy = records.some((r) => r.status === "processing" || r.status === "generating");
     if (!anyBusy) return;
     const t = setInterval(refreshRecords, 2000);
     return () => clearInterval(t);
@@ -2642,6 +3330,13 @@ export default function App() {
 
   // Status + primary action for a record — shared by the grid and list views.
   const statusActions = (r: RecordSummary) => {
+    if (r.status === "generating") {
+      return (
+        <span className="flex-1 truncate text-xs text-sky-400">
+          <span className="mr-1 inline-block animate-pulse">●</span>片段生成中…
+        </span>
+      );
+    }
     if (r.status === "processing") {
       return (
         <div className="flex flex-1 items-center gap-2">
@@ -2674,14 +3369,16 @@ export default function App() {
               </span>
             )}
           </span>
-          <button
-            className="shrink-0 rounded bg-neutral-800 px-2 py-1 text-xs text-neutral-200 hover:bg-neutral-700 disabled:opacity-40"
-            disabled={!ready || busyIds.has(r.id)}
-            title={!ready ? "请先在设置里完成网关与模型配置" : "用当前设置(整段/分段)重新跑一遍转写"}
-            onClick={(e) => { e.stopPropagation(); retry(r.id); }}
-          >
-            {busyIds.has(r.id) ? "…" : "重新转写"}
-          </button>
+          {!r.clipOf && (
+            <button
+              className="shrink-0 rounded bg-neutral-800 px-2 py-1 text-xs text-neutral-200 hover:bg-neutral-700 disabled:opacity-40"
+              disabled={!ready || busyIds.has(r.id)}
+              title={!ready ? "请先在设置里完成网关与模型配置" : "用当前设置(整段/分段)重新跑一遍转写"}
+              onClick={(e) => { e.stopPropagation(); retry(r.id); }}
+            >
+              {busyIds.has(r.id) ? "…" : "重新转写"}
+            </button>
+          )}
         </>
       );
     }
@@ -2689,14 +3386,16 @@ export default function App() {
       return (
         <>
           <span className="min-w-0 flex-1 truncate text-xs text-red-400" title={r.error}>失败:{r.error}</span>
-          <button
-            className="shrink-0 rounded bg-neutral-800 px-2 py-1 text-xs text-neutral-200 hover:bg-neutral-700 disabled:opacity-40"
-            disabled={!ready || busyIds.has(r.id)}
-            title={!ready ? "请先在设置里完成网关与模型配置" : "重新转录"}
-            onClick={(e) => { e.stopPropagation(); retry(r.id); }}
-          >
-            {busyIds.has(r.id) ? "…" : "重试"}
-          </button>
+          {!r.clipOf && (
+            <button
+              className="shrink-0 rounded bg-neutral-800 px-2 py-1 text-xs text-neutral-200 hover:bg-neutral-700 disabled:opacity-40"
+              disabled={!ready || busyIds.has(r.id)}
+              title={!ready ? "请先在设置里完成网关与模型配置" : "重新转录"}
+              onClick={(e) => { e.stopPropagation(); retry(r.id); }}
+            >
+              {busyIds.has(r.id) ? "…" : "重试"}
+            </button>
+          )}
         </>
       );
     }
@@ -2764,7 +3463,7 @@ export default function App() {
         </div>
       ) : selectedId ? (
         <div className="flex-1 overflow-hidden">
-          <RecordDetail id={selectedId} config={config} onBack={() => setSelectedId(null)} onChanged={refreshRecords} />
+          <RecordDetail id={selectedId} config={config} records={records} onBack={() => setSelectedId(null)} onChanged={refreshRecords} onOpen={(rid) => setSelectedId(rid)} />
         </div>
       ) : (
         <div className="flex-1 overflow-y-auto p-4">
@@ -2815,7 +3514,12 @@ export default function App() {
             </div>
           </div>
 
-          {err && <p className="mb-3 rounded bg-red-950/60 px-3 py-2 text-sm text-red-300">{err}</p>}
+          {err && (
+            <div className="mb-3 flex items-start gap-2 rounded bg-red-950/60 px-3 py-2 text-sm text-red-300">
+              <span className="min-w-0 flex-1">{err}</span>
+              <button className="shrink-0 rounded px-1 text-red-300 hover:bg-red-900/60 hover:text-red-100" title="关闭" onClick={() => setErr("")}>✕</button>
+            </div>
+          )}
 
           {records.length === 0 ? (
             <div className="card text-center text-sm text-neutral-500">

@@ -44,6 +44,7 @@ export interface ResultPatch {
   segments?: { text?: string; translation?: string; speaker?: string; words?: Word[]; twords?: Word[] }[];
   speakerNames?: Record<string, string>;
   participants?: string[];
+  speakerColors?: Record<string, string>;
 }
 export const saveResult = (id: string, patch: ResultPatch) =>
   jsend<RecordFull>(`/api/records/${id}/result`, "PATCH", patch);
@@ -51,6 +52,10 @@ export const cancelRecord = (id: string) =>
   jsend<{ ok: boolean }>(`/api/records/${id}/cancel`, "POST", {});
 export const rediarize = (id: string, speakers: number) =>
   jsend<{ ok: boolean }>(`/api/records/${id}/rediarize`, "POST", { speakers });
+// 创建片段: cut one or more [start,end] ranges from a done record into a new
+// independent record (generated async). Returns the new clip's summary.
+export const createClip = (id: string, ranges: { start: number; end: number }[], title?: string, continuous?: boolean) =>
+  jsend<RecordSummary>(`/api/records/${id}/clip`, "POST", { ranges, title, continuous });
 export const deleteNotice = (id: string, idx: number) =>
   jsend<RecordFull>(`/api/records/${id}/notices/${idx}`, "DELETE");
 export const clearNotices = (id: string) =>

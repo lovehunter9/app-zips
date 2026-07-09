@@ -8,7 +8,8 @@ RUN npm run build
 
 FROM node:20-bookworm-slim AS server
 WORKDIR /app
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+RUN apt-get -o Acquire::Retries=8 update \
+  && apt-get -o Acquire::Retries=8 install -y --no-install-recommends ffmpeg \
   && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json* ./
 RUN npm install --omit=dev

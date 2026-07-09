@@ -282,6 +282,11 @@ function recordSummary(rec) {
     hasCover: !!rec.cover,
     coverVer: rec.cover?.at || "",
     totalMs: rec.timings?.totalMs ?? null,
+    // Clip metadata: `clipOf` marks this record as a 片段 of another; `continuous`
+    // is true for a single-range clip. Used by the UI for the 片段 badge / back-link.
+    clipOf: rec.clipOf || "",
+    continuous: rec.clipOf ? !!rec.continuous : undefined,
+    clipCount: rec.clipRanges?.length || 0,
   };
 }
 
@@ -352,6 +357,135 @@ function transcodeMp3(input, output) {
     ff.on("close", (code) => (code === 0 ? resolve(output) : reject(new Error("ffmpeg transcode failed: " + err.slice(-1500)))));
     ff.on("error", reject);
   });
+}
+
+// Cut one or more time ranges out of `input` and concat them into `output`,
+// PRECISELY (frame-accurate re-encode via the trim/atrim + concat filter graph —
+// works for single or multiple ranges, audio-only or video). Used by 创建片段.
+function ffClip(input, ranges, isVideo, output) {
+  return new Promise((resolve, reject) => {
+    const parts = [];
+    const labels = [];
+    ranges.forEach((r, i) => {
+      const s = round3(r.start), e = round3(r.end);
+      if (isVideo) {
+        parts.push(`[0:v]trim=start=${s}:end=${e},setpts=PTS-STARTPTS[v${i}]`);
+        parts.push(`[0:a]atrim=start=${s}:end=${e},asetpts=PTS-STARTPTS[a${i}]`);
+        labels.push(`[v${i}][a${i}]`);
+      } else {
+        parts.push(`[0:a]atrim=start=${s}:end=${e},asetpts=PTS-STARTPTS[a${i}]`);
+        labels.push(`[a${i}]`);
+      }
+    });
+    const n = ranges.length;
+    const concat = isVideo
+      ? `${labels.join("")}concat=n=${n}:v=1:a=1[v][a]`
+      : `${labels.join("")}concat=n=${n}:v=0:a=1[a]`;
+    const filter = parts.concat(concat).join(";");
+    const args = ["-y", "-i", input, "-filter_complex", filter];
+    if (isVideo) args.push("-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-preset", "veryfast", "-c:a", "aac", "-movflags", "+faststart", output);
+    else args.push("-map", "[a]", "-c:a", "aac", output);
+    const ff = spawn("ffmpeg", args);
+    let err = "";
+    ff.stderr.on("data", (d) => (err += d.toString()));
+    ff.on("close", (code) => (code === 0 ? resolve(output) : reject(new Error("ffmpeg clip failed: " + err.slice(-2000)))));
+    ff.on("error", reject);
+  });
+}
+
+// Grab a single JPEG frame at time `t` from a video into `output` (used to auto-set
+// a video clip's cover to its first frame).
+function ffFrameJpeg(input, t, output) {
+  return new Promise((resolve, reject) => {
+    const ff = spawn("ffmpeg", ["-y", "-ss", String(round3(Math.max(0, t))), "-i", input, "-frames:v", "1", "-q:v", "3", output]);
+    let err = "";
+    ff.stderr.on("data", (d) => (err += d.toString()));
+    ff.on("close", (code) => (code === 0 ? resolve(output) : reject(new Error("ffmpeg frame failed: " + err.slice(-800)))));
+    ff.on("error", reject);
+  });
+}
+
+// Rebuild a display string from word tokens: a space is inserted between two
+// tokens only when both sides are latin/alphanumeric (CJK stays tight). Mirrors
+// the client's needsSpaceBefore closely enough for clipped transcripts.
+function joinWordsServer(words) {
+  let s = "";
+  for (let i = 0; i < words.length; i++) {
+    const t = words[i].text || "";
+    if (i > 0) {
+      const prev = words[i - 1].text || "";
+      if (/[A-Za-z0-9)\]]$/.test(prev) && /^[A-Za-z0-9(\[]/.test(t)) s += " ";
+    }
+    s += t;
+  }
+  return s;
+}
+// Keep the word tokens that overlap [rs,re], clamped to the window and rebased to
+// the clip timeline (window start → `offset`).
+function clipWords(words, rs, re, offset) {
+  const arr = Array.isArray(words) ? words : [];
+  const kept = [];
+  for (const w of arr) {
+    const ws = Number(w.start) || 0;
+    const we = Number(w.end) || ws;
+    if (we <= rs || ws >= re) continue;
+    kept.push({
+      text: String(w.text ?? ""),
+      start: round3(Math.max(ws, rs) - rs + offset),
+      end: round3(Math.min(we, re) - rs + offset),
+    });
+  }
+  return kept;
+}
+// Derive a clip's transcript from the parent result by slicing every segment to the
+// selected ranges and rebasing all timestamps onto the concatenated clip timeline.
+// Speaker names / participants / language are inherited; the clip is then edited
+// independently of the parent.
+function deriveClipResult(parentResult, ranges) {
+  const segsIn = (parentResult && parentResult.segments) || [];
+  const out = [];
+  let offset = 0;
+  for (const r of ranges) {
+    const rs = r.start, re = r.end;
+    for (const seg of segsIn) {
+      if (seg.end <= rs || seg.start >= re) continue; // no overlap with this range
+      const hasWords = Array.isArray(seg.words) && seg.words.length > 0;
+      let start, end, text, words;
+      if (hasWords) {
+        words = clipWords(seg.words, rs, re, offset);
+        if (!words.length) continue;
+        text = joinWordsServer(words);
+        start = words[0].start;
+        end = words[words.length - 1].end;
+      } else {
+        start = round3(Math.max(seg.start, rs) - rs + offset);
+        end = round3(Math.min(seg.end, re) - rs + offset);
+        if (end - start < 0.02) continue;
+        text = seg.text || "";
+        words = [];
+      }
+      const nseg = { start, end, speaker: seg.speaker, text, words };
+      if (seg.translation) {
+        const tw = clipWords(seg.twords, rs, re, offset);
+        nseg.translation = tw.length ? joinWordsServer(tw) : seg.translation;
+        nseg.twords = tw;
+      }
+      out.push(nseg);
+    }
+    offset += (re - rs);
+  }
+  out.sort((a, b) => a.start - b.start);
+  const speakers = [...new Set(out.map((s) => s.speaker).filter(Boolean))];
+  const parentParts = Array.isArray(parentResult && parentResult.participants) ? parentResult.participants : null;
+  return {
+    language: (parentResult && parentResult.language) || "auto",
+    speakers,
+    segments: out,
+    speakerNames: (parentResult && parentResult.speakerNames) || {},
+    speakerColors: (parentResult && parentResult.speakerColors) || {},
+    // Keep only participants that actually appear in the clip, preserving order.
+    participants: (parentParts ? parentParts.filter((p) => speakers.includes(p)) : speakers.slice()),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -660,6 +794,13 @@ app.patch("/api/records/:id/result", (req, res) => {
   if (Array.isArray(b.participants)) {
     rec.result.participants = b.participants.filter((x) => typeof x === "string");
   }
+  if (b.speakerColors && typeof b.speakerColors === "object") {
+    const colors = {};
+    for (const [k, v] of Object.entries(b.speakerColors)) {
+      if (typeof v === "string" && /^#[0-9a-fA-F]{3,8}$/.test(v)) colors[k] = v;
+    }
+    rec.result.speakerColors = colors;
+  }
   rec.updatedAt = nowIso();
   writeRecord(rec);
   res.json({ ...rec, hasCover: !!rec.cover, coverVer: rec.cover?.at || "" });
@@ -826,6 +967,65 @@ async function pump() {
   } finally {
     draining = false;
     pump();
+  }
+}
+
+// --- 创建片段 (clip) generation ------------------------------------------------
+// Clip generation is pure local ffmpeg (cut+concat) + transcript slicing — it does
+// NOT touch the gateway/GPU, so it runs on its OWN serial queue (avoids CPU thrash
+// from many clips at once, without blocking transcription jobs).
+const clipQueue = [];
+let clipDraining = false;
+function enqueueClip(id) {
+  clipQueue.push(id);
+  pumpClip();
+}
+async function pumpClip() {
+  if (clipDraining) return;
+  const id = clipQueue.shift();
+  if (id === undefined) return;
+  clipDraining = true;
+  try { await runClipJob(id); } catch { /* runClipJob persists its own error */ }
+  finally { clipDraining = false; pumpClip(); }
+}
+async function runClipJob(id) {
+  const rec = readRecord(id);
+  if (!rec || !rec.clipOf) return;
+  try {
+    const parent = readRecord(rec.clipOf);
+    if (!parent) throw new Error("原记录不存在");
+    if (!parent.mediaPath || !fs.existsSync(parent.mediaPath)) throw new Error("原始媒体文件缺失");
+    if (!hasFfmpeg()) throw new Error("ffmpeg 不可用，无法生成片段");
+    const isVideo = rec.kind === "video";
+    const outMedia = path.join(UPLOAD_DIR, id + "-clip" + (isVideo ? ".mp4" : ".m4a"));
+    await ffClip(parent.mediaPath, rec.clipRanges, isVideo, outMedia);
+    rec.mediaPath = outMedia;
+    // 16k mono wav for schema consistency (clips never transcribe, so it's a spare).
+    try {
+      const wav = path.join(UPLOAD_DIR, id + ".wav");
+      await toWav16kMono(outMedia, wav);
+      rec.audioPath = wav;
+    } catch { rec.audioPath = outMedia; }
+    rec.durationSec = probeDuration(outMedia) ?? rec.durationSec;
+    rec.result = deriveClipResult(parent.result, rec.clipRanges);
+    // Auto-cover for video clips: grab the clip's first frame. The user can change it
+    // later via 设置封面 (which overwrites covers/<id>.jpg). Non-fatal on failure.
+    if (isVideo && !rec.cover) {
+      try { await ffFrameJpeg(outMedia, 0.2, coverPath(id)); rec.cover = { at: nowIso() }; } catch { /* keep default tile */ }
+    }
+    rec.status = "done";
+    rec.progress = 100;
+    rec.phase = "";
+    rec.error = "";
+    writeRecord(rec);
+    addNotice(id, "info", `片段生成完成（${rec.continuous ? "连续片段" : "非连续片段"}，${rec.clipRanges.length} 段，共 ${fmtMs((rec.durationSec || 0) * 1000)}）`);
+  } catch (e) {
+    const r = readRecord(id) || rec;
+    r.status = "error";
+    r.error = String(e.message || e);
+    r.phase = "";
+    writeRecord(r);
+    addNotice(id, "error", "片段生成失败：" + String(e.message || e));
   }
 }
 
@@ -1874,6 +2074,7 @@ async function runJob(id) {
 app.post("/api/records/:id/transcribe", (req, res) => {
   const rec = readRecord(req.params.id);
   if (!rec) return res.status(404).json({ error: "not found" });
+  if (rec.clipOf) return res.status(400).json({ error: "片段不支持重新转写" });
   const cfg = loadConfig();
   const { ready, missing } = configReady(cfg);
   if (!ready) return res.status(400).json({ error: "无法转录:缺少 " + missing.join("、"), missing });
@@ -1915,6 +2116,7 @@ app.post("/api/records/:id/transcribe", (req, res) => {
 app.post("/api/records/:id/translate", (req, res) => {
   const rec = readRecord(req.params.id);
   if (!rec) return res.status(404).json({ error: "not found" });
+  if (rec.clipOf) return res.status(400).json({ error: "片段不支持翻译" });
   const cfg = loadConfig();
   if (!cfg.translate?.model) return res.status(400).json({ error: "无法翻译:请先在设置中选择翻译模型" });
   if (!rec.result?.segments?.length) return res.status(400).json({ error: "该记录尚无转写内容可翻译" });
@@ -1938,6 +2140,7 @@ app.post("/api/records/:id/translate", (req, res) => {
 app.post("/api/records/:id/rediarize", (req, res) => {
   const rec = readRecord(req.params.id);
   if (!rec) return res.status(404).json({ error: "not found" });
+  if (rec.clipOf) return res.status(400).json({ error: "片段不支持重新识别说话人" });
   const cfg = loadConfig();
   if (!cfg.models?.diar) return res.status(400).json({ error: "无法重新识别：请先在设置中选择说话人分离(Diarize)模型" });
   if (!rec.result?.segments?.length) return res.status(400).json({ error: "该记录尚无转写内容" });
@@ -1955,6 +2158,56 @@ app.post("/api/records/:id/rediarize", (req, res) => {
   rediarTargets.set(rec.id, n);
   enqueueJob(rec.id, "rediarize");
   res.json({ ok: true, queued: true });
+});
+
+// 创建片段: cut one or more time ranges out of a DONE record and concat them into a
+// brand-new, fully-independent record (media re-encoded + transcript sliced/rebased
+// from the parent). The new record links back via `clipOf`; it is generated async
+// (status "generating") on the local clip queue. Clips cannot be re-transcribed /
+// translated / re-diarized, nor can they spawn further clips (guarded above/here).
+app.post("/api/records/:id/clip", (req, res) => {
+  const parent = readRecord(req.params.id);
+  if (!parent) return res.status(404).json({ error: "not found" });
+  if (parent.clipOf) return res.status(400).json({ error: "片段不支持再创建片段" });
+  if (parent.status !== "done" || !parent.result?.segments) return res.status(400).json({ error: "请先完成转写再创建片段" });
+  const body = req.body || {};
+  const dur = Number.isFinite(parent.durationSec) ? parent.durationSec : Infinity;
+  const ranges = (Array.isArray(body.ranges) ? body.ranges : [])
+    .map((r) => ({ start: Math.max(0, Number(r.start) || 0), end: Math.min(dur, Number(r.end) || 0) }))
+    .filter((r) => r.end - r.start >= 0.1)
+    .sort((a, b) => a.start - b.start)
+    .map((r) => ({ start: round3(r.start), end: round3(r.end) }));
+  if (!ranges.length) return res.status(400).json({ error: "请至少选择一个有效区间" });
+  const id = randomUUID();
+  const isVideo = parent.kind === "video";
+  const total = ranges.reduce((a, r) => a + (r.end - r.start), 0);
+  const title = (typeof body.title === "string" && body.title.trim()) ? body.title.trim() : `${parent.title} · 片段`;
+  const rec = {
+    id,
+    title,
+    kind: parent.kind,
+    originalName: title + (isVideo ? ".mp4" : ".m4a"),
+    mime: isVideo ? "video/mp4" : "audio/mp4",
+    mediaPath: "",
+    audioPath: "",
+    durationSec: round3(total),
+    status: "generating",
+    progress: 5,
+    phase: "生成中",
+    error: "",
+    options: { language: parent.options?.language || "auto", segmentedStt: false, translate: false, enhance: false },
+    clipOf: parent.id,
+    clipRanges: ranges,
+    // 连续/非连续 reflects the user's selection (a single contiguous block is 连续),
+    // even when 跳过空白 splits it into several speech-only cut ranges.
+    continuous: typeof body.continuous === "boolean" ? body.continuous : ranges.length === 1,
+    createdAt: nowIso(),
+    updatedAt: nowIso(),
+    result: null,
+  };
+  writeRecord(rec);
+  enqueueClip(id);
+  res.json(recordSummary(rec));
 });
 
 // Stop a queued or running job. No true pause (diar/STT are one-shot remote calls),

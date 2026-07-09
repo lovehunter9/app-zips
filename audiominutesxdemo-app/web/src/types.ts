@@ -28,9 +28,11 @@ export interface RecordResult {
   // Ordered ids shown in the top "参会者" roster. Seeded from `speakers`; the user can
   // add (people who didn't speak) or remove (anyone) — segments keep their speaker id.
   participants?: string[];
+  // Custom color per speaker/participant id (id → #hex). Absent = auto color by index.
+  speakerColors?: Record<string, string>;
 }
 
-export type RecordStatus = "uploaded" | "processing" | "done" | "error";
+export type RecordStatus = "uploaded" | "processing" | "done" | "error" | "generating";
 
 // A user-visible processing event/notice attached to a record so the UI can show
 // WHAT happened during a run (denoise fell back, alignment auto-split, a step
@@ -77,12 +79,19 @@ export interface RecordSummary {
   hasCover?: boolean;
   coverVer?: string; // changes when the cover is (re)set, used to bust the <img> cache
   totalMs?: number | null; // total processing time of the last run (ms)
+  // Clip metadata: `clipOf` (parent record id) marks this record as a 片段; a clip
+  // is generated (status "generating") then becomes an independent record. `continuous`
+  // is true for a single-range clip. `clipCount` = number of concatenated ranges.
+  clipOf?: string;
+  continuous?: boolean;
+  clipCount?: number;
 }
 
 export interface RecordFull extends RecordSummary {
   mime: string;
   result: RecordResult | null;
   timings?: Timings | null;
+  clipRanges?: { start: number; end: number }[]; // present on 片段 records
 }
 
 export interface ModelOpt {
