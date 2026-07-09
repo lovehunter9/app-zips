@@ -617,6 +617,47 @@ app.delete("/api/records/:id", (req, res) => {
   res.json({ ok: true });
 });
 
+// Manual edits from the transcript editor: per-segment text/translation, speaker
+// display names (id → name), and the participant roster. Autosaved by the client
+// after every change (undo/redo lives on the client). Word/twords timings are
+// recomputed ONLY for segments whose text/translation actually changed, so untouched
+// lines keep their real forced-alignment word times.
+app.patch("/api/records/:id/result", (req, res) => {
+  const rec = readRecord(req.params.id);
+  if (!rec) return res.status(404).json({ error: "not found" });
+  if (!rec.result) return res.status(400).json({ error: "该记录尚无转写结果，无法编辑" });
+  const b = req.body || {};
+  const segs = rec.result.segments || [];
+  if (Array.isArray(b.segments)) {
+    for (let i = 0; i < segs.length && i < b.segments.length; i++) {
+      const src = b.segments[i] || {};
+      const seg = segs[i];
+      if (typeof src.text === "string" && src.text !== seg.text) {
+        seg.text = src.text;
+        seg.words = spreadWords(src.text, seg.start, seg.end);
+      }
+      if (typeof src.translation === "string" && src.translation !== (seg.translation || "")) {
+        seg.translation = src.translation;
+        seg.twords = src.translation ? spreadWords(src.translation, seg.start, seg.end) : [];
+      }
+      if (typeof src.speaker === "string" && src.speaker) seg.speaker = src.speaker;
+    }
+  }
+  if (b.speakerNames && typeof b.speakerNames === "object") {
+    const names = {};
+    for (const [k, v] of Object.entries(b.speakerNames)) {
+      if (typeof v === "string" && v.trim()) names[k] = v.trim();
+    }
+    rec.result.speakerNames = names;
+  }
+  if (Array.isArray(b.participants)) {
+    rec.result.participants = b.participants.filter((x) => typeof x === "string");
+  }
+  rec.updatedAt = nowIso();
+  writeRecord(rec);
+  res.json({ ...rec, hasCover: !!rec.cover, coverVer: rec.cover?.at || "" });
+});
+
 // ---------------------------------------------------------------------------
 // Cover image — a per-record thumbnail shown on the library cards. Accepts either
 // an uploaded image file (multipart "file") or a captured video frame as a base64
@@ -685,7 +726,8 @@ app.get("/api/records/:id/audio", (req, res) => {
 // stall together at 3%). Jobs are therefore queued FIFO and drained one by one.
 const running = new Set(); // the single id currently processing (in-process guard)
 const queue = [];          // ids waiting their turn (FIFO)
-const jobKinds = new Map(); // id -> "full" | "translate" (translate = add译文 only)
+const jobKinds = new Map(); // id -> "full" | "translate" | "rediarize"
+const rediarTargets = new Map(); // id -> target speaker count for a rediarize job
 let draining = false;      // true while a job is active (the serial gate)
 // Ids the user asked to STOP. There is no true pause (diar/STT are one-shot remote
 // calls we can't interrupt mid-flight), so this is a cooperative abort: the running
@@ -747,6 +789,7 @@ async function pump() {
   jobKinds.delete(id);
   try {
     if (kind === "translate") await runTranslateJob(id);
+    else if (kind === "rediarize") await runRediarizeJob(id, rediarTargets.get(id) || 0);
     else await runJob(id);
   } catch {
     /* runJob persists its own terminal status/error */
@@ -999,6 +1042,18 @@ function sliceToWords(refText, c0, c1, timeAtChar) {
     i = j;
   }
   return words;
+}
+
+// Recompute clickable, timed words for an EDITED line: real forced-alignment is gone
+// once the text changed, so spread the line's [start,end] evenly across the new
+// characters (same idea as translation twords). Keeps click-to-seek + highlight.
+function spreadWords(text, start, end) {
+  const t = text || "";
+  const n = t.length || 1;
+  const s = Number(start) || 0;
+  const span = Math.max(0, (Number(end) || 0) - s);
+  const timeAtChar = (c) => s + (span * Math.min(n, Math.max(0, c))) / n;
+  return finalizeWords(sliceToWords(t, 0, t.length, timeAtChar), s, s + span);
 }
 
 // Forced-alignment language. Qwen3-ForcedAligner wants a language NAME
@@ -1270,6 +1325,113 @@ async function runTranslateJob(id) {
     running.delete(id);
     cancelled.delete(id);
     jobAbort.delete(id);
+  }
+}
+
+// Re-run ONLY diarization on an existing transcript and re-assign each segment's
+// speaker by time-overlap, keeping the transcript text/word-times/translation edits
+// intact. `target` is the requested max speaker count (Feishu semantics): the result
+// has at most `target` speakers — if the audio naturally has fewer, it stays fewer.
+// Speaker display-name edits + the participant roster are reset (they no longer map).
+async function runRediarizeJob(id, target) {
+  if (running.has(id)) return;
+  const rec = readRecord(id);
+  if (!rec) return;
+  const cfg = loadConfig();
+  if (rec.bflUser) cfg.bflUser = rec.bflUser;
+  if (!rec.result?.segments?.length) {
+    rec.status = rec.result ? "done" : rec.status;
+    rec.error = "无内容可识别";
+    writeRecord(rec);
+    return;
+  }
+  if (!cfg.models?.diar) {
+    rec.status = "done";
+    rec.error = "无法重新识别：未选择说话人分离(Diarize)模型";
+    writeRecord(rec);
+    return;
+  }
+  const N = Math.max(1, Math.floor(Number(target) || 1));
+  running.add(id);
+  cancelled.delete(id);
+  const ac = new AbortController();
+  jobAbort.set(id, ac);
+  cfg._signal = ac.signal;
+  const startedAt = nowIso();
+  const timer = makeTimer();
+  const setP = (progress, phase) => {
+    const r = readRecord(id);
+    if (!r) return;
+    r.status = "processing"; r.progress = progress; r.phase = phase;
+    r.stepDone = 0; r.stepTotal = 0; r.startedAt = startedAt; r.error = "";
+    writeRecord(r);
+  };
+  try {
+    ckCancel(id);
+    setP(10, "重新识别说话人");
+    const workAudio = rec.audioPath;
+    timer.begin("说话人分离");
+    // Hint the gateway with an upper bound; we ALSO cap client-side below so the
+    // contract holds even if the backend ignores max_speakers.
+    const diar = await gwAudioOp(cfg, "diarization", workAudio, cfg.models.diar, { max_speakers: N, num_speakers: N });
+    timer.finish();
+    ckCancel(id);
+    let dseg = (Array.isArray(diar?.segments) ? diar.segments : [])
+      .map((s) => ({ start: +s.start, end: +s.end, speaker: String(s.speaker ?? "SPEAKER_00") }))
+      .filter((s) => Number.isFinite(s.start) && Number.isFinite(s.end) && s.end > s.start);
+    if (!dseg.length) throw new Error("说话人分离未返回任何片段");
+
+    // Cap to the top-N speakers by total speaking time; drop the rest so segments
+    // fall back onto the nearest KEPT speaker. No-op when the backend already
+    // honored max_speakers (distinct <= N).
+    const dur = {};
+    for (const d of dseg) dur[d.speaker] = (dur[d.speaker] || 0) + (d.end - d.start);
+    const kept = Object.keys(dur).sort((a, b) => dur[b] - dur[a]).slice(0, N);
+    const keptSet = new Set(kept);
+    dseg = dseg.filter((d) => keptSet.has(d.speaker));
+    const pick = (a, b) => {
+      let best = dseg[0].speaker, bestOv = -1;
+      for (const d of dseg) {
+        const ov = Math.min(b, d.end) - Math.max(a, d.start);
+        if (ov > bestOv) { bestOv = ov; best = d.speaker; }
+      }
+      return best;
+    };
+
+    setP(70, "重新指派说话人");
+    const out = readRecord(id);
+    const segments = out.result.segments || [];
+    // Relabel to clean SPEAKER_0k in first-appearance order.
+    const relabel = new Map();
+    let next = 0;
+    for (const seg of segments) {
+      const raw = pick(seg.start, seg.end);
+      if (!relabel.has(raw)) relabel.set(raw, `SPEAKER_${String(next++).padStart(2, "0")}`);
+      seg.speaker = relabel.get(raw);
+    }
+    const speakers = [...relabel.values()];
+    out.result.speakers = speakers;
+    out.result.speakerNames = {}; // speaker edits no longer map -> reset
+    out.result.participants = speakers.slice();
+    const timings = timer.finish();
+    out.status = "done"; out.progress = 100; out.phase = ""; out.error = "";
+    writeRecord(out);
+    addNotice(id, "info", `重新识别完成：目标上限 ${N} 人，实际识别出 ${speakers.length} 位说话人（文字记录已保留，说话人命名已重置）。`);
+  } catch (e) {
+    if ((e && e.cancelled) || cancelled.has(id)) revertStopped(id, rec);
+    else {
+      const out = readRecord(id) || rec;
+      out.status = "done"; // record still has its transcript
+      out.progress = 100; out.phase = "";
+      out.error = String(e.message || e);
+      writeRecord(out);
+      addNotice(id, "error", `重新识别失败：${e?.message || e}`);
+    }
+  } finally {
+    running.delete(id);
+    cancelled.delete(id);
+    jobAbort.delete(id);
+    rediarTargets.delete(id);
   }
 }
 
@@ -1732,6 +1894,31 @@ app.post("/api/records/:id/translate", (req, res) => {
   rec.jobKind = "translate"; // translate-only → processing view shows just 翻译
   writeRecord(rec);
   enqueueJob(rec.id, "translate");
+  res.json({ ok: true, queued: true });
+});
+
+// Re-identify speakers: re-run diarization with an upper-bound speaker count and
+// re-assign each segment's speaker, keeping transcript text edits. Speaker names +
+// participant roster are reset.
+app.post("/api/records/:id/rediarize", (req, res) => {
+  const rec = readRecord(req.params.id);
+  if (!rec) return res.status(404).json({ error: "not found" });
+  const cfg = loadConfig();
+  if (!cfg.models?.diar) return res.status(400).json({ error: "无法重新识别：请先在设置中选择说话人分离(Diarize)模型" });
+  if (!rec.result?.segments?.length) return res.status(400).json({ error: "该记录尚无转写内容" });
+  if (running.has(rec.id) || queue.includes(rec.id))
+    return res.json({ ok: true, alreadyRunning: true });
+  const n = Math.max(1, Math.floor(Number(req.body?.speakers) || 1));
+  const bfl = (req.headers["x-bfl-user"] || "").toString();
+  if (bfl) rec.bflUser = bfl;
+  rec.status = "processing";
+  rec.progress = 1;
+  rec.phase = "排队中（重新识别说话人）";
+  rec.error = "";
+  rec.jobKind = "rediarize";
+  writeRecord(rec);
+  rediarTargets.set(rec.id, n);
+  enqueueJob(rec.id, "rediarize");
   res.json({ ok: true, queued: true });
 });
 

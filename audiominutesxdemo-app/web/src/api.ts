@@ -34,8 +34,20 @@ export const transcribeRecord = (id: string, opts?: Partial<RecordOptions>) =>
   jsend<{ ok: boolean }>(`/api/records/${id}/transcribe`, "POST", opts ?? {});
 export const translateRecord = (id: string) =>
   jsend<{ ok: boolean }>(`/api/records/${id}/translate`, "POST", {});
+
+// Save manual edits (transcript editor): per-segment text/translation/speaker,
+// speaker display names, and the participant roster. Returns the updated record.
+export interface ResultPatch {
+  segments?: { text?: string; translation?: string; speaker?: string }[];
+  speakerNames?: Record<string, string>;
+  participants?: string[];
+}
+export const saveResult = (id: string, patch: ResultPatch) =>
+  jsend<RecordFull>(`/api/records/${id}/result`, "PATCH", patch);
 export const cancelRecord = (id: string) =>
   jsend<{ ok: boolean }>(`/api/records/${id}/cancel`, "POST", {});
+export const rediarize = (id: string, speakers: number) =>
+  jsend<{ ok: boolean }>(`/api/records/${id}/rediarize`, "POST", { speakers });
 
 export function uploadBackground(file: File): Promise<GatewayConfig> {
   const fd = new FormData();

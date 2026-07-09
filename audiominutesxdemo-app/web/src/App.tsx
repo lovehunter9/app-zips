@@ -267,22 +267,38 @@ function spkIdx(spk: string): number {
   return m ? parseInt(m[1], 10) : 0;
 }
 function spkColor(spk: string): string {
+  if (spk === "UNKNOWN") return "#9ca3af";
   return SPK_COLORS[spkIdx(spk) % SPK_COLORS.length];
 }
-function spkLabel(spk: string): string {
+// Sentinel speaker id for segments whose speaker was removed from the roster: they
+// show as 未知 and must be reassigned per-segment (no chained rename).
+const UNKNOWN_SPK = "UNKNOWN";
+function spkLabel(spk: string, names?: Record<string, string>): string {
+  if (spk === UNKNOWN_SPK) return "未知";
+  const custom = names?.[spk];
+  if (custom && custom.trim()) return custom.trim();
   const m = /(\d+)/.exec(spk || "");
   return m ? `说话人 ${parseInt(m[1], 10) + 1}` : spk || "说话人";
 }
+// Short avatar text: custom name's first 2 chars, else the speaker number.
+function spkInitial(spk: string, names?: Record<string, string>): string {
+  if (spk === UNKNOWN_SPK) return "?";
+  const custom = names?.[spk];
+  if (custom && custom.trim()) return custom.trim().slice(0, 2);
+  const m = /(\d+)/.exec(spk || "");
+  return m ? String(parseInt(m[1], 10) + 1) : "?";
+}
 
-function SpeakerChip({ spk }: { spk: string }) {
+function SpeakerChip({ spk, names, onClick }: { spk: string; names?: Record<string, string>; onClick?: () => void }) {
   const c = spkColor(spk);
   return (
     <span
-      className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded px-1 py-0.5 text-[10px] font-medium leading-none"
+      onClick={onClick}
+      className={`inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded px-1 py-0.5 text-[10px] font-medium leading-none ${onClick ? "cursor-pointer hover:brightness-125" : ""}`}
       style={{ color: c, backgroundColor: c + "22", border: `1px solid ${c}55` }}
     >
       <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ backgroundColor: c }} />
-      {spkLabel(spk)}
+      {spkLabel(spk, names)}
     </span>
   );
 }
@@ -453,9 +469,15 @@ function ProcessingView({ rec, onStop }: { rec: RecordFull; onStop?: () => void 
   // 补翻译 (translate-only) reuses the queue but runs ONLY the translation step —
   // don't show the transcription pipeline (说话人分离/转写/整理), which isn't running.
   const translateOnly = rec.jobKind === "translate";
+  // 重新识别说话人: reuses the queue but ONLY re-runs diarization + re-assign; the
+  // transcript text / translation are kept untouched.
+  const rediarizeOnly = rec.jobKind === "rediarize";
   const steps: { key: string; label: string }[] = [];
   if (translateOnly) {
     steps.push({ key: "translate", label: "翻译" });
+  } else if (rediarizeOnly) {
+    steps.push({ key: "diar", label: "说话人分离" });
+    steps.push({ key: "reassign", label: "重新指派说话人（保留文字记录）" });
   } else {
     if (opts?.enhance) steps.push({ key: "enhance", label: "降噪增强" });
     steps.push({ key: "diar", label: "说话人分离" });
@@ -467,7 +489,13 @@ function ProcessingView({ rec, onStop }: { rec: RecordFull; onStop?: () => void 
   const activeKey = queued
     ? translateOnly
       ? "translate"
+      : rediarizeOnly
+      ? "diar"
       : null
+    : rediarizeOnly
+    ? ph.includes("重新指派")
+      ? "reassign"
+      : "diar"
     : ph.includes("降噪")
     ? "enhance"
     : ph.includes("说话人")
@@ -958,6 +986,127 @@ function RecordDetail({
     },
     [rec, granularity, jiebaReady],
   );
+
+  // ------------------------------------------------------------------ Editing --
+  // Speaker display names + participant roster live on rec.result. Roster edits are
+  // applied immediately (small; autosaved and rec refreshed). Transcript/translation
+  // text edits use a LOCAL draft with undo/redo, autosaved, committed on 完成.
+  const speakerNames: Record<string, string> = rec?.result?.speakerNames || {};
+  const speakerIds = useMemo(() => {
+    const set = new Set<string>();
+    (rec?.result?.speakers || []).forEach((s) => set.add(s));
+    (rec?.result?.segments || []).forEach((s) => set.add(s.speaker));
+    return [...set];
+  }, [rec]);
+  // An explicitly-saved roster (even an empty [] after removing everyone) is
+  // authoritative; only never-edited records fall back to the derived speaker list.
+  const participants: string[] = (
+    Array.isArray(rec?.result?.participants) ? rec.result!.participants! : speakerIds
+  ).filter((p) => p !== UNKNOWN_SPK);
+  const saveMeta = useCallback(
+    async (patch: api.ResultPatch) => {
+      try { const up = await api.saveResult(id, patch); setRec(up); onChanged(); }
+      catch (e: any) { setErr(String(e?.message || e)); }
+    },
+    [id, onChanged],
+  );
+  const renameSpeaker = (spk: string, name: string) =>
+    saveMeta({ speakerNames: { ...speakerNames, [spk]: name.trim() }, participants });
+  const addParticipant = (name: string) => {
+    const pid = "P" + Date.now().toString(36);
+    saveMeta({ speakerNames: { ...speakerNames, [pid]: name.trim() }, participants: [...participants, pid] });
+  };
+  // Removing a participant who actually spoke: their segments become 未知 (UNKNOWN)
+  // and must be re-assigned per-segment afterwards (no chained rename). A participant
+  // who never spoke (manually added) is just dropped from the roster.
+  const removeParticipant = (spk: string) => {
+    const names = { ...speakerNames }; delete names[spk];
+    const segs = rec?.result?.segments || [];
+    const spoke = segs.some((s) => s.speaker === spk);
+    const patch: api.ResultPatch = { speakerNames: names, participants: participants.filter((p) => p !== spk) };
+    if (spoke) patch.segments = segs.map((s) => (s.speaker === spk ? { speaker: UNKNOWN_SPK } : {}));
+    saveMeta(patch);
+  };
+  // Re-assign ONE segment's speaker (no chained rename). Adds the target to the roster
+  // if it isn't there yet. `spk` may be an existing id or a brand-new participant id.
+  const reassignSegment = (segIdx: number, spk: string, name?: string) => {
+    const segs = rec?.result?.segments || [];
+    const patch: api.ResultPatch = {
+      segments: segs.map((_, k) => (k === segIdx ? { speaker: spk } : {})),
+      speakerNames: name && name.trim() ? { ...speakerNames, [spk]: name.trim() } : speakerNames,
+      participants: participants.includes(spk) ? participants : [...participants, spk],
+    };
+    saveMeta(patch);
+  };
+  // { spk } to rename an existing speaker; { spk:null } to add a new participant.
+  const [nameModal, setNameModal] = useState<{ spk: string | null; initial: string } | null>(null);
+  // Transcript speaker-chip popover: rename (chains) + re-assign THIS segment.
+  const [spkEdit, setSpkEdit] = useState<number | null>(null);
+  const [rediarOpen, setRediarOpen] = useState(false);
+  const doRediar = useCallback(async (speakers: number) => {
+    setRediarOpen(false);
+    try { await api.rediarize(id, speakers); onChanged(); load(); }
+    catch (e: any) { setErr(String(e?.message || e)); }
+  }, [id, onChanged]);
+
+  type Draft = { text: string; translation: string };
+  const [editing, setEditing] = useState(false);
+  const [editTrans, setEditTrans] = useState(false);
+  const [draft, setDraft] = useState<Draft[]>([]);
+  const undoRef = useRef<Draft[][]>([]);
+  const redoRef = useRef<Draft[][]>([]);
+  const [, setHistTick] = useState(0); // force re-render when undo/redo depth changes
+  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved">("saved");
+  const saveTimer = useRef<number | null>(null);
+  const lastEditRef = useRef<{ key: string; t: number }>({ key: "", t: 0 });
+
+  const scheduleSave = useCallback(
+    (next: Draft[]) => {
+      setSaveState("saving");
+      if (saveTimer.current) window.clearTimeout(saveTimer.current);
+      saveTimer.current = window.setTimeout(async () => {
+        try { await api.saveResult(id, { segments: next, speakerNames, participants }); setSaveState("saved"); }
+        catch (e: any) { setErr(String(e?.message || e)); setSaveState("idle"); }
+      }, 500);
+    },
+    [id, speakerNames, participants],
+  );
+  const enterEdit = () => {
+    setDraft((rec?.result?.segments || []).map((s) => ({ text: s.text || "", translation: s.translation || "" })));
+    undoRef.current = []; redoRef.current = []; setHistTick((t) => t + 1);
+    setSaveState("saved");
+    setEditing(true);
+  };
+  const editSeg = (i: number, field: "text" | "translation", value: string) => {
+    const key = i + ":" + field;
+    const now = Date.now();
+    const coalesce = lastEditRef.current.key === key && now - lastEditRef.current.t < 1500;
+    lastEditRef.current = { key, t: now };
+    if (!coalesce) { undoRef.current.push(draft); redoRef.current = []; setHistTick((t) => t + 1); }
+    const next = draft.map((d, k) => (k === i ? { ...d, [field]: value } : d));
+    setDraft(next);
+    scheduleSave(next);
+  };
+  const undoEdit = () => {
+    if (!undoRef.current.length) return;
+    redoRef.current.push(draft);
+    const prev = undoRef.current.pop() as Draft[];
+    lastEditRef.current = { key: "", t: 0 };
+    setDraft(prev); setHistTick((t) => t + 1); scheduleSave(prev);
+  };
+  const redoEdit = () => {
+    if (!redoRef.current.length) return;
+    undoRef.current.push(draft);
+    const nxt = redoRef.current.pop() as Draft[];
+    lastEditRef.current = { key: "", t: 0 };
+    setDraft(nxt); setHistTick((t) => t + 1); scheduleSave(nxt);
+  };
+  const finishEdit = async () => {
+    if (saveTimer.current) { window.clearTimeout(saveTimer.current); saveTimer.current = null; }
+    try { const up = await api.saveResult(id, { segments: draft, speakerNames, participants }); setRec(up); onChanged(); }
+    catch (e: any) { setErr(String(e?.message || e)); }
+    setEditing(false);
+  };
   // Whether this transcript has any Chinese (only then is the 字/词 toggle useful).
   const hasCJK = useMemo(
     () => (rec?.result?.segments || []).some(
@@ -1268,6 +1417,92 @@ function RecordDetail({
     return maskRuns(text, mask).map((r, ri) => (r.hit ? <span key={ri} className={searchHl}>{r.text}</span> : <span key={ri}>{r.text}</span>));
   };
 
+  // 参与者 roster (Feishu-style): avatar chips with rename/remove + 添加. Renaming a
+  // speaker propagates to every segment (chips read speakerNames). Removing one who
+  // spoke turns their segments 未知 (re-assign per-segment). Disabled while the
+  // transcript text editor is open (roster is managed in view mode).
+  const participantsBar = rec.status === "done" && rec.result ? (
+    <div className="flex flex-wrap items-center gap-1.5 border-b border-neutral-800 bg-neutral-900/40 px-4 py-2">
+      <span className="mr-1 text-xs text-neutral-500">参与者 ({participants.length})</span>
+      {participants.map((spk) => {
+        const c = spkColor(spk);
+        return (
+          <span key={spk} className="group inline-flex items-center gap-1 rounded-full py-0.5 pl-0.5 pr-1.5 text-xs" style={{ backgroundColor: c + "22", border: `1px solid ${c}55` }}>
+            <span className="flex h-5 w-5 items-center justify-center rounded-full text-[10px] font-semibold text-white" style={{ backgroundColor: c }}>
+              {spkInitial(spk, speakerNames)}
+            </span>
+            <span className="text-neutral-200">{spkLabel(spk, speakerNames)}</span>
+            {!editing && (
+              <>
+                <button className="ml-0.5 text-neutral-500 hover:text-neutral-200" title="重命名" onClick={() => setNameModal({ spk, initial: spkLabel(spk, speakerNames) })}>✎</button>
+                <button className="text-neutral-500 hover:text-red-400" title="移除参与者" onClick={() => { if (window.confirm(`移除参与者「${spkLabel(spk, speakerNames)}」？其发言将变为「未知」，需逐条重新指派。`)) removeParticipant(spk); }}>✕</button>
+              </>
+            )}
+          </span>
+        );
+      })}
+      {!editing && (
+        <button className="rounded-full border border-dashed border-neutral-600 px-2 py-0.5 text-xs text-neutral-400 hover:border-neutral-400 hover:text-neutral-200" onClick={() => setNameModal({ spk: null, initial: "" })}>
+          + 添加参与者
+        </button>
+      )}
+    </div>
+  ) : null;
+
+  // Transcript header row: view mode shows 字/词 + search + 编辑; edit mode shows the
+  // toolbar (撤销/重做/编辑译文/完成 + 保存状态).
+  const editToolbar = (
+    <div className="ml-auto flex items-center gap-2 text-xs">
+      <span className="text-neutral-500">
+        {saveState === "saving" ? "保存中…" : saveState === "saved" ? "已保存所有更改" : ""}
+      </span>
+      <button className="rounded px-2 py-1 text-neutral-300 enabled:hover:bg-neutral-700/60 disabled:text-neutral-600" disabled={!undoRef.current.length} onClick={undoEdit} title="撤销">↶ 撤销</button>
+      <button className="rounded px-2 py-1 text-neutral-300 enabled:hover:bg-neutral-700/60 disabled:text-neutral-600" disabled={!redoRef.current.length} onClick={redoEdit} title="重做">↷ 重做</button>
+      {hasTranslation && (
+        <label className="flex items-center gap-1 text-neutral-400">
+          <input type="checkbox" className="h-3.5 w-3.5" checked={editTrans} onChange={(e) => setEditTrans(e.target.checked)} />
+          编辑译文
+        </label>
+      )}
+      <button className="btn-primary !py-1" onClick={finishEdit}>完成</button>
+    </div>
+  );
+
+  // Editable transcript: one textarea per segment (sentence unit), speaker chip
+  // clickable to rename, optional translation textarea. Playback highlight is off in
+  // edit mode (we edit text, not sync).
+  const editorList = (
+    <div className="space-y-2">
+      {draft.map((d, i) => {
+        const seg = rec.result?.segments?.[i];
+        if (!seg) return null;
+        return (
+          <div key={i} className="rounded-md px-2 py-1">
+            <div className="mb-0.5 flex items-center gap-1.5">
+              <SpeakerChip spk={seg.speaker} names={speakerNames} />
+              <span className="font-mono text-[11px] tabular-nums text-neutral-500">{fmtTC(seg.start)}</span>
+            </div>
+            <textarea
+              className="w-full resize-none rounded border border-neutral-700 bg-neutral-900/60 px-2 py-1 text-[14px] leading-snug text-neutral-100 focus:border-emerald-500 focus:outline-none"
+              rows={Math.max(1, Math.ceil((d.text.length || 1) / 34))}
+              value={d.text}
+              onChange={(e) => editSeg(i, "text", e.target.value)}
+            />
+            {editTrans && hasTranslation && (
+              <textarea
+                className="mt-1 w-full resize-none rounded border border-sky-800/60 bg-sky-950/20 px-2 py-1 text-[13px] leading-snug text-sky-100 focus:border-sky-500 focus:outline-none"
+                rows={Math.max(1, Math.ceil((d.translation.length || 1) / 34))}
+                value={d.translation}
+                placeholder="(无译文)"
+                onChange={(e) => editSeg(i, "translation", e.target.value)}
+              />
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+
   // The transcript list is shared by both layouts (video: right column; audio:
   // full-width main body). The scroll container that wraps it differs per layout.
   const transcriptList = (
@@ -1280,7 +1515,7 @@ function RecordDetail({
           return (
           <div key={si} data-seg={si} className={`rounded-md px-2 py-1 transition-colors ${si === activeSegIdx ? "bg-neutral-800/40" : ""}`}>
             <div className="mb-0.5 flex items-center gap-1.5">
-              <SpeakerChip spk={seg.speaker} />
+              <SpeakerChip spk={seg.speaker} names={speakerNames} onClick={() => setSpkEdit(si)} />
               <button className="font-mono text-[11px] tabular-nums text-neutral-500 hover:text-neutral-300" onClick={() => seekTo(seg.start)}>
                 {fmtTC(seg.start)}
               </button>
@@ -1349,6 +1584,9 @@ function RecordDetail({
           </button>
         )}
         {rec.status === "done" && (
+          <button className="btn-ghost" onClick={() => setRediarOpen(true)} title="仅重跑说话人分离并重新指派(保留文字)">重新识别说话人</button>
+        )}
+        {rec.status === "done" && (
           <button className="btn-ghost" onClick={doTranscribe} title="用下方「转写设置」重新跑一遍转写">重新转写</button>
         )}
         {(rec.status === "uploaded" || rec.status === "error") && (
@@ -1356,6 +1594,8 @@ function RecordDetail({
         )}
         <button className="btn-ghost" onClick={doDelete}>删除</button>
       </div>
+
+      {participantsBar}
 
       {showOpts && (
         <div className="flex flex-wrap items-center gap-4 border-b border-neutral-800 bg-neutral-900/50 px-4 py-2.5 text-sm">
@@ -1443,13 +1683,16 @@ function RecordDetail({
               <div className="flex h-full flex-col overflow-hidden pl-3">
                 <div className="mb-2 flex items-center gap-2">
                   <span className="text-sm font-medium text-neutral-200">文字记录</span>
-                  <div className="ml-auto flex items-center gap-2">
-                    {granularityToggle}
-                    <div className="w-44 sm:w-56">{searchBox}</div>
-                  </div>
+                  {editing ? editToolbar : (
+                    <div className="ml-auto flex items-center gap-2">
+                      {granularityToggle}
+                      <div className="w-44 sm:w-56">{searchBox}</div>
+                      <button className="btn-ghost !py-1" onClick={enterEdit} title="编辑转录文字 / 译文">编辑</button>
+                    </div>
+                  )}
                 </div>
                 <div ref={scrollRef} className="flex-1 overflow-y-auto pr-1">
-                  {transcriptList}
+                  {editing ? editorList : transcriptList}
                 </div>
               </div>
             }
@@ -1473,13 +1716,16 @@ function RecordDetail({
               <div className="flex h-full min-w-0 flex-col">
                 <div className="flex items-center gap-3 border-b border-neutral-800 px-4 py-2">
                   <span className="text-sm font-medium text-neutral-200">文字记录</span>
-                  <div className="ml-auto flex items-center gap-2">
-                    {granularityToggle}
-                    <div className="w-48 sm:w-64">{searchBox}</div>
-                  </div>
+                  {editing ? editToolbar : (
+                    <div className="ml-auto flex items-center gap-2">
+                      {granularityToggle}
+                      <div className="w-48 sm:w-64">{searchBox}</div>
+                      <button className="btn-ghost !py-1" onClick={enterEdit} title="编辑转录文字 / 译文">编辑</button>
+                    </div>
+                  )}
                 </div>
                 <div ref={scrollRef} className="flex-1 overflow-y-auto px-6 py-3">
-                  <div className="mx-auto w-full max-w-5xl">{transcriptList}</div>
+                  <div className="mx-auto w-full max-w-5xl">{editing ? editorList : transcriptList}</div>
                 </div>
               </div>
             }
@@ -1502,6 +1748,171 @@ function RecordDetail({
           onSaved={() => { setCoverOpen(false); load(); onChanged(); }}
         />
       )}
+      {nameModal && (
+        <NameModal
+          title={nameModal.spk === null ? "添加参与者" : "重命名说话人"}
+          initial={nameModal.initial}
+          onClose={() => setNameModal(null)}
+          onSave={(name) => {
+            if (nameModal.spk === null) addParticipant(name);
+            else renameSpeaker(nameModal.spk, name);
+            setNameModal(null);
+          }}
+        />
+      )}
+      {spkEdit !== null && rec.result?.segments?.[spkEdit] && (
+        <SpeakerPopover
+          spk={rec.result.segments[spkEdit].speaker}
+          names={speakerNames}
+          participants={participants}
+          onRename={(name) => { renameSpeaker(rec.result!.segments![spkEdit].speaker, name); setSpkEdit(null); }}
+          onReassign={(target) => { reassignSegment(spkEdit, target); setSpkEdit(null); }}
+          onReassignNew={(name) => { reassignSegment(spkEdit, "P" + Date.now().toString(36), name); setSpkEdit(null); }}
+          onClose={() => setSpkEdit(null)}
+        />
+      )}
+      {rediarOpen && (
+        <RediarizeModal
+          current={Math.max(1, participants.length || speakerIds.filter((s) => s !== UNKNOWN_SPK).length || 1)}
+          onClose={() => setRediarOpen(false)}
+          onConfirm={doRediar}
+        />
+      )}
+    </div>
+  );
+}
+
+// 重新识别说话人 (Feishu-style): pick a speaker count (upper bound). Re-runs
+// diarization only; transcript text edits are kept, speaker names are reset.
+function RediarizeModal({
+  current, onConfirm, onClose,
+}: {
+  current: number;
+  onConfirm: (n: number) => void;
+  onClose: () => void;
+}) {
+  const [n, setN] = useState(current);
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
+      <div className="w-96 rounded-lg border border-neutral-700 bg-neutral-900 p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
+        <div className="mb-3 text-base font-semibold text-neutral-100">重新识别说话人</div>
+        <p className="mb-4 text-[13px] leading-relaxed text-neutral-400">
+          若重新识别，你对说话人所做的修改将被清除，但对文字记录所做的修改将被保留。识别结果最多为所选人数——若实际人数更少，则以实际为准。
+        </p>
+        <div className="mb-5 flex items-center gap-3">
+          <span className="text-sm text-neutral-300">选择说话人数</span>
+          <input
+            type="number"
+            min={1}
+            max={20}
+            className="w-24 rounded border border-neutral-700 bg-neutral-800 px-2 py-1 text-sm text-neutral-100 focus:border-emerald-500 focus:outline-none"
+            value={n}
+            onChange={(e) => setN(Math.max(1, Math.floor(Number(e.target.value) || 1)))}
+          />
+        </div>
+        <div className="flex justify-end gap-2">
+          <button className="rounded border border-neutral-700 px-4 py-1.5 text-sm text-neutral-300 hover:bg-neutral-800" onClick={onClose}>取消</button>
+          <button className="rounded bg-emerald-600 px-4 py-1.5 text-sm text-white hover:bg-emerald-500" onClick={() => onConfirm(n)}>重新识别</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Transcript speaker-chip popover. Two independent actions:
+//   • 重命名说话人 — renames this speaker everywhere (chained; only for known speakers).
+//   • 指派本段给 — changes ONLY this segment's speaker (no chain). Used to fix 未知
+//     segments one-by-one after a participant was removed.
+function SpeakerPopover({
+  spk, names, participants, onRename, onReassign, onReassignNew, onClose,
+}: {
+  spk: string;
+  names: Record<string, string>;
+  participants: string[];
+  onRename: (name: string) => void;
+  onReassign: (target: string) => void;
+  onReassignNew: (name: string) => void;
+  onClose: () => void;
+}) {
+  const isUnknown = spk === UNKNOWN_SPK;
+  const [name, setName] = useState(isUnknown ? "" : spkLabel(spk, names));
+  const others = participants.filter((p) => p !== spk);
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
+      <div className="w-80 rounded-lg border border-neutral-700 bg-neutral-900 p-4 shadow-xl" onClick={(e) => e.stopPropagation()}>
+        {!isUnknown && (
+          <div className="mb-3">
+            <div className="mb-1 text-sm font-medium text-neutral-200">重命名说话人</div>
+            <div className="mb-1 text-[11px] text-neutral-500">影响该说话人的全部发言</div>
+            <div className="flex gap-2">
+              <input
+                autoFocus
+                className="flex-1 rounded border border-neutral-700 bg-neutral-800 px-2 py-1 text-sm text-neutral-100 focus:border-emerald-500 focus:outline-none"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter" && name.trim()) onRename(name.trim()); }}
+              />
+              <button className="rounded bg-emerald-600 px-3 py-1 text-sm text-white hover:bg-emerald-500 disabled:opacity-40" disabled={!name.trim()} onClick={() => name.trim() && onRename(name.trim())}>保存</button>
+            </div>
+          </div>
+        )}
+        <div className={isUnknown ? "" : "border-t border-neutral-800 pt-3"}>
+          <div className="mb-1.5 text-sm font-medium text-neutral-200">指派本段给</div>
+          <div className="mb-1 text-[11px] text-neutral-500">仅改变当前这一段的说话人</div>
+          <div className="flex flex-wrap gap-1.5">
+            {others.map((p) => {
+              const c = spkColor(p);
+              return (
+                <button key={p} className="inline-flex items-center gap-1 rounded-full py-0.5 pl-0.5 pr-2 text-xs hover:brightness-125" style={{ backgroundColor: c + "22", border: `1px solid ${c}55` }} onClick={() => onReassign(p)}>
+                  <span className="flex h-5 w-5 items-center justify-center rounded-full text-[10px] font-semibold text-white" style={{ backgroundColor: c }}>{spkInitial(p, names)}</span>
+                  <span className="text-neutral-200">{spkLabel(p, names)}</span>
+                </button>
+              );
+            })}
+            <button
+              className="rounded-full border border-dashed border-neutral-600 px-2 py-0.5 text-xs text-neutral-400 hover:border-neutral-400 hover:text-neutral-200"
+              onClick={() => { const n = window.prompt("新参与者名字"); if (n && n.trim()) onReassignNew(n.trim()); }}
+            >
+              + 新建参与者
+            </button>
+          </div>
+        </div>
+        <div className="mt-3 text-right">
+          <button className="rounded px-3 py-1 text-sm text-neutral-400 hover:text-neutral-200" onClick={onClose}>关闭</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Small centered modal to enter/edit a speaker or participant name (Feishu-style).
+function NameModal({
+  title, initial, onSave, onClose,
+}: {
+  title: string;
+  initial: string;
+  onSave: (name: string) => void;
+  onClose: () => void;
+}) {
+  const [name, setName] = useState(initial);
+  const submit = () => { if (name.trim()) onSave(name.trim()); };
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
+      <div className="w-80 rounded-lg border border-neutral-700 bg-neutral-900 p-4 shadow-xl" onClick={(e) => e.stopPropagation()}>
+        <div className="mb-2 text-sm font-medium text-neutral-200">{title}</div>
+        <input
+          autoFocus
+          className="input w-full"
+          value={name}
+          placeholder="请输入名字"
+          onChange={(e) => setName(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") submit(); if (e.key === "Escape") onClose(); }}
+        />
+        <div className="mt-3 flex justify-end gap-2">
+          <button className="btn-ghost" onClick={onClose}>取消</button>
+          <button className="btn-primary" disabled={!name.trim()} onClick={submit}>确认</button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1816,6 +2227,7 @@ function MetaTabs({ rec, defaultTab = "info" }: { rec: RecordFull; defaultTab?: 
 // 「发言人」统计（妙记左栏对应）：每位说话人的发言占比（时长）+ 段数。
 function SpeakerStats({ rec }: { rec: RecordFull }) {
   const segs = rec.result?.segments || [];
+  const names = rec.result?.speakerNames || {};
   const total = segs.reduce((n, s) => n + Math.max(0, s.end - s.start), 0) || 1;
   const map = new Map<string, { dur: number; count: number }>();
   for (const s of segs) {
@@ -1833,7 +2245,7 @@ function SpeakerStats({ rec }: { rec: RecordFull }) {
         return (
           <div key={spk} className="text-xs">
             <div className="mb-0.5 flex items-center gap-2">
-              <SpeakerChip spk={spk} />
+              <SpeakerChip spk={spk} names={names} />
               <span className="ml-auto tabular-nums text-neutral-400">{pct}%</span>
             </div>
             <div className="h-1.5 w-full overflow-hidden rounded bg-neutral-800">
@@ -1848,8 +2260,9 @@ function SpeakerStats({ rec }: { rec: RecordFull }) {
 }
 function ExportButtons({ rec }: { rec: RecordFull }) {
   const segs = rec.result?.segments || [];
-  const txt = () => download(`${rec.title}.txt`, segs.map((s) => `[${fmtTC(s.start)}] ${spkLabel(s.speaker)}: ${s.text}`).join("\n"));
-  const srt = () => download(`${rec.title}.srt`, segs.map((s, i) => `${i + 1}\n${srtTime(s.start)} --> ${srtTime(s.end)}\n${spkLabel(s.speaker)}: ${s.text}`).join("\n\n"), "application/x-subrip");
+  const names = rec.result?.speakerNames || {};
+  const txt = () => download(`${rec.title}.txt`, segs.map((s) => `[${fmtTC(s.start)}] ${spkLabel(s.speaker, names)}: ${s.text}`).join("\n"));
+  const srt = () => download(`${rec.title}.srt`, segs.map((s, i) => `${i + 1}\n${srtTime(s.start)} --> ${srtTime(s.end)}\n${spkLabel(s.speaker, names)}: ${s.text}`).join("\n\n"), "application/x-subrip");
   const json = () => download(`${rec.title}.json`, JSON.stringify(rec.result, null, 2), "application/json");
   return (
     <div className="flex gap-1">

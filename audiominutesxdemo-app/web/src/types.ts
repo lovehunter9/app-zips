@@ -22,6 +22,12 @@ export interface RecordResult {
   language: string;
   speakers: string[];
   segments: Segment[];
+  // Custom display name per speaker/participant id (id → name). Empty/absent = show
+  // the default "说话人 N". Renaming propagates to every segment of that speaker.
+  speakerNames?: Record<string, string>;
+  // Ordered ids shown in the top "参会者" roster. Seeded from `speakers`; the user can
+  // add (people who didn't speak) or remove (anyone) — segments keep their speaker id.
+  participants?: string[];
 }
 
 export type RecordStatus = "uploaded" | "processing" | "done" | "error";
@@ -66,7 +72,7 @@ export interface RecordSummary {
   segments: number;
   options?: RecordOptions;
   translated?: boolean;
-  jobKind?: "full" | "translate";
+  jobKind?: "full" | "translate" | "rediarize";
   notices?: Notice[];
   hasCover?: boolean;
   coverVer?: string; // changes when the cover is (re)set, used to bust the <img> cache
