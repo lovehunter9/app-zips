@@ -98,16 +98,33 @@ export function uploadFile(
     fd.append("file", file);
     const xhr = new XMLHttpRequest();
     xhr.open("POST", "/api/upload");
+    // Big files over a flaky gateway can take a while; the server now replies the
+    // instant the bytes land (no inline ffmpeg), so we don't need a short timeout.
+    xhr.timeout = 0;
+    let reached = 0; // fraction of bytes the browser confirmed it sent
     xhr.upload.onprogress = (e) => {
-      if (onProgress && e.lengthComputable) onProgress((e.loaded / e.total) * 100);
+      if (e.lengthComputable) {
+        reached = e.loaded / e.total;
+        if (onProgress) onProgress(reached * 100);
+      }
     };
     xhr.onload = () => {
       let body: any;
       try { body = JSON.parse(xhr.responseText); } catch { body = xhr.responseText; }
       if (xhr.status >= 200 && xhr.status < 300) resolve(body);
-      else reject(new Error(body?.error || `upload ${xhr.status}`));
+      else reject(new Error(body?.error || `上传失败（HTTP ${xhr.status}）`));
     };
-    xhr.onerror = () => reject(new Error("upload network error"));
+    // Distinguish "bytes never finished" (true transport drop) from "bytes sent but
+    // no response" (gateway/server didn't reply in time) — the latter usually means
+    // the file DID arrive, so tell the user to refresh rather than blindly retry.
+    xhr.onerror = () =>
+      reject(new Error(
+        reached >= 1
+          ? "文件已上传，但服务器未及时响应（可能是网关超时）。文件可能已在处理，请刷新列表查看；若未出现再重试。"
+          : `上传中断（网络错误，已发送约 ${Math.round(reached * 100)}%）。请检查网络后重试。`
+      ));
+    xhr.ontimeout = () => reject(new Error("上传超时，请重试。"));
+    xhr.onabort = () => reject(new Error("上传已取消。"));
     xhr.send(fd);
   });
 }

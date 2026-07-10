@@ -293,12 +293,17 @@ function recordSummary(rec) {
 // ---------------------------------------------------------------------------
 // ffmpeg helpers
 // ---------------------------------------------------------------------------
+// Cache the probe: spawnSync blocks the event loop, so we must NEVER call this on
+// a hot request path repeatedly. Computed once (lazily) and reused.
+let _ffmpegOk = null;
 function hasFfmpeg() {
+  if (_ffmpegOk !== null) return _ffmpegOk;
   try {
-    return spawnSync("ffmpeg", ["-version"], { stdio: "ignore" }).status === 0;
+    _ffmpegOk = spawnSync("ffmpeg", ["-version"], { stdio: "ignore" }).status === 0;
   } catch {
-    return false;
+    _ffmpegOk = false;
   }
+  return _ffmpegOk;
 }
 
 function probeDuration(file) {
@@ -320,6 +325,39 @@ function toWav16kMono(input, output) {
     const ff = spawn("ffmpeg", ["-y", "-i", input, "-vn", "-ac", "1", "-ar", "16000", output]);
     let err = "";
     ff.stderr.on("data", (d) => (err += d.toString()));
+    ff.on("close", (code) => (code === 0 ? resolve(output) : reject(new Error("ffmpeg failed: " + err.slice(-2000)))));
+    ff.on("error", reject);
+  });
+}
+
+// Same as toWav16kMono but streams ffmpeg's progress so the caller can surface a
+// live "提取音频 N%" phase to the UI. We probe the input duration first and parse
+// `-progress pipe:1` (out_time_us) to compute a percentage. onPct is best-effort.
+function extractWav16kMono(input, output, onPct) {
+  const totalSec = probeDuration(input) || 0;
+  return new Promise((resolve, reject) => {
+    const ff = spawn("ffmpeg", [
+      "-y", "-i", input, "-vn", "-ac", "1", "-ar", "16000",
+      "-progress", "pipe:1", "-nostats", output,
+    ]);
+    let err = "";
+    let buf = "";
+    ff.stderr.on("data", (d) => (err += d.toString()));
+    ff.stdout.on("data", (d) => {
+      if (!onPct || totalSec <= 0) return;
+      buf += d.toString();
+      let nl;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        const m = /^out_time_us=(\d+)/.exec(line);
+        if (m) {
+          const sec = parseInt(m[1], 10) / 1e6;
+          const pct = Math.max(1, Math.min(99, Math.round((sec / totalSec) * 100)));
+          try { onPct(pct); } catch { /* ignore */ }
+        }
+      }
+    });
     ff.on("close", (code) => (code === 0 ? resolve(output) : reject(new Error("ffmpeg failed: " + err.slice(-2000)))));
     ff.on("error", reject);
   });
@@ -678,22 +716,53 @@ const upload = multer({
   limits: { fileSize: 1024 * 1024 * 1024 }, // 1 GiB
 });
 
-app.post("/api/upload", upload.single("file"), async (req, res) => {
+// File extensions we treat as audio even when the browser's MIME is missing or
+// wrong (empty / application/octet-stream / video/mp4 for .m4a, etc.). Anything
+// NOT confirmed as audio is sent through ffmpeg extraction in the background.
+const AUDIO_EXT = /\.(mp3|wav|m4a|aac|flac|ogg|oga|opus|wma|amr|aif|aiff|caf|mka|weba)$/i;
+const VIDEO_EXT = /\.(mp4|mov|mkv|webm|avi|m4v|flv|wmv|mpe?g|ts|3gp|ogv)$/i;
+
+// Wrap multer so a transport abort / size-limit / field error becomes a clean
+// JSON response we can SEE (and log), instead of an unhandled error that leaves
+// the connection to hang until the gateway resets it (surfaces as a bogus
+// client-side "upload network error").
+const uploadSingle = upload.single("file");
+app.post("/api/upload", (req, res) => {
+  const t0 = Date.now();
+  const len = Number(req.headers["content-length"] || 0);
+  console.log(`[upload] recv start len=${len || "?"}B ct=${req.headers["content-type"] || ""}`);
+  uploadSingle(req, res, (err) => {
+    if (err) {
+      const code = err.code === "LIMIT_FILE_SIZE" ? 413 : 400;
+      console.error(`[upload] multer error after ${Date.now() - t0}ms:`, err.code || "", err.message);
+      if (!res.headersSent) res.status(code).json({ error: String(err.message || err) });
+      return;
+    }
+    handleUpload(req, res, t0);
+  });
+});
+
+function handleUpload(req, res, t0) {
   if (!req.file) return res.status(400).json({ error: "no file" });
   const cfg = loadConfig();
   const id = randomUUID();
   const stored = req.file.path;
   const mime = req.file.mimetype || "";
   const originalName = Buffer.from(req.file.originalname || "", "latin1").toString("utf8");
-  const isVideo = mime.startsWith("video/") || /\.(mp4|mov|mkv|webm|avi|m4v)$/i.test(originalName);
+  const isVideo = mime.startsWith("video/") || VIDEO_EXT.test(originalName);
+  // Confirmed audio (by MIME or extension) can skip ffmpeg entirely; everything
+  // else — video or an unknown container — gets extracted to 16k mono WAV.
+  const isAudio = mime.startsWith("audio/") || AUDIO_EXT.test(originalName);
+  const needsExtract = !isAudio;
   try {
-    let audioPath = stored;
-    if (isVideo || !mime.startsWith("audio/")) {
-      if (!hasFfmpeg()) return res.status(503).json({ error: "ffmpeg not available; cannot extract audio" });
-      audioPath = path.join(UPLOAD_DIR, id + ".wav");
-      await toWav16kMono(stored, audioPath);
-    }
+    const audioPath = needsExtract ? path.join(UPLOAD_DIR, id + ".wav") : stored;
     const title = originalName.replace(/\.[^.]+$/, "") || "未命名";
+    // IMPORTANT: this handler does NO blocking work — no ffprobe, no ffmpeg. Both
+    // spawnSync (probe) and the ffmpeg transcode block the event loop / hold the
+    // connection open, which is what tripped the gateway timeout before (even a
+    // pure-audio upload stalled on the inline ffprobe). We persist a record and
+    // reply instantly; a background prep job probes duration and (if needed)
+    // extracts the audio as its own visible phase.
     const rec = {
       id,
       title,
@@ -702,10 +771,10 @@ app.post("/api/upload", upload.single("file"), async (req, res) => {
       mime,
       mediaPath: stored,
       audioPath,
-      durationSec: probeDuration(audioPath),
-      status: "uploaded",
-      progress: 0,
-      phase: "",
+      durationSec: null, // probed in the background prep job
+      status: "preparing",
+      progress: 1,
+      phase: needsExtract ? "提取音频…" : "读取文件信息…",
       error: "",
       // Per-file transcription options, snapshotted from the current global
       // defaults; the user can override them per record before (re)transcribing.
@@ -720,11 +789,15 @@ app.post("/api/upload", upload.single("file"), async (req, res) => {
       result: null,
     };
     writeRecord(rec);
+    // Reply immediately; probe + (optional) extraction happen in the background.
     res.json(recordSummary(rec));
+    console.log(`[upload] ok id=${id} kind=${rec.kind} extract=${needsExtract} in ${Date.now() - (t0 || Date.now())}ms`);
+    enqueuePrep(id);
   } catch (e) {
-    res.status(500).json({ error: String(e.message || e) });
+    console.error("[upload] handler error:", e);
+    if (!res.headersSent) res.status(500).json({ error: String(e.message || e) });
   }
-});
+}
 
 // ---------------------------------------------------------------------------
 // Records CRUD
@@ -947,6 +1020,94 @@ function enqueueJob(id, kind = "full") {
   refreshQueuePhases();
   pump();
   return true;
+}
+
+// Move a record into the full-transcription queue. Shared by the /transcribe
+// endpoint and by the audio-extraction (prep) job when the upload asked to
+// auto-transcribe but had to wait for ffmpeg to finish first.
+function startTranscribeJob(rec) {
+  rec.status = "processing";
+  rec.progress = 1;
+  rec.phase = "排队中";
+  rec.error = "";
+  rec.jobKind = "full";
+  rec.notices = [];
+  delete rec.timings;
+  delete rec.pendingTranscribe;
+  writeRecord(rec);
+  enqueueJob(rec.id);
+}
+
+// --- 音频提取 (prep) ----------------------------------------------------------
+// Uploaded video / non-audio files need a 16k mono WAV before transcription. We
+// used to do this INSIDE the upload request, which held the HTTP connection open
+// for the whole ffmpeg run — large videos then tripped the Olares gateway's
+// idle/timeout and surfaced as a client-side "upload network error", even though
+// the bytes had already arrived. Now the upload returns immediately and this
+// serial queue extracts the audio as its OWN visible phase ("提取音频"), which is
+// deliberately NOT part of the transcription step timings.
+const prepQueue = [];
+let prepDraining = false;
+function enqueuePrep(id) {
+  prepQueue.push(id);
+  pumpPrep();
+}
+async function pumpPrep() {
+  if (prepDraining) return;
+  const id = prepQueue.shift();
+  if (id === undefined) return;
+  prepDraining = true;
+  try { await runPrepJob(id); } catch { /* runPrepJob persists its own error */ }
+  finally { prepDraining = false; pumpPrep(); }
+}
+async function runPrepJob(id) {
+  const rec = readRecord(id);
+  if (!rec) return;
+  const t0 = Date.now();
+  // audioPath differs from mediaPath only when we planned an extraction at upload.
+  const needsExtract = rec.audioPath && rec.audioPath !== rec.mediaPath;
+  try {
+    rec.status = "preparing";
+    rec.error = "";
+    if (needsExtract) {
+      if (!hasFfmpeg()) throw new Error("ffmpeg 不可用，无法提取音频");
+      rec.phase = "提取音频…";
+      rec.progress = 1;
+      writeRecord(rec);
+      await extractWav16kMono(rec.mediaPath, rec.audioPath, (pct) => {
+        const r = readRecord(id);
+        if (!r || r.status !== "preparing") return;
+        r.progress = pct;
+        r.phase = `提取音频… ${pct}%`;
+        writeRecord(r);
+      });
+    } else {
+      rec.phase = "读取文件信息…";
+      rec.progress = 50;
+      writeRecord(rec);
+    }
+    const r = readRecord(id) || rec;
+    // Probe here (background) — NOT on the upload request — so a slow/large probe
+    // never blocks the event loop or the upload response.
+    r.durationSec = probeDuration(needsExtract ? r.audioPath : r.mediaPath) ?? r.durationSec;
+    r.status = "uploaded";
+    r.progress = 0;
+    r.phase = "";
+    r.error = "";
+    writeRecord(r);
+    if (needsExtract) addNotice(id, "info", `音频提取完成（用时 ${fmtMs(Date.now() - t0)}）`);
+    // Honour an upload that asked to auto-transcribe but had to wait for us.
+    if (r.pendingTranscribe) startTranscribeJob(readRecord(id) || r);
+  } catch (e) {
+    const r = readRecord(id) || rec;
+    r.status = "error";
+    r.error = (needsExtract ? "音频提取失败：" : "文件预处理失败：") + String(e.message || e);
+    r.phase = "";
+    r.progress = 0;
+    delete r.pendingTranscribe;
+    writeRecord(r);
+    addNotice(id, "error", r.error);
+  }
 }
 
 // Drain the queue strictly one job at a time.
@@ -2098,15 +2259,15 @@ app.post("/api/records/:id/transcribe", (req, res) => {
     translate: b.translate !== undefined ? !!b.translate : (prev.translate ?? !!cfg.translate?.enabled),
     enhance: b.enhance !== undefined ? !!b.enhance : (prev.enhance ?? !!cfg.enhance?.enabled),
   };
-  rec.status = "processing";
-  rec.progress = 1;
-  rec.phase = "排队中";
-  rec.error = "";
-  rec.jobKind = "full"; // full transcription pipeline (drives the processing step list)
-  rec.notices = []; // fresh run → fresh event log
-  delete rec.timings; // fresh run → recompute step/total durations
-  writeRecord(rec);
-  enqueueJob(rec.id); // queued; the serial pump runs it when its turn comes
+  // Still extracting audio (or the wav isn't on disk yet)? Don't enqueue now —
+  // remember the intent and let the prep job start transcription when it finishes.
+  const wavMissing = rec.audioPath && !fs.existsSync(rec.audioPath);
+  if (rec.status === "preparing" || wavMissing) {
+    rec.pendingTranscribe = true;
+    writeRecord(rec);
+    return res.json({ ok: true, deferred: true, preparing: true });
+  }
+  startTranscribeJob(rec); // queued; the serial pump runs it when its turn comes
   res.json({ ok: true, queued: true });
 });
 

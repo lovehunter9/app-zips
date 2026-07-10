@@ -400,6 +400,7 @@ function statusText(r: RecordSummary): string {
     const cnt = r.stepTotal > 0 ? ` (${r.stepDone}/${r.stepTotal})` : "";
     return `处理中 ${r.progress}%${r.phase ? " · " + r.phase : ""}${cnt}`;
   }
+  if (r.status === "preparing") return r.phase || "准备中…";
   if (r.status === "uploaded") return "待转录";
   if (r.status === "done") return "已完成";
   if (r.status === "error") return "失败";
@@ -1085,7 +1086,7 @@ function RecordDetail({
 
   // Poll while processing / uploaded / (clip) generating.
   useEffect(() => {
-    if (!rec || (rec.status !== "processing" && rec.status !== "uploaded" && rec.status !== "generating")) return;
+    if (!rec || (rec.status !== "processing" && rec.status !== "uploaded" && rec.status !== "generating" && rec.status !== "preparing")) return;
     const t = setInterval(load, 1500);
     return () => clearInterval(t);
   }, [rec, load]);
@@ -1992,7 +1993,16 @@ function RecordDetail({
 
       {rec.status !== "done" ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center">
-          {rec.status === "processing" ? (
+          {rec.status === "preparing" ? (
+            <div className="flex w-full max-w-md flex-col items-center gap-3 text-neutral-300">
+              <div className="text-3xl animate-pulse">🎧</div>
+              <div className="text-sm">{rec.phase || "正在准备…"}</div>
+              <div className="h-2 w-full overflow-hidden rounded bg-neutral-800">
+                <div className="h-full bg-sky-500 transition-[width] duration-500" style={{ width: `${rec.progress || 3}%` }} />
+              </div>
+              <div className="text-xs text-neutral-500">这一步不计入转写时长，完成后会自动继续</div>
+            </div>
+          ) : rec.status === "processing" ? (
             <ProcessingView rec={rec} onStop={doCancel} />
           ) : rec.status === "generating" ? (
             <div className="flex flex-col items-center gap-3 text-neutral-300">
@@ -3218,6 +3228,11 @@ function CoverThumb({ r, className }: { r: RecordSummary; className?: string }) 
           <span className="animate-pulse">生成中…</span>
         </span>
       )}
+      {r.status === "preparing" && (
+        <span className="absolute inset-0 flex items-center justify-center bg-black/45 text-center text-xs text-sky-200">
+          <span className="animate-pulse px-1">{r.phase || "准备中…"}</span>
+        </span>
+      )}
       {r.durationSec != null && (
         <span className="absolute bottom-0.5 right-0.5 rounded bg-black/70 px-1 text-[10px] leading-tight text-white">
           {fmtDur(r.durationSec)}
@@ -3305,7 +3320,7 @@ export default function App() {
 
   // Poll the library while anything is processing OR a clip is being generated.
   useEffect(() => {
-    const anyBusy = records.some((r) => r.status === "processing" || r.status === "generating");
+    const anyBusy = records.some((r) => r.status === "processing" || r.status === "generating" || r.status === "preparing");
     if (!anyBusy) return;
     const t = setInterval(refreshRecords, 2000);
     return () => clearInterval(t);
@@ -3335,6 +3350,20 @@ export default function App() {
         <span className="flex-1 truncate text-xs text-sky-400">
           <span className="mr-1 inline-block animate-pulse">●</span>片段生成中…
         </span>
+      );
+    }
+    if (r.status === "preparing") {
+      return (
+        <div className="flex flex-1 items-center gap-2">
+          <div className="min-w-0 flex-1">
+            <div className="mb-1 truncate text-xs text-sky-400">
+              <span className="mr-1 inline-block animate-pulse">●</span>{statusText(r)}
+            </div>
+            <div className="h-1.5 w-full overflow-hidden rounded bg-neutral-800">
+              <div className="h-full bg-sky-500 transition-[width] duration-500" style={{ width: `${r.progress || 3}%` }} />
+            </div>
+          </div>
+        </div>
       );
     }
     if (r.status === "processing") {

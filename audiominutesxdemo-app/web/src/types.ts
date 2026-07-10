@@ -32,7 +32,7 @@ export interface RecordResult {
   speakerColors?: Record<string, string>;
 }
 
-export type RecordStatus = "uploaded" | "processing" | "done" | "error" | "generating";
+export type RecordStatus = "uploaded" | "preparing" | "processing" | "done" | "error" | "generating";
 
 // A user-visible processing event/notice attached to a record so the UI can show
 // WHAT happened during a run (denoise fell back, alignment auto-split, a step

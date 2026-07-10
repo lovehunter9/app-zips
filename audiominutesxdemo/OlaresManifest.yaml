@@ -7,14 +7,14 @@ metadata:
   description: Feishu-Minutes-style audio notes — diarized, word-timestamped transcripts with player sync, via the LLM Gateway.
   appid: audiominutesxdemo
   title: Audio Minutes X Demo
-  version: '1.0.6'
+  version: '1.0.7'
   categories:
     - Utilities
 permission:
   appData: true
 spec:
   runAsUser: true
-  versionName: '1.0.6'
+  versionName: '1.0.7'
   fullDescription: |
     Audio Minutes X Demo is a Feishu-Minutes (妙记) style app for turning meetings,
     lectures and audiobooks into interactive, searchable transcripts — all powered by
@@ -31,6 +31,10 @@ spec:
       use, all in the app. If a required model is missing, the app tells you it cannot
       transcribe until it is configured.
   upgradeDescription: |
+    1.0.7: 修复大文件/视频上传偶发「upload network error」——上传请求改为落盘即回包(几毫秒),
+    音频提取(ffmpeg)与时长探测(ffprobe)全部下沉到后台独立阶段,不再阻塞事件循环、不占转写时长；
+    音频按扩展名兜底识别(修复 MIME 缺失/错误时被误当视频转码而卡住)；新增 multer 传输错误处理与
+    服务端上传日志(便于定位)；前端上传报错更明确(区分“真断网”与“已传完但未响应,请刷新查看”)。
     1.0.6: 新增「创建片段」——按转写勾选一段/多段生成独立片段(精确重编码切割拼接、飞书式片段编辑器、
     连续/非连续标识、回链原出处、视频片段自动首帧封面)；参与者颜色可自动分配/自选/编辑；
     音频「跳过空白」(播放与生成片段时剔除无人说话的空档，开启即提示总跳过时长，视频保留画面)；
