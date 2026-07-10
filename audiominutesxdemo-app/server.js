@@ -86,33 +86,6 @@ function toChinesePunct(s) {
   return chars.join("");
 }
 
-// Split `text` into `n` proportional parts, snapping each cut to a nearby sentence
-// end so a window's aligned text never begins/ends mid-sentence. Joining the parts
-// with "" reproduces the input exactly. Ported from audiostudioxdemo so long-audio
-// forced alignment can be chunked (each align call only sees its own audio's text).
-function splitTextN(text, n) {
-  if (n <= 1 || !text) return [text];
-  const len = text.length;
-  const parts = [];
-  let start = 0;
-  for (let i = 1; i < n; i++) {
-    const target = Math.round((len * i) / n);
-    const reach = Math.max(8, Math.round(len * 0.15));
-    let cut = -1;
-    for (let j = target; j < Math.min(len, target + reach); j++) {
-      if (/[。！？!?.]/.test(text[j])) { cut = j + 1; break; }
-    }
-    if (cut < 0) for (let j = target; j > Math.max(start + 1, target - reach); j--) {
-      if (/[。！？!?.]/.test(text[j])) { cut = j + 1; break; }
-    }
-    if (cut < 0 || cut <= start) cut = Math.max(start + 1, target);
-    parts.push(text.slice(start, cut));
-    start = cut;
-  }
-  parts.push(text.slice(start));
-  return parts;
-}
-
 // ---------------------------------------------------------------------------
 // Config (LLM Gateway creds + chosen models) — persisted at /data/config.json
 // ---------------------------------------------------------------------------
@@ -1248,6 +1221,20 @@ function buildWindows(diarSegs, duration) {
 // ---------------------------------------------------------------------------
 const isCJK = (ch) => !!ch && /[\u3000-\u303f\u3400-\u9fff\uff00-\uffef]/.test(ch);
 
+// Sentence terminators and the closing quotes/brackets (CJK + ASCII) that must
+// stay WITH the sentence they end. A segment break lands AFTER these closers, never
+// before them: 走吧。」→ after 」; He said, "go." → after the ". Missing any closer
+// (e.g. 】 》 〉) strands it at the head of the next segment. All segmenters below
+// share these so their sentence-end and "swallow trailing closer" logic can't drift.
+const CLOSER_ONLY = /["'”’)\]}」』）】》〉〕｣›»]/;
+const CLOSER_OR_WS = /[\s"'”’)\]}」』）】》〉〕｣›»]/;
+// A char is a sentence end when it is a CJK terminator (。！？…), OR a Latin
+// terminator (.!?) that is followed by end-of-text, whitespace, or a closer.
+const isSentEnd = (ch, nxt) =>
+  /[。！？]/.test(ch) || (/[.!?]/.test(ch) && (nxt === "" || CLOSER_OR_WS.test(nxt)));
+// Advance past trailing closers (and whitespace) so the break includes them.
+const swallowClosers = (text, k, end) => { let j = k + 1; while (j < end && CLOSER_OR_WS.test(text[j])) j++; return j; };
+
 function mapUnitsToRef(units, refText) {
   const out = [];
   let cursor = 0;
@@ -1258,6 +1245,30 @@ function mapUnitsToRef(units, refText) {
     let idx = refText.indexOf(t, cursor);
     if (idx < 0) idx = lower.indexOf(t.toLowerCase(), cursor);
     if (idx < 0) { out.push({ ci: cursor, cj: Math.min(refText.length, cursor + t.length) }); continue; }
+    out.push({ ci: idx, cj: idx + t.length });
+    cursor = idx + t.length;
+  }
+  return out;
+}
+
+// Like mapUnitsToRef but a token may only match within `slack` chars ahead of the
+// cursor; otherwise the cursor advances minimally. Prevents a single repeated short
+// word (So/It/the…) from racing the cursor to end-of-text on a saturated window.
+function mapUnitsBounded(units, refText, slack = 48) {
+  const out = [];
+  let cursor = 0;
+  const lower = refText.toLowerCase();
+  for (const u of units) {
+    const t = (u.text || "").trim();
+    if (!t) { out.push({ ci: cursor, cj: cursor }); continue; }
+    const idx = lower.indexOf(t.toLowerCase(), cursor);
+    if (idx < 0 || idx > cursor + slack) {
+      const cj = Math.min(refText.length, cursor + t.length);
+      out.push({ ci: cursor, cj });
+      cursor = cj;
+      while (cursor < refText.length && /\s/.test(refText[cursor])) cursor++;
+      continue;
+    }
     out.push({ ci: idx, cj: idx + t.length });
     cursor = idx + t.length;
   }
@@ -1284,20 +1295,73 @@ function buildCharToTime(units, map) {
   };
 }
 
+// Index of the last TRUSTWORTHY unit in one align window: the last unit whose start
+// is within the reliable time cap tMax, backed off to just before the FIRST collapse
+// plateau (>=N consecutive starts within dt seconds — the LIS-clamp signature Qwen's
+// aligner emits once it saturates). Never keeps piled-up timestamps.
+function reliableAlignEnd(units, tMax, N = 6, dt = 0.12) {
+  let k = units.length - 1;
+  while (k > 0 && units[k].start > tMax) k--;
+  let runStart = 0;
+  for (let i = 1; i <= k; i++) {
+    if (units[i].start - units[i - 1].start < dt) {
+      if (i - runStart + 1 >= N) { k = Math.max(0, runStart - 1); break; }
+    } else {
+      runStart = i;
+    }
+  }
+  return Math.max(0, k);
+}
+
+// Long-audio forced alignment. Qwen3-ForcedAligner-0.6B is only reliable to ~270s;
+// beyond that its indices saturate and the LIS monotonic pass collapses every
+// trailing word onto ONE timestamp (the "same-second pile-up"). So we chunk by the
+// aligner's OWN saturation point, never by guessed char proportions: align a <=WIN
+// audio window fed with MORE than a window's worth of text, keep only the reliable
+// prefix (words ending within SAFE seconds, cut before the first plateau), then
+// start the next window at the last reliable word's END time with the remaining text
+// (STT char ORDER tells us exactly which chars are left). Works for any length.
+// Returns {units, map} in fullText coords; every time is pure ALIGN.
+async function alignLong(alignSlice, fullText, total, onProg) {
+  const WIN = 290, SAFE = 255;
+  const units = [], map = [];
+  let a = 0, cOff = 0, pass = 0;
+  let cps = fullText.length / Math.max(1, total); // running chars/sec estimate
+  while (a < total - 0.05 && cOff < fullText.length) {
+    pass++;
+    const b = Math.min(total, a + WIN);
+    const lastWin = b >= total - 0.05;
+    // Over-provide text so the reliable prefix is never starved; the surplus just
+    // collapses at the tail and gets discarded by reliableAlignEnd.
+    const want = lastWin ? fullText.length - cOff : Math.ceil(cps * (b - a) * 1.5) + 30;
+    const part = fullText.slice(cOff, Math.min(fullText.length, cOff + want));
+    const u = await alignSlice(a, b, part, `wa_${pass}`);
+    if (onProg) try { onProg(Math.min(1, b / Math.max(1, total))); } catch { /* ignore */ }
+    if (!u.length) { a = b; continue; } // window failed → skip its audio, keep its text
+    const k = lastWin ? u.length - 1 : reliableAlignEnd(u, a + SAFE);
+    // Map ONLY the reliable prefix, with a bounded search: mapping the collapsed
+    // tail races the cursor across repeated words and blows cOff to end-of-text,
+    // starving every later window (the "whole tail piled on one second" bug).
+    const lm = mapUnitsBounded(u.slice(0, k + 1), part);
+    for (let i = 0; i <= k; i++) { units.push(u[i]); map.push({ ci: cOff + lm[i].ci, cj: cOff + lm[i].cj }); }
+    if (lastWin) break;
+    const nextA = u[k].end, nextC = cOff + lm[k].cj;
+    if (nextA <= a + 1 || nextC <= cOff) { a = b; cOff = Math.max(nextC, cOff + 1); continue; } // no-progress guard
+    cps = (nextC - cOff) / Math.max(0.5, nextA - a);
+    a = nextA; cOff = nextC;
+  }
+  return { units, map };
+}
+
 // Candidate cut positions: after every sentence-end / clause mark (swallowing
 // trailing closing quotes/brackets/spaces), plus 0 and length.
 function punctBounds(refText) {
   const s = new Set([0, refText.length]);
   for (let i = 0; i < refText.length; i++) {
     const ch = refText[i];
-    const nxt = refText[i + 1] || "";
-    const sentEnd = /[。！？]/.test(ch) || (/[.!?]/.test(ch) && (nxt === "" || /[\s"'”’)\]]/.test(nxt)));
+    const sentEnd = isSentEnd(ch, refText[i + 1] || "");
     const clause = /[，、；,;：:]/.test(ch);
-    if (sentEnd || clause) {
-      let j = i + 1;
-      while (j < refText.length && /["'”’」』）)\]\s]/.test(refText[j])) j++;
-      s.add(j);
-    }
+    if (sentEnd || clause) s.add(swallowClosers(refText, i, refText.length));
   }
   return Array.from(s).sort((a, b) => a - b);
 }
@@ -1306,14 +1370,14 @@ function punctBounds(refText) {
 // last clause mark before maxLen (CJK wraps at a char if none). Returns exclusive
 // ends, last == c1.
 function punctLineBreaks(refText, c0, c1, maxLen) {
-  const swallow = (k) => { let j = k + 1; while (j < c1 && /["'”’」』）)\]\s]/.test(refText[j])) j++; return j; };
+  const swallow = (k) => swallowClosers(refText, k, c1);
   const hardCap = Math.max(maxLen * 2, 120);
   const cuts = [];
   let lineStart = c0, lastComma = -1;
   for (let i = c0; i < c1; i++) {
     const ch = refText[i];
     const nxt = i + 1 < c1 ? refText[i + 1] : "";
-    const sentEnd = /[。！？]/.test(ch) || (/[.!?]/.test(ch) && (nxt === "" || /[\s"'”’)\]]/.test(nxt)));
+    const sentEnd = isSentEnd(ch, nxt);
     const comma = /[，、；,;：:]/.test(ch);
     let cutAt = -1;
     if (sentEnd) cutAt = swallow(i);
@@ -1323,6 +1387,42 @@ function punctLineBreaks(refText, c0, c1, maxLen) {
       else if (isCJK(ch)) cutAt = i + 1;
     }
     if (cutAt < 0 && !isCJK(ch) && (nxt === "" || /\s/.test(nxt)) && i - lineStart + 1 >= hardCap) cutAt = i + 1;
+    if (cutAt > lineStart) { cuts.push(cutAt); lineStart = cutAt; lastComma = -1; i = cutAt - 1; }
+  }
+  if (!cuts.length || cuts[cuts.length - 1] !== c1) cuts.push(c1);
+  return cuts;
+}
+
+// Sentence-end boundaries only (plus 0 and length). Unlike punctBounds this does
+// NOT include commas/clause marks, so diar-window boundaries snap to whole
+// sentences and never split a sentence at an interior comma.
+function sentBounds(refText) {
+  const s = new Set([0, refText.length]);
+  for (let i = 0; i < refText.length; i++) {
+    if (isSentEnd(refText[i], refText[i + 1] || "")) s.add(swallowClosers(refText, i, refText.length));
+  }
+  return Array.from(s).sort((a, b) => a - b);
+}
+
+// Break refText[c0,c1) into ONE segment per SENTENCE. This replaces the old
+// width-driven wrapper that split a single English sentence at its interior comma
+// (or mid-clause once it passed ~48 chars). Segments now end only at sentence
+// terminators; a pathological run-on with no sentence end for > softCap chars
+// falls back to the last comma so a segment can't grow unbounded. Returns
+// exclusive char ends within [c0,c1), last == c1.
+function sentenceCuts(refText, c0, c1, softCap = 220) {
+  const swallow = (k) => swallowClosers(refText, k, c1);
+  const cuts = [];
+  let lineStart = c0, lastComma = -1;
+  for (let i = c0; i < c1; i++) {
+    const ch = refText[i];
+    const nxt = i + 1 < c1 ? refText[i + 1] : "";
+    const sentEnd = isSentEnd(ch, nxt);
+    const comma = /[，、；,;：:]/.test(ch);
+    let cutAt = -1;
+    if (sentEnd) cutAt = swallow(i);
+    else if (comma) lastComma = swallow(i);
+    if (cutAt < 0 && i - lineStart + 1 >= softCap && lastComma > lineStart) cutAt = lastComma;
     if (cutAt > lineStart) { cuts.push(cutAt); lineStart = cutAt; lastComma = -1; i = cutAt - 1; }
   }
   if (!cuts.length || cuts[cuts.length - 1] !== c1) cuts.push(c1);
@@ -1405,7 +1505,7 @@ function sttParams(cfg) {
 // char→time. CJK = one char + trailing punctuation; Latin = a word + trailing
 // punctuation; spaces separate.
 function sliceToWords(refText, c0, c1, timeAtChar) {
-  const PUNCT = /[。！？，、；：,.!?;:"'”’」』）)\]…—·]/;
+  const PUNCT = /[。！？，、；：,.!?;:"'”’」』）)\]}】》〉〕｣›»…—·]/;
   const APOS = /['’]/;                 // contraction apostrophe (I'm, Let's, don't)
   const WORDCH = /[\p{L}\p{N}]/u;      // letter/digit
   const words = [];
@@ -1445,6 +1545,75 @@ function spreadWords(text, start, end) {
   const span = Math.max(0, (Number(end) || 0) - s);
   const timeAtChar = (c) => s + (span * Math.min(n, Math.max(0, c))) / n;
   return finalizeWords(sliceToWords(t, 0, t.length, timeAtChar), s, s + span);
+}
+
+// Repair collapsed / non-monotonic segment times. Forced alignment drifts at the
+// TAIL of each align window (the STT text is split proportionally by char count,
+// which never matches the real per-window audio), which pins many consecutive
+// segments to the SAME second or squeezes a whole window into a fraction of a
+// second. Exact times can't be recovered, but every segment carries its diar
+// window's REAL audio bounds (_t0/_t1); for each collapsed RUN we redistribute
+// time across those real bounds proportional to text length so timestamps stay
+// monotonic, distinct and roughly correct, and re-spread that run's words.
+// Non-collapsed segments (alignment was fine) are left untouched.
+function repairSegmentTimes(segs, duration) {
+  if (!segs || !segs.length) { return segs || []; }
+  const dur = Math.max(0, Number(duration) || 0);
+  const MAX_CPS = 30;   // chars/sec above this over a run => implausible => collapsed
+  const GROUP = 0.12;   // starts within this (s) of each other belong to one run
+  let i = 0;
+  while (i < segs.length) {
+    let j = i;
+    // group only NEAR-EQUAL starts (both directions) so a good segment next to a
+    // collapsed run isn't swept in and re-timed. Raw starts, no monotonic pre-pass.
+    while (j + 1 < segs.length && Math.abs(segs[j + 1].start - segs[j].start) < GROUP) j++;
+    if (j > i) {
+      let chars = 0;
+      for (let k = i; k <= j; k++) chars += Math.max(1, (segs[k].text || "").length);
+      // Anchor the run's real audio window (_t0/_t1) BUT clamp it between the
+      // neighbours: a diar window can start earlier than the previous segment
+      // ended (or end later than the next begins), and using it raw would rewind
+      // the clock. prevEnd..nextStart is the only interval this run may occupy.
+      const prevEnd = i > 0 ? Math.max(segs[i - 1].start, segs[i - 1].end || segs[i - 1].start) : 0;
+      const nextStart = j + 1 < segs.length ? segs[j + 1].start : (dur || segs[j].end || prevEnd);
+      const upper = Math.max(prevEnd, nextStart);
+      let lo = Number.isFinite(segs[i]._t0) ? segs[i]._t0 : segs[i].start;
+      let hi = Number.isFinite(segs[j]._t1) ? segs[j]._t1 : nextStart;
+      lo = Math.min(Math.max(lo, prevEnd), upper);
+      hi = Math.min(Math.max(hi, lo), upper);
+      let span = hi - lo;
+      const collapsed = span < chars / MAX_CPS || (segs[j].start - segs[i].start) < 0.05 * (j - i);
+      if (collapsed) {
+        if (!(span > 0)) { hi = upper > lo ? upper : lo + (j - i + 1) * 0.4; span = hi - lo; }
+        let acc = 0;
+        for (let k = i; k <= j; k++) {
+          const L = Math.max(1, (segs[k].text || "").length);
+          const s = lo + span * (acc / chars); acc += L;
+          const e = lo + span * (acc / chars);
+          segs[k].start = round3(s);
+          segs[k].end = round3(Math.max(s + 0.05, e));
+          segs[k].words = spreadWords(segs[k].text, segs[k].start, segs[k].end);
+        }
+      }
+    }
+    i = j + 1;
+  }
+  // Hard safety net (independent of the above): strictly non-decreasing starts and
+  // positive, non-overlapping durations — guarantees the timeline never goes back.
+  for (let k = 1; k < segs.length; k++) if (segs[k].start < segs[k - 1].start) segs[k].start = round3(segs[k - 1].start);
+  for (let k = 0; k < segs.length; k++) {
+    const nextStart = k + 1 < segs.length ? segs[k + 1].start : (dur || segs[k].end || segs[k].start + 0.15);
+    if (!(segs[k].end > segs[k].start)) segs[k].end = round3(Math.max(segs[k].start + 0.05, Math.min(segs[k].start + 0.15, nextStart)));
+    if (nextStart > segs[k].start && segs[k].end > nextStart) segs[k].end = round3(nextStart);
+    // only re-spread words if the safety net moved the span out from under them —
+    // untouched, well-aligned segments keep their real forced-alignment word times.
+    const w = segs[k].words;
+    if (w && w.length && (w[0].start < segs[k].start - 0.01 || w[w.length - 1].end > segs[k].end + 0.01)) {
+      segs[k].words = spreadWords(segs[k].text || "", segs[k].start, segs[k].end);
+    }
+  }
+  for (const s of segs) { delete s._t0; delete s._t1; }
+  return segs;
 }
 
 // Forced-alignment language. Qwen3-ForcedAligner wants a language NAME
@@ -2027,62 +2196,17 @@ async function runJob(id) {
 
         timer.begin("词级对齐");
         setP(55, "词级对齐");
-        // Forced alignment respects the aligner's native ~300s / upload-size cap and
-        // handles length on OUR side (the audiostudioxdemo strategy): a single call
-        // only when short enough, otherwise AUTO-SPLIT the audio into ≤290s windows
-        // and split the full STT text proportionally so each call sees only its own
-        // window's text (never overfed) and each uploaded WAV stays small (no 413).
-        const ALIGN_WIN_S = 290;
-        const ALIGN_CONCURRENCY = 2;
+        // Forced alignment over the WHOLE clip, chunked at the aligner's OWN
+        // saturation point (see alignLong). Qwen3-ForcedAligner is reliable only to
+        // ~270s; past that its output collapses. alignLong keeps each window's
+        // reliable prefix and re-aligns the remainder from the last reliable word,
+        // so char times come straight from ALIGN — never from char-proportion guesses.
         const alignTotal = rec.durationSec || 0;
-        let units, map;
-        if (alignTotal <= ALIGN_WIN_S + 5) {
-          units = await alignSlice(0, alignTotal || ALIGN_WIN_S, fullText, "wa_full");
-          map = mapUnitsToRef(units, fullText);
-        } else {
-          const nWin = Math.ceil(alignTotal / ALIGN_WIN_S);
-          const winLen = alignTotal / nWin;
-          const parts = splitTextN(fullText, nWin);
-          // Char offset of each part inside fullText (parts concatenate to fullText
-          // exactly), so each window's units can be char-mapped LOCALLY against its
-          // own text slice and then shifted into fullText coordinates. This is what
-          // keeps one window's text drift from freezing the global cursor (which
-          // otherwise pins every later char to a single time).
-          const partStart = [];
-          { let acc = 0; for (let i = 0; i < nWin; i++) { partStart.push(acc); acc += (parts[i] || "").length; } }
-          console.log(`[${id}] 词级对齐：整段${Math.round(alignTotal)}s 超过单窗上限，自动分 ${nWin} 窗(≤${ALIGN_WIN_S}s/窗)·并发${ALIGN_CONCURRENCY} 对齐`);
-          addNotice(id, "info", `整段音频较长（约 ${Math.round(alignTotal)} 秒），词级对齐已自动分为 ${nWin} 个窗口（每窗 ≤${ALIGN_WIN_S} 秒）分别处理。`);
-          const resU = new Array(nWin), resM = new Array(nWin);
-          let next = 0, okWin = 0, doneWin = 0;
-          const worker = async () => {
-            while (true) {
-              const i = next++;
-              if (i >= nWin) break;
-              ckCancel(id);
-              const a = i * winLen;
-              const b = Math.min(alignTotal, (i + 1) * winLen);
-              const part = parts[i] || "";
-              const u = await alignSlice(a, b, part, `wa_${i}`);
-              // Map THIS window's units against ONLY its own text slice, then shift
-              // char positions into fullText coordinates by the part's offset.
-              const localMap = mapUnitsToRef(u, part);
-              resM[i] = localMap.map((m) => ({ ci: partStart[i] + m.ci, cj: partStart[i] + m.cj }));
-              if (u.length) okWin++;
-              resU[i] = u;
-              doneWin++;
-              setP(55 + Math.round((30 * doneWin) / nWin), "词级对齐");
-            }
-          };
-          await Promise.all(
-            Array.from({ length: Math.min(ALIGN_CONCURRENCY, nWin) }, worker)
-          );
-          units = resU.filter(Boolean).flat();
-          map = resM.filter(Boolean).flat();
-          console.log(`[${id}] 词级对齐完成：${okWin}/${nWin} 窗成功，共 ${units.length} 个单元`);
-          if (okWin < nWin) {
-            addNotice(id, "warn", `词级对齐有 ${nWin - okWin}/${nWin} 个窗口未成功，这部分文字将退化为句级时间（仍可点击定位，但逐字高亮可能不精确）。`);
-          }
-        }
+        const { units, map } = await alignLong(
+          alignSlice, fullText, alignTotal,
+          (frac) => setP(55 + Math.round(30 * frac), "词级对齐"),
+        );
+        console.log(`[${id}] 词级对齐(alignLong)完成：${units.length} 个单元，音频≈${Math.round(alignTotal)}s`);
         if (!units.length) throw new Error("对齐无结果");
 
         timer.begin("整理结果");
@@ -2101,43 +2225,24 @@ async function runJob(id) {
           }
           return fullText.length;
         };
-        const wins = buildWindows(diarSegs, rec.durationSec).sort((a, b) => a.start - b.start);
         segsOut = [];
         if (punctuated) {
-          // HAS PUNCTUATION (unchanged): cut along diar windows (boundaries snapped to
-          // punctuation), then re-wrap each window into punctuation-preserving lines.
-          const bounds = punctBounds(fullText);
-          const ci = [0];
-          let last = 0;
-          for (let k = 1; k < wins.length; k++) {
-            const target = timeToChar(wins[k].start);
-            let cand = -1, bd = Infinity;
-            for (const b of bounds) {
-              if (b <= last) continue;
-              const d = Math.abs(b - target);
-              if (d < bd) { bd = d; cand = b; }
+          // Segment by SENTENCE over the whole transcript, and take every word's
+          // time DIRECTLY from forced alignment. We do NOT cut along, nor clamp into,
+          // diarization windows any more: that crushed correct align times into a
+          // single diar window and produced the same-second pile-ups. Diarization is
+          // now used ONLY to label each finished segment's speaker (by time overlap).
+          const cuts = sentenceCuts(fullText, 0, fullText.length);
+          let prev = 0;
+          for (const e of cuts) {
+            const text = fullText.slice(prev, e).trim();
+            const words = finalizeWords(sliceToWords(fullText, prev, e, timeAtChar));
+            if (text || words.length) {
+              const start = words.length ? words[0].start : round3(timeAtChar(prev));
+              const end = words.length ? words[words.length - 1].end : round3(timeAtChar(e));
+              segsOut.push({ start, end, speaker: pickSpeaker(start, end), text, words });
             }
-            ci.push(cand < 0 ? fullText.length : cand);
-            last = ci[ci.length - 1];
-          }
-          ci.push(fullText.length);
-          for (let k = 0; k < wins.length; k++) {
-            const c0 = ci[k], c1 = ci[k + 1];
-            if (c1 <= c0 || !fullText.slice(c0, c1).trim()) continue;
-            const cuts = punctLineBreaks(fullText, c0, c1, 48);
-            let prev = c0;
-            for (const e of cuts) {
-              const text = fullText.slice(prev, e).trim();
-              // clamp this line's word times into the diar speech window so words
-              // never land in a non-vocal intro/gap, then make them hittable.
-              const words = finalizeWords(sliceToWords(fullText, prev, e, timeAtChar), wins[k].start, wins[k].end);
-              if (text || words.length) {
-                const start = words.length ? words[0].start : round3(Math.max(wins[k].start, timeAtChar(prev)));
-                const end = words.length ? words[words.length - 1].end : round3(Math.min(wins[k].end, timeAtChar(e)));
-                segsOut.push({ start, end, speaker: wins[k].speaker, text, words });
-              }
-              prev = e;
-            }
+            prev = e;
           }
         } else {
           // NO PUNCTUATION: do ONE pause/length/speaker pass over the WHOLE text — do
@@ -2182,6 +2287,9 @@ async function runJob(id) {
 
     timer.begin("整理结果");
     setP(94, "整理结果");
+    // Times come straight from forced alignment; only order + drop empties. No
+    // redistribution — alignment is authoritative (segment/merge/split must not
+    // move a word's time), so the old repair pass is intentionally not called.
     const segments = segsOut
       .filter((s) => s.text || (s.words && s.words.length))
       .sort((a, b) => a.start - b.start);
@@ -2427,11 +2535,15 @@ if (fs.existsSync(STATIC_DIR)) {
 // On boot, any record left mid-flight from a previous process is re-queued so it
 // resumes automatically — strictly one at a time through the serial queue (never
 // in parallel). Ordered by createdAt so earlier uploads run first.
-const interrupted = listRecords()
+const interrupted = process.env.NO_LISTEN ? [] : listRecords()
   .filter((r) => r.status === "processing")
   .sort((a, b) => (a.createdAt || "").localeCompare(b.createdAt || ""));
 for (const rec of interrupted) enqueueJob(rec.id);
 
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`[audiominutesxdemo] listening on :${PORT}  ffmpeg=${hasFfmpeg()}  data=${DATA_DIR}`);
-});
+if (!process.env.NO_LISTEN) {
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`[audiominutesxdemo] listening on :${PORT}  ffmpeg=${hasFfmpeg()}  data=${DATA_DIR}`);
+  });
+}
+
+export { repairSegmentTimes, sentenceCuts, sentBounds, spreadWords, hasPunctuation };
