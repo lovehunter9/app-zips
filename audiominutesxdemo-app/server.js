@@ -1335,9 +1335,22 @@ async function alignLong(alignSlice, fullText, total, onProg) {
     // collapses at the tail and gets discarded by reliableAlignEnd.
     const want = lastWin ? fullText.length - cOff : Math.ceil(cps * (b - a) * 1.5) + 30;
     const part = fullText.slice(cOff, Math.min(fullText.length, cOff + want));
-    const u = await alignSlice(a, b, part, `wa_${pass}`);
+    // Transient gateway failures (timeout / 5xx under load) make alignSlice return
+    // []; retry a couple times before giving up, since a lost window is costly.
+    let u = await alignSlice(a, b, part, `wa_${pass}`);
+    for (let r = 0; !u.length && r < 2; r++) u = await alignSlice(a, b, part, `wa_${pass}r${r + 1}`);
     if (onProg) try { onProg(Math.min(1, b / Math.max(1, total))); } catch { /* ignore */ }
-    if (!u.length) { a = b; continue; } // window failed → skip its audio, keep its text
+    if (!u.length) {
+      // Window STILL failed. CRITICAL: advance the TEXT cursor too, not just the
+      // audio. Skipping only the audio re-feeds this window's text to the NEXT
+      // window, shifting every later word ~one window (~5 min) later — the
+      // "5-minute jump" + tail pile-up seen under gateway load. We can't get real
+      // times, so advance cOff by the running chars/sec estimate; the skipped text
+      // then degrades to interpolated time in [a,b] and later windows stay in sync.
+      if (!lastWin) cOff = Math.min(fullText.length, cOff + Math.max(1, Math.round(cps * (b - a))));
+      a = b;
+      continue;
+    }
     const k = lastWin ? u.length - 1 : reliableAlignEnd(u, a + SAFE);
     // Map ONLY the reliable prefix, with a bounded search: mapping the collapsed
     // tail races the cursor across repeated words and blows cOff to end-of-text,
