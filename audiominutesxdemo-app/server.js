@@ -1348,27 +1348,29 @@ function reliableAlignEnd(units, tMax, N = 6, dt = 0.12) {
 // (STT char ORDER tells us exactly which chars are left). Works for any length.
 // Returns {units, map} in fullText coords; every time is pure ALIGN.
 async function alignLong(alignSlice, fullText, total, onProg, id = "") {
-  const WIN = 290, SAFE = 255;
+  const WIN = 290, SAFE = 255, MINWIN = 40;
   const units = [], map = [];
-  let a = 0, cOff = 0, pass = 0, degraded = 0;
+  let a = 0, cOff = 0, pass = 0, degraded = 0, winLen = WIN;
   let cps = fullText.length / Math.max(1, total); // running chars/sec estimate
   const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
+  const grow = () => Math.min(WIN, winLen * 2); // ease window size back up after a shrink
   while (a < total - 0.05 && cOff < fullText.length) {
     pass++;
-    const b = Math.min(total, a + WIN);
+    const b = Math.min(total, a + winLen);
     const lastWin = b >= total - 0.05;
     // Over-provide text so the reliable prefix is never starved; the surplus just
     // collapses at the tail and gets discarded by reliableAlignEnd.
     const want = lastWin ? fullText.length - cOff : Math.ceil(cps * (b - a) * 1.5) + 30;
     const part = fullText.slice(cOff, Math.min(fullText.length, cOff + want));
-    // Align the window, retrying BOTH transient empty responses (timeout / 5xx) AND
-    // load-induced degradation. Under a busy shared GPU the aligner can, for one
-    // window, advance AUDIO normally but consume almost no TEXT — because unit texts
-    // stop matching the transcript, or the times back-load so the reliable prefix
-    // trims to nothing. Either way the next window gets stale text aligned against
-    // later audio, shifting it ~one window (~5 min) later: the load-only "+290s jump"
-    // (unloaded runs of the same audio/text are clean). We keep the best attempt and,
-    // if still degraded, force the text cursor to track the audio cursor by cps.
+    // Align the window, retrying transient empty responses (timeout / 5xx). Under a
+    // busy shared GPU the aligner can, for ONE window, collapse almost immediately —
+    // returning a dense output whose timestamps saturate after ~1s (covA≈1s), or
+    // whose unit texts stop matching the transcript. reliableAlignEnd then keeps only
+    // a tiny prefix. We detect that (earlyPlateau / lagging) and, instead of trusting
+    // or interpolating a huge span, SHRINK the window and retry the SAME start (below):
+    // a smaller audio+text slice is a lighter task the aligner is far likelier to get
+    // right, so the region gets REAL alignment rather than a ~255s interpolated line
+    // (the load-only "highlight runs ~1 sentence ahead, then converges" drift).
     let best = null;
     for (let attempt = 0; attempt < 3; attempt++) {
       const cur = await alignSlice(a, b, part, attempt ? `wa_${pass}r${attempt}` : `wa_${pass}`);
@@ -1382,7 +1384,11 @@ async function alignLong(alignSlice, fullText, total, onProg, id = "") {
       const matchRate = matched / Math.max(1, lmTry.length);
       const expC = cps * Math.max(0, covA);                       // chars the audio span implies
       const dense = cur.length > 40;
-      const earlyPlateau = !lastWin && dense && covA < 30 && rawSpan > 60;
+      // Collapsed: a dense output whose reliable prefix is tiny. rawSpan>60 catches a
+      // "saturated after ~1s but times keep crawling" shape; covA<8 catches a collapse
+      // whose raw span is also short (times barely move) — that one otherwise slips
+      // through as "good" with covA≈0 and later trips the no-progress guard into a drift.
+      const earlyPlateau = !lastWin && dense && covA < 30 && (rawSpan > 60 || covA < 8);
       // Mechanism-agnostic: audio moved but text consumed far below the running rate.
       // Catches char-undermap (garbage texts) AND back-loaded times (prefix trimmed).
       const lagging = !lastWin && dense && covA > 20 && covC < 0.3 * expC;
@@ -1394,15 +1400,22 @@ async function alignLong(alignSlice, fullText, total, onProg, id = "") {
       if (!bad) break;
     }
     if (onProg) try { onProg(Math.min(1, b / Math.max(1, total))); } catch { /* ignore */ }
+    // Empty OR degraded window that can still be made smaller: SHRINK and retry the
+    // SAME start. This is the primary defense — most load collapses clear on a lighter
+    // slice, giving REAL alignment for the region instead of an interpolated line.
+    if ((!best || best.bad) && !lastWin && winLen > MINWIN) {
+      const nw = Math.max(MINWIN, Math.floor(winLen / 2));
+      console.log(`[${id}] alignLong 缩窗重试 pass${pass} a=${a.toFixed(0)} winLen=${winLen}->${nw} 原因=${!best ? "空窗" : best.earlyPlateau ? "earlyPlateau" : "lagging"} covA=${best ? best.covA.toFixed(0) : "-"}`);
+      winLen = nw;
+      continue;
+    }
     if (!best) {
-      // All attempts empty. CRITICAL: advance the TEXT cursor too, not just the
-      // audio — skipping only audio re-feeds this window's text to the next window
-      // (the ~5-min shift). Advance cOff by the cps estimate so the skipped text
-      // degrades to interpolated time in [a,b] and later windows stay in sync.
+      // Even a MINWIN slice came back empty: interpolate ONLY this small span so
+      // later windows stay in sync, then move on and let the window grow back.
       degraded++;
-      console.log(`[${id}] alignLong 空窗 pass${pass} a=${a.toFixed(0)} b=${b.toFixed(0)} cOff=${cOff}（重试后仍空，按 cps 前进）`);
+      console.log(`[${id}] alignLong 空窗 pass${pass} a=${a.toFixed(0)} b=${b.toFixed(0)} winLen=${winLen}（缩到最小仍空，按 cps 前进）`);
       if (!lastWin) cOff = Math.min(fullText.length, cOff + Math.max(1, Math.round(cps * (b - a))));
-      a = b;
+      a = b; winLen = grow();
       continue;
     }
     const { u, k, lm } = best;
@@ -1414,32 +1427,28 @@ async function alignLong(alignSlice, fullText, total, onProg, id = "") {
       map.push({ ci: cOff + lm[i].ci, cj: cOff + lm[i].cj });
     }
     if (lastWin) break;
-    let nextA = u[k].end, nextC = cOff + lm[k].cj, action = "";
-    if (best.earlyPlateau) {
-      // Reliable prefix collapsed at the window start: advance audio + text together
-      // by the cps estimate (that span becomes interpolated) instead of trusting it.
-      const adv = Math.min(SAFE, total - a);
-      nextA = a + adv;
-      nextC = Math.min(fullText.length, cOff + Math.max(1, Math.round(cps * adv)));
-      action = "earlyPlateau→proportional";
-    } else if (best.lagging) {
-      // Audio advanced but text lagged: force the text cursor to track the audio span
-      // so stale text is NOT re-fed to a later window (this span becomes interpolated).
-      nextC = Math.min(fullText.length, cOff + Math.max(1, Math.round(cps * (nextA - a))));
-      action = "textLag→trackAudio";
-    }
+    let nextA = u[k].end, nextC = cOff + lm[k].cj;
     if (best.bad) {
-      // Diagnostic: capture the failing window so a test-machine reproduction gives
-      // the raw evidence (which shape, whether the guard fired) instead of a guess.
+      // A MINWIN slice STILL degraded (rare, sustained overload): interpolate ONLY
+      // this small span [a,b] — the drift is bounded to a ~MINWIN chunk, not ~255s,
+      // and later windows stay in sync.
       degraded++;
+      nextA = b;
+      nextC = Math.min(fullText.length, cOff + Math.max(1, Math.round(cps * (b - a))));
       const w0 = best.u[0] || {};
-      console.log(`[${id}] alignLong 窗降级 pass${pass} ${action} a=${a.toFixed(0)} b=${b.toFixed(0)} cOff=${cOff} units=${best.u.length} k=${k} covA=${best.covA.toFixed(0)}s covC=${best.covC} expC=${Math.round(best.expC)} matchRate=${best.matchRate.toFixed(2)} 首unit="${(w0.text || "").slice(0, 16)}"@${(w0.start || 0).toFixed(1)}`);
+      console.log(`[${id}] alignLong 小窗仍降级 pass${pass} a=${a.toFixed(0)} b=${b.toFixed(0)} winLen=${winLen} units=${best.u.length} k=${k} covA=${best.covA.toFixed(0)}s covC=${best.covC} matchRate=${best.matchRate.toFixed(2)} 首unit="${(w0.text || "").slice(0, 16)}"@${(w0.start || 0).toFixed(1)}（插值 ${(b - a).toFixed(0)}s）`);
     }
-    if (nextA <= a + 1 || nextC <= cOff) { a = b; cOff = Math.max(nextC, cOff + 1); continue; } // no-progress guard
+    if (nextA <= a + 1 || nextC <= cOff) {
+      // No usable progress: advance BOTH audio and text (by cps). NEVER jump audio to
+      // b while leaving the text cursor behind — that re-feeds this window's text to a
+      // later window and shifts the tail ~one window (the +290s drift).
+      if (!lastWin) cOff = Math.min(fullText.length, Math.max(nextC, cOff + Math.max(1, Math.round(cps * (b - a)))));
+      a = b; winLen = grow(); continue;
+    }
     cps = (nextC - cOff) / Math.max(0.5, nextA - a);
-    a = nextA; cOff = nextC;
+    a = nextA; cOff = nextC; winLen = grow();
   }
-  if (degraded) console.log(`[${id}] alignLong 完成：${degraded} 个窗判定降级并已按 cps 兜底前进（正常应为 0）`);
+  if (degraded) console.log(`[${id}] alignLong 完成：${degraded} 个窗缩到最小仍降级、已按 cps 兜底（正常应为 0）`);
   return { units, map };
 }
 
