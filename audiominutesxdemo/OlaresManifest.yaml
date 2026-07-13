@@ -7,14 +7,14 @@ metadata:
   description: Feishu-Minutes-style audio notes — diarized, word-timestamped transcripts with player sync, via the LLM Gateway.
   appid: audiominutesxdemo
   title: Audio Minutes X Demo
-  version: '1.0.9'
+  version: '1.0.10'
   categories:
     - Utilities
 permission:
   appData: true
 spec:
   runAsUser: true
-  versionName: '1.0.9'
+  versionName: '1.0.10'
   fullDescription: |
     Audio Minutes X Demo is a Feishu-Minutes (妙记) style app for turning meetings,
     lectures and audiobooks into interactive, searchable transcripts — all powered by
@@ -31,6 +31,9 @@ spec:
       use, all in the app. If a required model is missing, the app tells you it cannot
       transcribe until it is configured.
   upgradeDescription: |
+    1.0.10: 文字记录不再「在逗号处断段」——分段只在句子终止符(。！？.!?)处断,长句保持完整、
+    段落不再以逗号收尾读起来像半句话;仅对极少数无句号的超长 run-on 才在「真实停顿」处兜底换行
+    (绝不在逗号处),兜底阈值设得足够高,正常语音不受影响。
     1.0.9: 修复负载下整段转写「成段时间戳跳过~5分钟」——词级对齐新增抗降级防线:某窗在繁忙 GPU 下
     音频推进但文本几乎没消费(单元文本对不上稿件/时间被后挤)时,强制文本游标按字/秒追上音频,不再把
     陈旧文本喂给后一窗;每个对齐单元硬钳进本窗、空窗/降级窗自动重试并打诊断日志。修复逐词高亮「快冲一串

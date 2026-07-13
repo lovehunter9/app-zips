@@ -1494,29 +1494,45 @@ function sentBounds(refText) {
   return Array.from(s).sort((a, b) => a - b);
 }
 
-// Break refText[c0,c1) into ONE segment per SENTENCE. This replaces the old
-// width-driven wrapper that split a single English sentence at its interior comma
-// (or mid-clause once it passed ~48 chars). Segments now end only at sentence
-// terminators; a pathological run-on with no sentence end for > softCap chars
-// falls back to the last comma so a segment can't grow unbounded. Returns
-// exclusive char ends within [c0,c1), last == c1.
-function sentenceCuts(refText, c0, c1, softCap = 220) {
-  const swallow = (k) => swallowClosers(refText, k, c1);
+// Break refText[c0,c1) into ONE segment per SENTENCE. Segments END ONLY at a
+// sentence terminator (。！？ / . ! ? followed by a space or closer) — NEVER at a
+// comma, so a block never reads as an unfinished clause ("…database credential,").
+// A comma is a poor wrap point AND a "pause after comma" is common, so pausing
+// there would still end a block on ",". Over-long run-ons with no terminator are
+// handled by the caller (splitByPause, which wraps on a real silence, not a comma).
+// Returns exclusive char ends within [c0,c1), last == c1.
+function sentenceCuts(refText, c0, c1) {
   const cuts = [];
-  let lineStart = c0, lastComma = -1;
+  let lineStart = c0;
   for (let i = c0; i < c1; i++) {
-    const ch = refText[i];
-    const nxt = i + 1 < c1 ? refText[i + 1] : "";
-    const sentEnd = isSentEnd(ch, nxt);
-    const comma = /[，、；,;：:]/.test(ch);
-    let cutAt = -1;
-    if (sentEnd) cutAt = swallow(i);
-    else if (comma) lastComma = swallow(i);
-    if (cutAt < 0 && i - lineStart + 1 >= softCap && lastComma > lineStart) cutAt = lastComma;
-    if (cutAt > lineStart) { cuts.push(cutAt); lineStart = cutAt; lastComma = -1; i = cutAt - 1; }
+    if (!isSentEnd(refText[i], i + 1 < c1 ? refText[i + 1] : "")) continue;
+    const cutAt = swallowClosers(refText, i, c1);
+    if (cutAt > lineStart) { cuts.push(cutAt); lineStart = cutAt; i = cutAt - 1; }
   }
   if (!cuts.length || cuts[cuts.length - 1] !== c1) cuts.push(c1);
   return cuts;
+}
+
+// Fallback ONLY for a run-on longer than maxChars with no sentence terminator
+// (e.g. ASR that emits commas but few periods): wrap it at the LARGEST interior
+// word pause — a real silence is the least jarring place to break — and never at
+// a comma. Recurses so a very long run-on wraps more than once. maxChars is set
+// high so ordinary long-but-complete sentences are left whole. Returns exclusive
+// ends within (c0,c1], last == c1.
+function splitByPause(c0, c1, units, map, maxChars = 400) {
+  if (c1 - c0 <= maxChars) return [c1];
+  let bestCi = -1, bestGap = -Infinity;
+  for (let i = 1; i < units.length; i++) {
+    const ci = map[i].ci;
+    if (ci <= c0 + 40 || ci >= c1 - 40) continue; // keep both sides substantial
+    const gap = units[i].start - units[i - 1].end;
+    if (gap > bestGap) { bestGap = gap; bestCi = ci; }
+  }
+  if (bestCi < 0) return [c1]; // nowhere sensible to split
+  return [
+    ...splitByPause(c0, bestCi, units, map, maxChars),
+    ...splitByPause(bestCi, c1, units, map, maxChars),
+  ];
 }
 
 // Does this transcript carry usable punctuation? Whisper punctuates English but
@@ -2329,12 +2345,18 @@ async function runJob(id) {
           const cuts = sentenceCuts(fullText, 0, fullText.length);
           let prev = 0;
           for (const e of cuts) {
-            const text = fullText.slice(prev, e).trim();
-            const words = finalizeWords(sliceToWords(fullText, prev, e, timeAtChar));
-            if (text || words.length) {
-              const start = words.length ? words[0].start : round3(timeAtChar(prev));
-              const end = words.length ? words[words.length - 1].end : round3(timeAtChar(e));
-              segsOut.push({ start, end, speaker: pickSpeaker(start, end), text, words });
+            // Sentence boundaries only; a rare over-long run-on wraps on a real
+            // pause (never a comma) so no block ends on an unfinished clause.
+            let sp = prev;
+            for (const se of splitByPause(prev, e, units, map)) {
+              const text = fullText.slice(sp, se).trim();
+              const words = finalizeWords(sliceToWords(fullText, sp, se, timeAtChar));
+              if (text || words.length) {
+                const start = words.length ? words[0].start : round3(timeAtChar(sp));
+                const end = words.length ? words[words.length - 1].end : round3(timeAtChar(se));
+                segsOut.push({ start, end, speaker: pickSpeaker(start, end), text, words });
+              }
+              sp = se;
             }
             prev = e;
           }
