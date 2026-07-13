@@ -3190,11 +3190,13 @@ function ExportButtons({ rec }: { rec: RecordFull }) {
   const txt = () => download(`${rec.title}.txt`, segs.map((s) => `[${fmtTC(s.start)}] ${spkLabel(s.speaker, names)}: ${s.text}`).join("\n"));
   const srt = () => download(`${rec.title}.srt`, segs.map((s, i) => `${i + 1}\n${srtTime(s.start)} --> ${srtTime(s.end)}\n${spkLabel(s.speaker, names)}: ${s.text}`).join("\n\n"), "application/x-subrip");
   const json = () => download(`${rec.title}.json`, JSON.stringify(rec.result, null, 2), "application/json");
+  const debug = () => window.open(`/api/records/${rec.id}/debug`, "_blank", "noopener");
   return (
     <div className="flex gap-1">
       <button className="btn-ghost" onClick={txt}>TXT</button>
       <button className="btn-ghost" onClick={srt}>SRT</button>
       <button className="btn-ghost" onClick={json}>JSON</button>
+      <button className="btn-ghost" onClick={debug} title="查看对齐分段/插值区间等详细处理记录（调试用，新标签打开）">详细记录</button>
     </div>
   );
 }

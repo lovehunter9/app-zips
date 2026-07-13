@@ -936,6 +936,194 @@ app.get("/api/records/:id/audio", (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// Detailed processing report — a DEBUG aid (remove before public release). Shows
+// the exact alignment segments actually used and flags which ones fall inside an
+// interpolated (collapsed-window) span, plus per-window align decisions, timings
+// and notices. Open in a browser tab for a formatted page, or ?format=txt to
+// download a plain-text dump. Same-origin GET → carries the Olares session cookie.
+// ---------------------------------------------------------------------------
+function debugReportData(rec) {
+  const d = rec.debug || {};
+  const align = d.align || null;
+  const spans = Array.isArray(align?.interpSpans) ? align.interpSpans : [];
+  const segs = Array.isArray(rec.result?.segments) ? rec.result.segments : [];
+  const names = rec.result?.speakerNames || {};
+  const interpAt = (s) => spans.some((sp) => Math.min(+s.end, sp.b) - Math.max(+s.start, sp.a) > 0.05);
+  const segRows = segs.map((s, i) => ({
+    i: i + 1, start: +s.start || 0, end: +s.end || 0,
+    speaker: names[s.speaker] || s.speaker || "", interp: interpAt(s),
+    words: Array.isArray(s.words) ? s.words.length : 0, text: s.text || "",
+  }));
+  const interpCount = segRows.filter((r) => r.interp).length;
+  const interpSecs = spans.reduce((n, sp) => n + Math.max(0, sp.b - sp.a), 0);
+  return { d, align, spans, segRows, interpCount, interpSecs };
+}
+const mmss = (sec) => {
+  let s = Math.max(0, Math.round(sec || 0));
+  const h = Math.floor(s / 3600); s -= h * 3600;
+  const m = Math.floor(s / 60); s -= m * 60;
+  const p = (n) => String(n).padStart(2, "0");
+  return h ? `${h}:${p(m)}:${p(s)}` : `${m}:${p(s)}`;
+};
+function debugReportText(rec) {
+  const { d, align, spans, segRows, interpCount, interpSecs } = debugReportData(rec);
+  const L = [];
+  L.push(`详细处理记录 — ${rec.title || rec.id}`);
+  L.push("=".repeat(60));
+  L.push(`记录ID       ${rec.id}`);
+  L.push(`原文件       ${rec.originalName || "—"}`);
+  L.push(`生成时间     ${d.builtAt || "—"}${d.version ? "  版本 " + d.version : ""}`);
+  L.push(`转写模式     ${d.mode || "—"}`);
+  L.push(`标点分句     ${d.punctuated === null || d.punctuated === undefined ? "—" : d.punctuated ? "是（按标点）" : "否（按停顿/说话人/长度）"}`);
+  L.push(`语言 / 时长  ${d.language || "—"} / ${mmss(d.durationSec)}`);
+  L.push(`模型 STT     ${d.models?.stt || "—"}`);
+  L.push(`模型 对齐    ${d.models?.align || "—"}`);
+  L.push(`模型 分离    ${d.models?.diar || "—"}`);
+  L.push(`模型 翻译    ${d.models?.translate || "—"}`);
+  L.push(`选项         分段转写=${d.options?.segmentedStt ? "开" : "关"} · 转写时翻译=${d.options?.translate ? "开" : "关"} · 降噪=${d.options?.enhance ? "开" : "关"}`);
+  L.push(`分离窗口     ${d.diarWindows ?? "—"} 段`);
+  L.push(`整段STT字数  ${d.sttChars || 0}   对齐单元 ${d.unitCount || 0}   最终分段 ${d.segCount ?? segRows.length}`);
+  if (d.fallbackError) L.push(`回退原因     ${d.fallbackError}`);
+  L.push("");
+  const tim = d.timings || rec.timings;
+  if (tim?.steps?.length) {
+    L.push("阶段耗时");
+    L.push("-".repeat(60));
+    for (const s of tim.steps) L.push(`  ${String(s.name).padEnd(16)} ${fmtMs(s.ms)}`);
+    L.push(`  ${"合计".padEnd(16)} ${fmtMs(tim.totalMs)}`);
+    L.push("");
+  }
+  L.push("对齐诊断");
+  L.push("-".repeat(60));
+  if (!align) {
+    L.push("  （本次未走整段 alignLong 路径，无逐窗对齐轨迹）");
+  } else {
+    L.push(`  初始窗=${align.winInit}s 安全区=${align.safe}s 最小窗=${align.minWin}s`);
+    L.push(`  缩窗次数=${align.shrinks}  降级/插值窗=${align.degraded}  插值区间=${spans.length} 段  插值总时长≈${mmss(interpSecs)}`);
+    L.push("");
+    L.push(`  ${"#".padStart(3)} ${"区间".padEnd(15)} ${"窗长".padStart(5)} ${"单元".padStart(5)} ${"covA".padStart(6)} ${"covC".padStart(6)} ${"匹配".padStart(5)}  结果`);
+    for (const r of align.rows || []) {
+      const rng = `${mmss(r.a)}→${mmss(r.b)}`;
+      L.push(`  ${String(r.pass).padStart(3)} ${rng.padEnd(15)} ${String(r.winLen).padStart(4)}s ${String(r.n).padStart(5)} ${(r.covA == null ? "-" : r.covA + "s").padStart(6)} ${(r.covC == null ? "-" : String(r.covC)).padStart(6)} ${(r.matchRate == null ? "-" : r.matchRate.toFixed(2)).padStart(5)}  ${r.outcome}`);
+    }
+    if (spans.length) {
+      L.push("");
+      L.push("  插值区间（这些音频时间段的字幕时间为估算，可能不准）:");
+      for (const sp of spans) L.push(`    ${mmss(sp.a)} – ${mmss(sp.b)}  (${Math.round(sp.b - sp.a)}s, ${sp.reason})`);
+    }
+  }
+  L.push("");
+  L.push(`最终分段（共 ${segRows.length} 段，其中 ${interpCount} 段落在插值区间，行首标 ⚠）`);
+  L.push("-".repeat(60));
+  for (const r of segRows) {
+    const flag = r.interp ? "⚠" : " ";
+    L.push(`${flag} ${String(r.i).padStart(4)} [${mmss(r.start)}→${mmss(r.end)}] ${(r.speaker || "").padEnd(10)} ${r.text}`);
+  }
+  L.push("");
+  const notices = Array.isArray(rec.notices) ? rec.notices : [];
+  L.push(`处理提示（${notices.length} 条）`);
+  L.push("-".repeat(60));
+  for (const n of notices) L.push(`  [${n.level || "info"}] ${n.msg || n.text || ""}`);
+  return L.join("\n");
+}
+function debugReportHtml(rec) {
+  const { d, align, spans, segRows, interpCount, interpSecs } = debugReportData(rec);
+  const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const kv = (k, v) => `<div class="kv"><span class="k">${esc(k)}</span><span class="v">${v}</span></div>`;
+  const tim = d.timings || rec.timings || {};
+  const steps = (tim.steps || []).map((s) => `<tr><td>${esc(s.name)}</td><td class="num">${esc(fmtMs(s.ms))}</td></tr>`).join("");
+  const rowsHtml = align ? (align.rows || []).map((r) => {
+    const interp = /插值/.test(r.outcome);
+    const shrink = /缩窗/.test(r.outcome);
+    return `<tr class="${interp ? "bad" : shrink ? "warn" : ""}"><td class="num">${r.pass}</td><td>${mmss(r.a)}→${mmss(r.b)}</td><td class="num">${r.winLen}s</td><td class="num">${r.n}</td><td class="num">${r.covA == null ? "–" : r.covA + "s"}</td><td class="num">${r.covC == null ? "–" : r.covC}</td><td class="num">${r.matchRate == null ? "–" : r.matchRate.toFixed(2)}</td><td>${esc(r.outcome)}</td></tr>`;
+  }).join("") : "";
+  const spansHtml = spans.map((sp) => `<li><code>${mmss(sp.a)} – ${mmss(sp.b)}</code> · ${Math.round(sp.b - sp.a)}s · ${esc(sp.reason)}</li>`).join("");
+  const segHtml = segRows.map((r) => `<tr class="${r.interp ? "bad" : ""}"><td class="num">${r.i}</td><td class="num">${r.interp ? "⚠" : ""}</td><td>${mmss(r.start)}→${mmss(r.end)}</td><td class="num">${Math.round(r.end - r.start)}s</td><td>${esc(r.speaker)}</td><td>${esc(r.text)}</td></tr>`).join("");
+  const notices = (rec.notices || []).map((n) => `<li class="lv-${esc(n.level || "info")}"><b>${esc(n.level || "info")}</b> ${esc(n.msg || n.text || "")}</li>`).join("");
+  const pill = d.punctuated === null || d.punctuated === undefined ? "—" : d.punctuated ? "按标点" : "按停顿/说话人/长度";
+  return `<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>详细处理记录 · ${esc(rec.title || rec.id)}</title>
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:#0b0b0e;color:#e5e5e5;font:13px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif}
+.wrap{max-width:1100px;margin:0 auto;padding:20px 20px 80px}
+h1{font-size:18px;margin:0 0 2px}
+h2{font-size:14px;margin:26px 0 8px;color:#9ca3af;border-bottom:1px solid #23232a;padding-bottom:6px}
+.sub{color:#8b8b93;font-size:12px;margin-bottom:14px}
+.bar{position:sticky;top:0;background:#0b0b0eee;backdrop-filter:blur(6px);padding:10px 0;margin:-20px 0 0;border-bottom:1px solid #23232a;z-index:5;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.bar a{color:#0b0b0e;background:#38bdf8;text-decoration:none;padding:5px 12px;border-radius:6px;font-weight:600;font-size:12px}
+.bar .note{color:#f59e0b;font-size:12px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:2px 20px}
+.kv{display:flex;gap:8px;padding:2px 0}
+.kv .k{color:#7c7c85;min-width:88px}
+.kv .v{color:#e5e5e5;word-break:break-all}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th,td{text-align:left;padding:5px 8px;border-bottom:1px solid #1c1c22;vertical-align:top}
+th{color:#8b8b93;font-weight:600;position:sticky;top:44px;background:#0b0b0e}
+td.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;color:#c7c7cf}
+tr.bad td{background:#3a1a1a}
+tr.warn td{background:#3a301a}
+code{background:#17171d;padding:1px 5px;border-radius:4px}
+.badge{display:inline-block;background:#17171d;border:1px solid #2a2a33;border-radius:999px;padding:1px 9px;margin-left:6px;font-size:11px}
+.bad-badge{color:#fca5a5;border-color:#7f1d1d}
+ul{margin:6px 0;padding-left:20px}
+.lv-warn{color:#fbbf24}.lv-error{color:#f87171}
+.empty{color:#6b7280;padding:8px 0}
+</style></head><body><div class="wrap">
+<div class="bar">
+  <a href="?format=txt" download>⬇ 下载 TXT</a>
+  <span class="note">调试用页面 · 正式发布前移除</span>
+</div>
+<h1>详细处理记录 <span class="badge">${esc(rec.kind === "video" ? "视频" : "音频")}</span>${interpCount ? `<span class="badge bad-badge">⚠ ${interpCount} 段落在插值区间</span>` : ""}</h1>
+<div class="sub">${esc(rec.title || rec.id)} · 生成于 ${esc(d.builtAt || "—")}${d.version ? " · 版本 " + esc(d.version) : ""}</div>
+
+<h2>概览</h2>
+<div class="grid">
+${kv("记录ID", esc(rec.id))}
+${kv("原文件", esc(rec.originalName || "—"))}
+${kv("转写模式", esc(d.mode || "—"))}
+${kv("分句方式", esc(pill))}
+${kv("语言 / 时长", esc(d.language || "—") + " / " + mmss(d.durationSec))}
+${kv("STT 模型", esc(d.models?.stt || "—"))}
+${kv("对齐模型", esc(d.models?.align || "—"))}
+${kv("分离模型", esc(d.models?.diar || "—"))}
+${kv("翻译模型", esc(d.models?.translate || "—"))}
+${kv("选项", `分段=${d.options?.segmentedStt ? "开" : "关"} · 翻译=${d.options?.translate ? "开" : "关"} · 降噪=${d.options?.enhance ? "开" : "关"}`)}
+${kv("分离窗口", (d.diarWindows ?? "—") + " 段")}
+${kv("STT字数/单元/分段", `${d.sttChars || 0} / ${d.unitCount || 0} / ${d.segCount ?? segRows.length}`)}
+${d.fallbackError ? kv("回退原因", `<span style="color:#f87171">${esc(d.fallbackError)}</span>`) : ""}
+</div>
+
+<h2>阶段耗时</h2>
+${steps ? `<table><thead><tr><th>阶段</th><th class="num">用时</th></tr></thead><tbody>${steps}<tr><td><b>合计</b></td><td class="num"><b>${esc(fmtMs(tim.totalMs || 0))}</b></td></tr></tbody></table>` : `<div class="empty">无耗时数据</div>`}
+
+<h2>对齐诊断</h2>
+${align ? `<div class="sub">初始窗 ${align.winInit}s · 安全区 ${align.safe}s · 最小窗 ${align.minWin}s · 缩窗 ${align.shrinks} 次 · 降级/插值窗 ${align.degraded} · 插值区间 ${spans.length} 段（≈${mmss(interpSecs)}）</div>
+<table><thead><tr><th class="num">#</th><th>音频区间</th><th class="num">窗长</th><th class="num">单元</th><th class="num">covA</th><th class="num">covC</th><th class="num">匹配率</th><th>结果</th></tr></thead><tbody>${rowsHtml}</tbody></table>
+${spans.length ? `<h3 style="font-size:13px;color:#fca5a5;margin:14px 0 4px">插值区间（此段时间为估算，字幕可能不准）</h3><ul>${spansHtml}</ul>` : ""}` : `<div class="empty">本次未走整段 alignLong 路径（分段转写或回退），无逐窗对齐轨迹。</div>`}
+
+<h2>最终分段（${segRows.length} 段 · ⚠ ${interpCount} 段插值）</h2>
+<table><thead><tr><th class="num">#</th><th class="num">插值</th><th>时间</th><th class="num">时长</th><th>说话人</th><th>文本</th></tr></thead><tbody>${segHtml}</tbody></table>
+
+<h2>处理提示（${(rec.notices || []).length} 条）</h2>
+${notices ? `<ul>${notices}</ul>` : `<div class="empty">无</div>`}
+</div></body></html>`;
+}
+app.get("/api/records/:id/debug", (req, res) => {
+  const rec = readRecord(req.params.id);
+  if (!rec) return res.status(404).send("not found");
+  if ((req.query.format || "") === "txt") {
+    res.type("text/plain; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="debug-${rec.id}.txt"`);
+    return res.send(debugReportText(rec));
+  }
+  res.type("text/html; charset=utf-8");
+  res.setHeader("Cache-Control", "no-store");
+  return res.send(debugReportHtml(rec));
+});
+
+// ---------------------------------------------------------------------------
 // Transcribe pipeline (async) : diar -> per-window (stt + align) -> fuse
 // ---------------------------------------------------------------------------
 // Serial job queue: only ONE record transcribes at a time. Diarization/STT hit
@@ -1354,6 +1542,16 @@ async function alignLong(alignSlice, fullText, total, onProg, id = "") {
   let cps = fullText.length / Math.max(1, total); // running chars/sec estimate
   const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
   const grow = () => Math.min(WIN, winLen * 2); // ease window size back up after a shrink
+  // Debug trace for the detailed processing report (per-window decisions + the
+  // audio spans that had to be interpolated). Purely observational.
+  const diag = { winInit: WIN, safe: SAFE, minWin: MINWIN, rows: [], interpSpans: [], shrinks: 0, degraded: 0 };
+  // `bv` is the current window end — passed in because it is block-scoped to the
+  // loop body below and not visible in this function's own scope.
+  const row = (outcome, bb, bv) => diag.rows.push({
+    pass, a: round3(a), b: round3(bv), winLen, n: bb ? bb.u.length : 0, k: bb ? bb.k : -1,
+    covA: bb ? round3(bb.covA) : null, covC: bb ? bb.covC : null,
+    matchRate: bb ? Math.round(bb.matchRate * 100) / 100 : null, outcome,
+  });
   while (a < total - 0.05 && cOff < fullText.length) {
     pass++;
     const b = Math.min(total, a + winLen);
@@ -1406,6 +1604,8 @@ async function alignLong(alignSlice, fullText, total, onProg, id = "") {
     if ((!best || best.bad) && !lastWin && winLen > MINWIN) {
       const nw = Math.max(MINWIN, Math.floor(winLen / 2));
       console.log(`[${id}] alignLong 缩窗重试 pass${pass} a=${a.toFixed(0)} winLen=${winLen}->${nw} 原因=${!best ? "空窗" : best.earlyPlateau ? "earlyPlateau" : "lagging"} covA=${best ? best.covA.toFixed(0) : "-"}`);
+      diag.shrinks++;
+      row(`缩窗→${nw}s（${!best ? "空窗" : best.earlyPlateau ? "塌窗" : "文本滞后"}）`, best, b);
       winLen = nw;
       continue;
     }
@@ -1414,6 +1614,8 @@ async function alignLong(alignSlice, fullText, total, onProg, id = "") {
       // later windows stay in sync, then move on and let the window grow back.
       degraded++;
       console.log(`[${id}] alignLong 空窗 pass${pass} a=${a.toFixed(0)} b=${b.toFixed(0)} winLen=${winLen}（缩到最小仍空，按 cps 前进）`);
+      row("插值·空窗", null, b);
+      diag.interpSpans.push({ a: round3(a), b: round3(b), reason: "空窗" });
       if (!lastWin) cOff = Math.min(fullText.length, cOff + Math.max(1, Math.round(cps * (b - a))));
       a = b; winLen = grow();
       continue;
@@ -1426,7 +1628,7 @@ async function alignLong(alignSlice, fullText, total, onProg, id = "") {
       units.push({ text: u[i].text, start: st, end: clamp(u[i].end, st, b) });
       map.push({ ci: cOff + lm[i].ci, cj: cOff + lm[i].cj });
     }
-    if (lastWin) break;
+    if (lastWin) { row("真实对齐(末窗)", best, b); break; }
     let nextA = u[k].end, nextC = cOff + lm[k].cj;
     if (best.bad) {
       // A MINWIN slice STILL degraded (rare, sustained overload): interpolate ONLY
@@ -1437,19 +1639,24 @@ async function alignLong(alignSlice, fullText, total, onProg, id = "") {
       nextC = Math.min(fullText.length, cOff + Math.max(1, Math.round(cps * (b - a))));
       const w0 = best.u[0] || {};
       console.log(`[${id}] alignLong 小窗仍降级 pass${pass} a=${a.toFixed(0)} b=${b.toFixed(0)} winLen=${winLen} units=${best.u.length} k=${k} covA=${best.covA.toFixed(0)}s covC=${best.covC} matchRate=${best.matchRate.toFixed(2)} 首unit="${(w0.text || "").slice(0, 16)}"@${(w0.start || 0).toFixed(1)}（插值 ${(b - a).toFixed(0)}s）`);
+      diag.interpSpans.push({ a: round3(a), b: round3(b), reason: "小窗仍降级" });
     }
     if (nextA <= a + 1 || nextC <= cOff) {
       // No usable progress: advance BOTH audio and text (by cps). NEVER jump audio to
       // b while leaving the text cursor behind — that re-feeds this window's text to a
       // later window and shifts the tail ~one window (the +290s drift).
+      diag.interpSpans.push({ a: round3(a), b: round3(b), reason: "零进展" });
+      row("插值·零进展", best, b);
       if (!lastWin) cOff = Math.min(fullText.length, Math.max(nextC, cOff + Math.max(1, Math.round(cps * (b - a)))));
       a = b; winLen = grow(); continue;
     }
+    row(best.bad ? `插值·小窗降级 ${Math.round(b - a)}s` : "真实对齐", best, b);
     cps = (nextC - cOff) / Math.max(0.5, nextA - a);
     a = nextA; cOff = nextC; winLen = grow();
   }
   if (degraded) console.log(`[${id}] alignLong 完成：${degraded} 个窗缩到最小仍降级、已按 cps 兜底（正常应为 0）`);
-  return { units, map };
+  diag.degraded = degraded;
+  return { units, map, diag };
 }
 
 // Candidate cut positions: after every sentence-end / clause mark (swallowing
@@ -2202,6 +2409,8 @@ async function runJob(id) {
     const segmented = !!cfg.segmentedStt;
     let language = "";
     let segsOut;
+    let dbg = null;                 // detailed processing trace → /api/records/:id/debug
+    const dbgDiar = diarSegs.length;
 
     // speaker for an absolute [a,b] span = diar speaker with max time overlap
     const dseg = (diarSegs || [])
@@ -2277,6 +2486,7 @@ async function runJob(id) {
     if (segmented) {
       timer.begin("分段转写与对齐");
       segsOut = await runWindows();
+      dbg = { mode: "分段转写与词级对齐（逐窗 STT + 逐窗对齐）", punctuated: null, sttChars: 0, align: null };
     } else {
       // 整段转写 (默认): Qwen3-ASR has NO verbose_json, so STT can't segment. We
       // instead do ONE whole-clip STT (full text) + ONE whole-clip forced align
@@ -2317,13 +2527,16 @@ async function runJob(id) {
         // reliable prefix and re-aligns the remainder from the last reliable word,
         // so char times come straight from ALIGN — never from char-proportion guesses.
         const alignTotal = rec.durationSec || 0;
-        const { units, map } = await alignLong(
+        const { units, map, diag: alignDiag } = await alignLong(
           alignSlice, fullText, alignTotal,
           (frac) => setP(55 + Math.round(30 * frac), "词级对齐"),
           id,
         );
         console.log(`[${id}] 词级对齐(alignLong)完成：${units.length} 个单元，音频≈${Math.round(alignTotal)}s`);
         if (!units.length) throw new Error("对齐无结果");
+        // Stash everything the detailed processing report needs (mode, whole-clip
+        // STT text, and the per-window align trace incl. interpolated spans).
+        dbg = { mode: `整段转写 + 词级对齐（${punctuated ? "按标点分句" : "按停顿/说话人/长度分句"}）`, punctuated, sttChars: fullText.length, fullText, alignTotal, align: alignDiag, units: units.length };
         // Smooth the aligner's local burst-then-gap micro-collapses so highlight
         // advances evenly instead of racing a run of words then stalling at a pause.
         deburstUnits(units);
@@ -2407,6 +2620,7 @@ async function runJob(id) {
         addNotice(id, "warn", `整段转写失败，已自动回退为逐段转写与对齐（结果仍可用）。原因：${e?.message || e}`);
         timer.begin("回退逐段转写与对齐");
         segsOut = await runWindows("整段转写失败，回退逐段转写与对齐");
+        dbg = { mode: "整段转写失败 → 回退分段转写与词级对齐", punctuated: null, sttChars: 0, align: null, fallbackError: String(e?.message || e) };
       }
     }
 
@@ -2442,6 +2656,26 @@ async function runJob(id) {
     out.phase = "";
     out.error = "";
     out.timings = timings;
+    // Detailed processing trace for the debug report (/api/records/:id/debug). Kept
+    // deliberately small (per-window rows + interpolated spans, no raw units) and
+    // separate from result so exports stay clean. Remove before public release.
+    out.debug = {
+      builtAt: nowIso(),
+      version: process.env.APP_VERSION || "",
+      mode: dbg?.mode || "",
+      punctuated: dbg?.punctuated ?? null,
+      language: language || "",
+      durationSec: rec.durationSec || 0,
+      models: { stt: cfg.models?.stt || "", align: cfg.models?.align || "", diar: cfg.models?.diar || "", translate: cfg.translate?.model || "" },
+      options: { segmentedStt: !!cfg.segmentedStt, translate: !!rec.options?.translate, enhance: !!rec.options?.enhance },
+      diarWindows: dbgDiar,
+      sttChars: dbg?.sttChars || 0,
+      unitCount: dbg?.units || 0,
+      segCount: segments.length,
+      timings,
+      align: dbg?.align || null,
+      fallbackError: dbg?.fallbackError || "",
+    };
     writeRecord(out);
     addNotice(id, "info", `处理完成：总用时 ${fmtMs(timings.totalMs)}（${timings.steps.map((s) => `${s.name} ${fmtMs(s.ms)}`).join("、")}）。`);
   } catch (e) {
