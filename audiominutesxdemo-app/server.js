@@ -1542,6 +1542,16 @@ async function alignLong(alignSlice, fullText, total, onProg, id = "") {
   let cps = fullText.length / Math.max(1, total); // running chars/sec estimate
   const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
   const grow = () => Math.min(WIN, winLen * 2); // ease window size back up after a shrink
+  // Inter-request spacing for ALIGN ONLY (see the attempt loop). On localhost the
+  // aligner backend gets the NEXT request before it has freed the previous request's
+  // GPU state, so it collapses (timestamps saturate ~1s) — a network client is
+  // naturally spaced by RTT and never sees this. We recreate that spacing: a baseline
+  // gap before every window, escalating backoff when a window collapses. This is
+  // scoped to alignLong on purpose — no other stage gets a delay.
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const GAP = 1000;                       // baseline ms between align requests
+  const RETRY_WAITS = [2000, 4000, 7000]; // escalating ms backoff on a collapsed window
+  let firstCall = true;                   // skip the gap before the very first align
   // Debug trace for the detailed processing report (per-window decisions + the
   // audio spans that had to be interpolated). Purely observational.
   const diag = { winInit: WIN, safe: SAFE, minWin: MINWIN, rows: [], interpSpans: [], shrinks: 0, degraded: 0 };
@@ -1560,17 +1570,17 @@ async function alignLong(alignSlice, fullText, total, onProg, id = "") {
     // collapses at the tail and gets discarded by reliableAlignEnd.
     const want = lastWin ? fullText.length - cOff : Math.ceil(cps * (b - a) * 1.5) + 30;
     const part = fullText.slice(cOff, Math.min(fullText.length, cOff + want));
-    // Align the window, retrying transient empty responses (timeout / 5xx). Under a
-    // busy shared GPU the aligner can, for ONE window, collapse almost immediately —
-    // returning a dense output whose timestamps saturate after ~1s (covA≈1s), or
-    // whose unit texts stop matching the transcript. reliableAlignEnd then keeps only
-    // a tiny prefix. We detect that (earlyPlateau / lagging) and, instead of trusting
-    // or interpolating a huge span, SHRINK the window and retry the SAME start (below):
-    // a smaller audio+text slice is a lighter task the aligner is far likelier to get
-    // right, so the region gets REAL alignment rather than a ~255s interpolated line
-    // (the load-only "highlight runs ~1 sentence ahead, then converges" drift).
+    // Align the window. PRIMARY defense against the localhost "collapse" (dense output
+    // whose timestamps saturate after ~1s, covA≈1s): SPACE the requests. A baseline
+    // GAP precedes each window; if the window still comes back collapsed we wait
+    // progressively longer (RETRY_WAITS) and retry the SAME window — giving the backend
+    // time to free GPU state, which is exactly what a network client's RTT does for
+    // free (and why local runs never collapse). Shrinking is only a last resort below.
     let best = null;
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt <= RETRY_WAITS.length; attempt++) {
+      const wait = attempt === 0 ? (firstCall ? 0 : GAP) : RETRY_WAITS[attempt - 1];
+      if (wait) await sleep(wait);
+      firstCall = false;
       const cur = await alignSlice(a, b, part, attempt ? `wa_${pass}r${attempt}` : `wa_${pass}`);
       if (!cur.length) continue;
       const ck = lastWin ? cur.length - 1 : reliableAlignEnd(cur, a + SAFE);
@@ -1598,9 +1608,9 @@ async function alignLong(alignSlice, fullText, total, onProg, id = "") {
       if (!bad) break;
     }
     if (onProg) try { onProg(Math.min(1, b / Math.max(1, total))); } catch { /* ignore */ }
-    // Empty OR degraded window that can still be made smaller: SHRINK and retry the
-    // SAME start. This is the primary defense — most load collapses clear on a lighter
-    // slice, giving REAL alignment for the region instead of an interpolated line.
+    // LAST RESORT (spaced retries above already failed): shrink the window and retry
+    // the SAME start. Kept only as a fallback; the spacing above is the real fix, so
+    // this should almost never fire once requests are properly spaced.
     if ((!best || best.bad) && !lastWin && winLen > MINWIN) {
       const nw = Math.max(MINWIN, Math.floor(winLen / 2));
       console.log(`[${id}] alignLong 缩窗重试 pass${pass} a=${a.toFixed(0)} winLen=${winLen}->${nw} 原因=${!best ? "空窗" : best.earlyPlateau ? "earlyPlateau" : "lagging"} covA=${best ? best.covA.toFixed(0) : "-"}`);
@@ -2091,7 +2101,7 @@ async function translateSegments(cfg, segments, setP, id) {
   const total = segments.length;
   let done = 0, translated = 0, failed = 0, lastErr = "";
   if (setP) setP(95, "翻译", 0, total);
-  await mapLimit(segments, 4, async (seg) => {
+  await mapLimit(segments, 8, async (seg) => {
     // Checkpoint OUTSIDE the per-segment try/catch below so a stop actually
     // propagates (the inner catch swallows per-segment errors on purpose).
     if (id) ckCancel(id);
@@ -2464,7 +2474,10 @@ async function runJob(id) {
       const windows = buildWindows(diarSegs, rec.durationSec);
       setP(20, phase, 0, windows.length);
       let done = 0;
-      return mapLimit(windows, 2, async (w, idx) => {
+      // Per-window STT+align run several windows at once for speed. These aligns are
+      // SHORT (~30s) and independent, so a rare localhost collapse is bounded to one
+      // window (degrades to spread word-timing) — no cross-window drift like 整段.
+      return mapLimit(windows, 4, async (w, idx) => {
         ckCancel(id);
         const slicePath = path.join(UPLOAD_DIR, `${id}-w${idx}.wav`);
         tmp.push(slicePath);

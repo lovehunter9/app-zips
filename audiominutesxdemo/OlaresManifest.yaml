@@ -7,14 +7,14 @@ metadata:
   description: Feishu-Minutes-style audio notes — diarized, word-timestamped transcripts with player sync, via the LLM Gateway.
   appid: audiominutesxdemo
   title: Audio Minutes X Demo
-  version: '1.0.10'
+  version: '1.0.11'
   categories:
     - Utilities
 permission:
   appData: true
 spec:
   runAsUser: true
-  versionName: '1.0.10'
+  versionName: '1.0.11'
   fullDescription: |
     Audio Minutes X Demo is a Feishu-Minutes (妙记) style app for turning meetings,
     lectures and audiobooks into interactive, searchable transcripts — all powered by
@@ -31,6 +31,13 @@ spec:
       use, all in the app. If a required model is missing, the app tells you it cannot
       transcribe until it is configured.
   upgradeDescription: |
+    1.0.11: 定位并根治整段转写在测试机(App 与模型同机)上「稳定复现、位点固定」的时间戳漂移。对照实验
+    (同代码/同音频/同模型/同 GPU,仅 App→网关的请求间隔不同)证明:localhost 下相邻词级对齐请求过于紧密,
+    对齐后端来不及释放上一次的 GPU 状态就被下一次命中,导致对齐塌成 1 秒;而经网络的本地机因 RTT 天然拉开
+    间隔从不复现。故对「词级对齐」请求主动限速:每窗之间加基础间隔、塌窗则退避(2/4/7 秒)重试同一窗,复刻
+    网络客户端的节奏;缩窗降为最后兜底。仅对齐加间隔,其它阶段不受影响。另:提高分段转写与翻译的并发度以加速。
+    新增「详细处理记录」调试页(操作区「详细记录」按钮,可浏览/下载 TXT):展示每个对齐窗口的判定、被插值的
+    音频区间、以及哪些分段落在插值区间(正式发布前会移除)。
     1.0.10: 修复负载下整段转写「成段时间戳偏移~5分钟」的残留——某个词级对齐窗口在繁忙 GPU 下
     塌成 1 秒(covA≈1s)时,旧兜底会「一次性插值 255 秒」,导致那 4~5 分钟高亮整体超前、到下一窗才
     收敛。现改为「自适应缩窗」:窗口降级就对半砍(290→145→72→40 秒)用同起点重试——更小的切片
