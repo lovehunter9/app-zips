@@ -584,7 +584,7 @@ function ProcessingView({ rec, onStop }: { rec: RecordFull; onStop?: () => void 
   } else {
     if (opts?.enhance) steps.push({ key: "enhance", label: "降噪增强" });
     steps.push({ key: "diar", label: "说话人分离" });
-    steps.push({ key: "stt", label: "转写与词级对齐" });
+    steps.push({ key: "stt", label: opts?.segmentedStt ? "分段转写 + 词级对齐" : "整段转写 + 词级对齐" });
     steps.push({ key: "tidy", label: "整理结果" });
     if (opts?.translate) steps.push({ key: "translate", label: "翻译" });
   }
@@ -1382,10 +1382,10 @@ function RecordDetail({
     return base;
   }, [segments]);
   const hasTranslation = tflat.length > 0;
-  // Effective "show 译文" flag for the transcript + subtitles: global 翻译 must be ON,
-  // there must be translations, and the user must not have toggled it off. When the
-  // global feature is off, translation is force-hidden regardless of the toggle.
-  const canToggleTrans = showTranslation && hasTranslation;
+  // "show 译文" is available whenever this record actually HAS translations — it does
+  // NOT depend on the global 翻译 switch, so turning the global default off never hides
+  // translations you already produced. Only the user's per-record toggle controls it.
+  const canToggleTrans = hasTranslation;
   const showTrans = canToggleTrans && wantTrans;
 
   const hasWords = flat.length > 0;
@@ -1970,12 +1970,10 @@ function RecordDetail({
             <input type="checkbox" className="h-4 w-4" checked={optSeg} onChange={(e) => setOptSeg(e.target.checked)} />
             <span className="text-neutral-300">分段转写</span>
           </label>
-          {showTranslation && (
-            <label className="flex items-center gap-2" title={translateAvailable ? "" : "请先在设置中选择翻译模型"}>
-              <input type="checkbox" className="h-4 w-4" checked={optTr} disabled={!translateAvailable} onChange={(e) => setOptTr(e.target.checked)} />
-              <span className={translateAvailable ? "text-neutral-300" : "text-neutral-600"}>转写时翻译</span>
-            </label>
-          )}
+          <label className="flex items-center gap-2" title={config?.translate?.model ? "" : "请先在设置中选择翻译模型"}>
+            <input type="checkbox" className="h-4 w-4" checked={optTr} disabled={!config?.translate?.model} onChange={(e) => setOptTr(e.target.checked)} />
+            <span className={config?.translate?.model ? "text-neutral-300" : "text-neutral-600"}>转写时翻译</span>
+          </label>
           <label className="flex items-center gap-2" title={enhanceAvailable ? "背景音乐较明显的文件不建议开启" : "请先在设置中选择增强模型"}>
             <input type="checkbox" className="h-4 w-4" checked={optEnh} disabled={!enhanceAvailable} onChange={(e) => setOptEnh(e.target.checked)} />
             <span className={enhanceAvailable ? "text-neutral-300" : "text-neutral-600"}>降噪增强</span>

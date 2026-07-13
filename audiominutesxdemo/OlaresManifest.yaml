@@ -7,14 +7,14 @@ metadata:
   description: Feishu-Minutes-style audio notes — diarized, word-timestamped transcripts with player sync, via the LLM Gateway.
   appid: audiominutesxdemo
   title: Audio Minutes X Demo
-  version: '1.0.8'
+  version: '1.0.9'
   categories:
     - Utilities
 permission:
   appData: true
 spec:
   runAsUser: true
-  versionName: '1.0.8'
+  versionName: '1.0.9'
   fullDescription: |
     Audio Minutes X Demo is a Feishu-Minutes (妙记) style app for turning meetings,
     lectures and audiobooks into interactive, searchable transcripts — all powered by
@@ -31,6 +31,12 @@ spec:
       use, all in the app. If a required model is missing, the app tells you it cannot
       transcribe until it is configured.
   upgradeDescription: |
+    1.0.9: 修复负载下整段转写「成段时间戳跳过~5分钟」——词级对齐新增抗降级防线:某窗在繁忙 GPU 下
+    音频推进但文本几乎没消费(单元文本对不上稿件/时间被后挤)时,强制文本游标按字/秒追上音频,不再把
+    陈旧文本喂给后一窗;每个对齐单元硬钳进本窗、空窗/降级窗自动重试并打诊断日志。修复逐词高亮「快冲一串
+    再卡住」(burst-then-gap)——新增去 burst 平滑:保证每个词最小显示位、从邻近空档借时间并保留真停顿,
+    高亮匀速推进。另:「转写设置」的「转写时翻译」改为常驻显示(不再随全局开关时隐时现),「显示译文」只要
+    该记录有译文即可用;处理页转写阶段区分显示「整段转写 + 词级对齐」/「分段转写 + 词级对齐」。
     1.0.8: 修复整段转写长音频(>~5分钟)的时间戳塌陷——词级对齐改为按对齐器自身饱和点切窗
     (Qwen3-ForcedAligner 只在 ~270s 内可靠),每窗只保留可靠前缀、从最后一个可靠词续对后半段;
     修复长音频尾部「几十段全挤在同一秒」的致命 bug(饱和窗口上映射整段文本会让字符游标在重复词上

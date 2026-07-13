@@ -1260,16 +1260,16 @@ function mapUnitsBounded(units, refText, slack = 48) {
   const lower = refText.toLowerCase();
   for (const u of units) {
     const t = (u.text || "").trim();
-    if (!t) { out.push({ ci: cursor, cj: cursor }); continue; }
+    if (!t) { out.push({ ci: cursor, cj: cursor, hit: false }); continue; }
     const idx = lower.indexOf(t.toLowerCase(), cursor);
     if (idx < 0 || idx > cursor + slack) {
       const cj = Math.min(refText.length, cursor + t.length);
-      out.push({ ci: cursor, cj });
+      out.push({ ci: cursor, cj, hit: false });
       cursor = cj;
       while (cursor < refText.length && /\s/.test(refText[cursor])) cursor++;
       continue;
     }
-    out.push({ ci: idx, cj: idx + t.length });
+    out.push({ ci: idx, cj: idx + t.length, hit: true });
     cursor = idx + t.length;
   }
   return out;
@@ -1293,6 +1293,31 @@ function buildCharToTime(units, map) {
     }
     return aT[aT.length - 1];
   };
+}
+
+// De-burst the aligner's local micro-collapses. At pauses (usually sentence ends)
+// Qwen's aligner packs several words into an impossibly short span (>~8 words/sec)
+// and leaves the freed time as a gap, so karaoke highlight RACES then STALLS. We
+// guarantee each unit a readable min display slot by borrowing from nearby slack and
+// repaying the "debt" during roomy gaps (bounded, so no permanent drift) — this only
+// smooths DISPLAY timing where speech was physically impossible; genuine pauses stay.
+// Times remain strictly monotonic. Operates on the global unit list in place.
+function deburstUnits(units, MINSLOT = 0.14, MAXCARRY = 1.5) {
+  const n = units.length;
+  if (n < 2) return units;
+  let carry = 0;
+  for (let i = 1; i < n; i++) {
+    let ns = units[i].start + carry;
+    const slot = ns - units[i - 1].start;
+    if (slot < MINSLOT) { const push = MINSLOT - slot; ns += push; carry = Math.min(MAXCARRY, carry + push); }
+    else if (carry > 0) { const repay = Math.min(carry, slot - MINSLOT); ns -= repay; carry -= repay; }
+    units[i].start = round3(ns);
+  }
+  for (let i = 0; i < n; i++) {
+    const nx = i + 1 < n ? units[i + 1].start : units[i].end;
+    units[i].end = round3(Math.max(units[i].start + 0.05, Math.min(units[i].end, nx)));
+  }
+  return units;
 }
 
 // Index of the last TRUSTWORTHY unit in one align window: the last unit whose start
@@ -1322,11 +1347,12 @@ function reliableAlignEnd(units, tMax, N = 6, dt = 0.12) {
 // start the next window at the last reliable word's END time with the remaining text
 // (STT char ORDER tells us exactly which chars are left). Works for any length.
 // Returns {units, map} in fullText coords; every time is pure ALIGN.
-async function alignLong(alignSlice, fullText, total, onProg) {
+async function alignLong(alignSlice, fullText, total, onProg, id = "") {
   const WIN = 290, SAFE = 255;
   const units = [], map = [];
-  let a = 0, cOff = 0, pass = 0;
+  let a = 0, cOff = 0, pass = 0, degraded = 0;
   let cps = fullText.length / Math.max(1, total); // running chars/sec estimate
+  const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
   while (a < total - 0.05 && cOff < fullText.length) {
     pass++;
     const b = Math.min(total, a + WIN);
@@ -1335,34 +1361,85 @@ async function alignLong(alignSlice, fullText, total, onProg) {
     // collapses at the tail and gets discarded by reliableAlignEnd.
     const want = lastWin ? fullText.length - cOff : Math.ceil(cps * (b - a) * 1.5) + 30;
     const part = fullText.slice(cOff, Math.min(fullText.length, cOff + want));
-    // Transient gateway failures (timeout / 5xx under load) make alignSlice return
-    // []; retry a couple times before giving up, since a lost window is costly.
-    let u = await alignSlice(a, b, part, `wa_${pass}`);
-    for (let r = 0; !u.length && r < 2; r++) u = await alignSlice(a, b, part, `wa_${pass}r${r + 1}`);
+    // Align the window, retrying BOTH transient empty responses (timeout / 5xx) AND
+    // load-induced degradation. Under a busy shared GPU the aligner can, for one
+    // window, advance AUDIO normally but consume almost no TEXT — because unit texts
+    // stop matching the transcript, or the times back-load so the reliable prefix
+    // trims to nothing. Either way the next window gets stale text aligned against
+    // later audio, shifting it ~one window (~5 min) later: the load-only "+290s jump"
+    // (unloaded runs of the same audio/text are clean). We keep the best attempt and,
+    // if still degraded, force the text cursor to track the audio cursor by cps.
+    let best = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const cur = await alignSlice(a, b, part, attempt ? `wa_${pass}r${attempt}` : `wa_${pass}`);
+      if (!cur.length) continue;
+      const ck = lastWin ? cur.length - 1 : reliableAlignEnd(cur, a + SAFE);
+      const lmTry = mapUnitsBounded(cur.slice(0, ck + 1), part);
+      const covA = cur[ck].end - a;                               // reliable prefix audio span
+      const covC = lmTry.length ? lmTry[lmTry.length - 1].cj : 0;  // chars consumed in part
+      const rawSpan = cur[cur.length - 1].end - a;                // content span of raw window
+      const matched = lmTry.reduce((n, x) => n + (x.hit ? 1 : 0), 0);
+      const matchRate = matched / Math.max(1, lmTry.length);
+      const expC = cps * Math.max(0, covA);                       // chars the audio span implies
+      const dense = cur.length > 40;
+      const earlyPlateau = !lastWin && dense && covA < 30 && rawSpan > 60;
+      // Mechanism-agnostic: audio moved but text consumed far below the running rate.
+      // Catches char-undermap (garbage texts) AND back-loaded times (prefix trimmed).
+      const lagging = !lastWin && dense && covA > 20 && covC < 0.3 * expC;
+      const bad = earlyPlateau || lagging;
+      // Prefer a non-degraded attempt; otherwise keep the one with the best matchRate.
+      if (!best || (best.bad && !bad) || (best.bad === bad && matchRate > best.matchRate)) {
+        best = { u: cur, k: ck, lm: lmTry, covA, covC, expC, matchRate, earlyPlateau, lagging, bad };
+      }
+      if (!bad) break;
+    }
     if (onProg) try { onProg(Math.min(1, b / Math.max(1, total))); } catch { /* ignore */ }
-    if (!u.length) {
-      // Window STILL failed. CRITICAL: advance the TEXT cursor too, not just the
-      // audio. Skipping only the audio re-feeds this window's text to the NEXT
-      // window, shifting every later word ~one window (~5 min) later — the
-      // "5-minute jump" + tail pile-up seen under gateway load. We can't get real
-      // times, so advance cOff by the running chars/sec estimate; the skipped text
-      // then degrades to interpolated time in [a,b] and later windows stay in sync.
+    if (!best) {
+      // All attempts empty. CRITICAL: advance the TEXT cursor too, not just the
+      // audio — skipping only audio re-feeds this window's text to the next window
+      // (the ~5-min shift). Advance cOff by the cps estimate so the skipped text
+      // degrades to interpolated time in [a,b] and later windows stay in sync.
+      degraded++;
+      console.log(`[${id}] alignLong 空窗 pass${pass} a=${a.toFixed(0)} b=${b.toFixed(0)} cOff=${cOff}（重试后仍空，按 cps 前进）`);
       if (!lastWin) cOff = Math.min(fullText.length, cOff + Math.max(1, Math.round(cps * (b - a))));
       a = b;
       continue;
     }
-    const k = lastWin ? u.length - 1 : reliableAlignEnd(u, a + SAFE);
-    // Map ONLY the reliable prefix, with a bounded search: mapping the collapsed
-    // tail races the cursor across repeated words and blows cOff to end-of-text,
-    // starving every later window (the "whole tail piled on one second" bug).
-    const lm = mapUnitsBounded(u.slice(0, k + 1), part);
-    for (let i = 0; i <= k; i++) { units.push(u[i]); map.push({ ci: cOff + lm[i].ci, cj: cOff + lm[i].cj }); }
+    const { u, k, lm } = best;
+    // Clamp every kept time into THIS window so no single unit can inject an
+    // out-of-window (huge forward) timestamp into the global map.
+    for (let i = 0; i <= k; i++) {
+      const st = clamp(u[i].start, a, b);
+      units.push({ text: u[i].text, start: st, end: clamp(u[i].end, st, b) });
+      map.push({ ci: cOff + lm[i].ci, cj: cOff + lm[i].cj });
+    }
     if (lastWin) break;
-    const nextA = u[k].end, nextC = cOff + lm[k].cj;
+    let nextA = u[k].end, nextC = cOff + lm[k].cj, action = "";
+    if (best.earlyPlateau) {
+      // Reliable prefix collapsed at the window start: advance audio + text together
+      // by the cps estimate (that span becomes interpolated) instead of trusting it.
+      const adv = Math.min(SAFE, total - a);
+      nextA = a + adv;
+      nextC = Math.min(fullText.length, cOff + Math.max(1, Math.round(cps * adv)));
+      action = "earlyPlateau→proportional";
+    } else if (best.lagging) {
+      // Audio advanced but text lagged: force the text cursor to track the audio span
+      // so stale text is NOT re-fed to a later window (this span becomes interpolated).
+      nextC = Math.min(fullText.length, cOff + Math.max(1, Math.round(cps * (nextA - a))));
+      action = "textLag→trackAudio";
+    }
+    if (best.bad) {
+      // Diagnostic: capture the failing window so a test-machine reproduction gives
+      // the raw evidence (which shape, whether the guard fired) instead of a guess.
+      degraded++;
+      const w0 = best.u[0] || {};
+      console.log(`[${id}] alignLong 窗降级 pass${pass} ${action} a=${a.toFixed(0)} b=${b.toFixed(0)} cOff=${cOff} units=${best.u.length} k=${k} covA=${best.covA.toFixed(0)}s covC=${best.covC} expC=${Math.round(best.expC)} matchRate=${best.matchRate.toFixed(2)} 首unit="${(w0.text || "").slice(0, 16)}"@${(w0.start || 0).toFixed(1)}`);
+    }
     if (nextA <= a + 1 || nextC <= cOff) { a = b; cOff = Math.max(nextC, cOff + 1); continue; } // no-progress guard
     cps = (nextC - cOff) / Math.max(0.5, nextA - a);
     a = nextA; cOff = nextC;
   }
+  if (degraded) console.log(`[${id}] alignLong 完成：${degraded} 个窗判定降级并已按 cps 兜底前进（正常应为 0）`);
   return { units, map };
 }
 
@@ -2218,9 +2295,13 @@ async function runJob(id) {
         const { units, map } = await alignLong(
           alignSlice, fullText, alignTotal,
           (frac) => setP(55 + Math.round(30 * frac), "词级对齐"),
+          id,
         );
         console.log(`[${id}] 词级对齐(alignLong)完成：${units.length} 个单元，音频≈${Math.round(alignTotal)}s`);
         if (!units.length) throw new Error("对齐无结果");
+        // Smooth the aligner's local burst-then-gap micro-collapses so highlight
+        // advances evenly instead of racing a run of words then stalling at a pause.
+        deburstUnits(units);
 
         timer.begin("整理结果");
         setP(85, "整理结果");
