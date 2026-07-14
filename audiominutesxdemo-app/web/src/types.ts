@@ -54,6 +54,9 @@ export interface RecordOptions {
   segmentedStt: boolean;
   translate?: boolean;
   enhance?: boolean;
+  // Upper bound on speakers for diarization (0 = 自动/不限). Same "最多" semantics as
+  // 重新识别说话人 — a maximum, never a forced count.
+  maxSpeakers?: number;
 }
 
 export interface RecordSummary {

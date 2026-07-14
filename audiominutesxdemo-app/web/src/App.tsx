@@ -1012,6 +1012,7 @@ function RecordDetail({
   const [optSeg, setOptSeg] = useState(false);
   const [optTr, setOptTr] = useState(false);
   const [optEnh, setOptEnh] = useState(false);
+  const [optMaxSpk, setOptMaxSpk] = useState(0); // 0 = 自动/不限；>0 = 最多这么多人
   const [showOpts, setShowOpts] = useState(false);
   // Translation UI is entirely hidden unless the global feature is ON. `available`
   // additionally requires a translate model (needed to actually run 补翻译).
@@ -1107,6 +1108,7 @@ function RecordDetail({
     setOptSeg(fresh ? !!config.segmentedStt : (o?.segmentedStt ?? !!config.segmentedStt));
     setOptTr(fresh ? !!config.translate?.enabled : (o?.translate ?? !!config.translate?.enabled));
     setOptEnh(fresh ? !!config.enhance?.enabled : (o?.enhance ?? !!config.enhance?.enabled));
+    setOptMaxSpk(fresh ? 0 : (o?.maxSpeakers ?? 0));
   }, [rec, config]);
 
   // Normalize word times so EVERY word is clickable/highlightable even on older
@@ -1281,7 +1283,7 @@ function RecordDetail({
       if (bySentence) {
         sents = s.words && s.words.length ? splitSentencesByWords(s.words) : splitSentencesByText(s.text || "", +s.start, +s.end);
         if (!sents.length) sents = [{ text: s.text || "", start: +s.start, end: +s.end, words: s.words || [] }];
-      } else {
+          } else {
         sents = [{ text: s.text || "", start: +s.start, end: +s.end, words: s.words || [] }];
       }
       metas.push(sents.map((x) => ({ start: x.start, end: x.end, origText: x.text, origWords: x.words })));
@@ -1579,7 +1581,7 @@ function RecordDetail({
 
   async function doTranscribe() {
     try {
-      await api.transcribeRecord(id, { language: optLang, segmentedStt: optSeg, translate: optTr, enhance: optEnh });
+      await api.transcribeRecord(id, { language: optLang, segmentedStt: optSeg, translate: optTr, enhance: optEnh, maxSpeakers: optMaxSpk });
       setShowOpts(false);
       await load(); onChanged();
     } catch (e: any) { setErr(String(e?.message || e)); }
@@ -1964,6 +1966,15 @@ function RecordDetail({
               <option value="ja">日本語 ja</option>
               <option value="ko">한국어 ko</option>
               <option value="yue">粤语 yue</option>
+            </select>
+          </label>
+          <label className="flex items-center gap-2" title="上限而非强制；实际人数更少时以实际为准（与「重新识别说话人」一致）">
+            <span className="shrink-0 whitespace-nowrap text-neutral-400">最多说话人</span>
+            <select className="input !w-auto py-1" value={optMaxSpk} onChange={(e) => setOptMaxSpk(Math.max(0, Math.floor(Number(e.target.value) || 0)))}>
+              <option value={0}>自动</option>
+              {Array.from({ length: 10 }, (_, i) => i + 1).map((n) => (
+                <option key={n} value={n}>{n} 人</option>
+              ))}
             </select>
           </label>
           <label className="flex items-center gap-2">
@@ -2400,7 +2411,7 @@ function ClipEditor({
       if (b - a < 0.2) {
         // treat as a click: seek preview there
         if (el) { try { el.currentTime = a; } catch { /* ignore */ } }
-      } else {
+    } else {
         const n = new Set(selected);
         segs.forEach((s, i) => { if (s.end > a && s.start < b) n.add(i); });
         if (n.size !== selected.size) commit(n);
@@ -2428,13 +2439,13 @@ function ClipEditor({
         <div className="flex flex-1 items-center gap-1.5 rounded-md border border-emerald-700/60 bg-neutral-800 px-2 focus-within:border-emerald-500">
           <span className="shrink-0 text-xs text-emerald-400">片段名称</span>
           <input className="min-w-0 flex-1 bg-transparent py-1.5 text-sm text-neutral-100 focus:outline-none" placeholder="给这个片段起个名字" value={title} onChange={(e) => setTitle(e.target.value)} />
-        </div>
+            </div>
         <div className="relative w-52 shrink-0">
           <svg className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <circle cx="11" cy="11" r="7" /><path d="m21 21-4.3-4.3" />
           </svg>
           <input className="input w-full py-1.5 pl-8 text-sm" placeholder="搜索转录内容" value={q} onChange={(e) => setQ(e.target.value)} />
-        </div>
+          </div>
       </div>
       <label className="mb-1 flex cursor-pointer items-center gap-2 border-b border-neutral-800 pb-1.5 text-xs text-neutral-300">
         <input type="checkbox" className="h-4 w-4" checked={allSelected} ref={(el) => { if (el) el.indeterminate = selected.size > 0 && !allSelected; }} onChange={toggleAll} />
@@ -2505,7 +2516,7 @@ function ClipEditor({
                 ? Array.from({ length: NTHUMB }).map((_, i) => (
                     <div key={i} className="h-full flex-1 border-r border-black/30 bg-neutral-900/40">
                       {thumbs[i] && <img src={thumbs[i]} className="h-full w-full object-cover opacity-70" />}
-                    </div>
+              </div>
                   ))
                 : <div className="h-full w-full bg-gradient-to-r from-neutral-800 to-neutral-700" />}
             </div>
@@ -2516,9 +2527,9 @@ function ClipEditor({
             ))}
             {tentative && tentative.end > tentative.start && (
               <div className="pointer-events-none absolute top-0 h-full bg-emerald-500/30 ring-1 ring-inset ring-emerald-400" style={{ left: `${pct(tentative.start)}%`, width: `${pct(tentative.end - tentative.start)}%` }} />
-            )}
+              )}
             <div className="pointer-events-none absolute top-0 h-full w-0.5 bg-red-500" style={{ left: `${pct(curT)}%` }} />
-          </div>
+            </div>
           <div className="mt-0.5 flex justify-between text-[10px] text-neutral-500"><span>0:00</span><span>{clock(dur)}</span></div>
 
           <div className="mt-2.5 flex items-center gap-2">
@@ -2530,15 +2541,15 @@ function ClipEditor({
             )}
             <span className="ml-2 text-xs text-neutral-400">
               {ranges.length ? `${ranges.length} 段区间 · 合计 ${clock(total)} · ${continuous ? "连续" : "非连续"}${skipOn && savedSec >= 1 ? ` · 已省 ${clock(savedSec)}` : ""}` : "未选择"}
-            </span>
+                </span>
             <button className="btn-ghost ml-auto" onClick={onClose} disabled={busy}>取消</button>
             <button className="btn-primary disabled:opacity-40" onClick={create} disabled={busy || !ranges.length}>{busy ? "生成中…" : "保存"}</button>
           </div>
           {err && <div className="mt-2 rounded bg-red-950/60 px-3 py-2 text-sm text-red-300">{err}</div>}
         </div>
       </div>
-    </div>
-  );
+              </div>
+            );
 }
 
 // Transcript speaker-chip popover. Two independent actions:
@@ -2565,7 +2576,7 @@ function SpeakerPopover({
   const [newName, setNewName] = useState("");
   const [newColor, setNewColor] = useState(() => nextFreeColor(participants.map((p) => colorFor(p, colors))));
   const submitNew = () => { if (newName.trim()) onReassignNew(newName.trim(), newColor); };
-  return (
+              return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
       <div className="w-80 rounded-lg border border-neutral-700 bg-neutral-900 p-4 shadow-xl" onClick={(e) => e.stopPropagation()}>
         {!isUnknown && (
@@ -2573,7 +2584,7 @@ function SpeakerPopover({
             <div className="mb-1 text-sm font-medium text-neutral-200">重命名说话人</div>
             <div className="mb-1 text-[11px] text-neutral-500">影响该说话人的全部发言</div>
             <div className="flex gap-2">
-              <input
+                    <input
                 autoFocus
                 className="flex-1 rounded border border-neutral-700 bg-neutral-800 px-2 py-1 text-sm text-neutral-100 focus:border-emerald-500 focus:outline-none"
                 value={name}
@@ -2590,7 +2601,7 @@ function SpeakerPopover({
           <div className="flex flex-wrap gap-1.5">
             {others.map((p) => {
               const c = colorFor(p, colors);
-              return (
+                      return (
                 <button key={p} className="inline-flex items-center gap-1 rounded-full py-0.5 pl-0.5 pr-2 text-xs hover:brightness-125" style={{ backgroundColor: c + "22", border: `1px solid ${c}55` }} onClick={() => onReassign(p)}>
                   <span className="flex h-5 w-5 items-center justify-center rounded-full text-[10px] font-semibold text-white" style={{ backgroundColor: c }}>{spkInitial(p, names)}</span>
                   <span className="text-neutral-200">{spkLabel(p, names)}</span>
@@ -2609,7 +2620,7 @@ function SpeakerPopover({
           {adding && (
             <div className="mt-2 rounded-md border border-neutral-800 bg-neutral-800/40 p-2">
               <div className="flex gap-2">
-                <input
+                        <input
                   autoFocus
                   className="min-w-0 flex-1 rounded border border-neutral-700 bg-neutral-800 px-2 py-1 text-sm text-neutral-100 focus:border-emerald-500 focus:outline-none"
                   placeholder="新参与者名字"
@@ -2632,7 +2643,7 @@ function SpeakerPopover({
                 <label className="relative flex h-5 w-5 cursor-pointer items-center justify-center rounded-full border border-dashed border-neutral-500 text-[10px] text-neutral-400" title="自定义颜色" style={{ backgroundColor: SPK_COLORS.includes(newColor) ? undefined : newColor }}>
                   {SPK_COLORS.includes(newColor) ? "+" : ""}
                   <input type="color" value={newColor} className="absolute inset-0 cursor-pointer opacity-0" onChange={(e) => setNewColor(e.target.value)} />
-                </label>
+                      </label>
               </div>
             </div>
           )}
@@ -2641,8 +2652,8 @@ function SpeakerPopover({
           <button className="rounded px-3 py-1 text-sm text-neutral-400 hover:text-neutral-200" onClick={onClose}>关闭</button>
         </div>
       </div>
-    </div>
-  );
+                        </div>
+                      );
 }
 
 // Small centered modal to enter/edit a speaker or participant name (Feishu-style).
@@ -2662,7 +2673,7 @@ function NameModal({
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
       <div className="w-80 rounded-lg border border-neutral-700 bg-neutral-900 p-4 shadow-xl" onClick={(e) => e.stopPropagation()}>
         <div className="mb-2 text-sm font-medium text-neutral-200">{title}</div>
-        <input
+                            <input
           autoFocus
           className="input w-full"
           value={name}
@@ -2685,7 +2696,7 @@ function NameModal({
             <label className="relative flex h-6 w-6 cursor-pointer items-center justify-center rounded-full border border-dashed border-neutral-500 text-[10px] text-neutral-400" title="自定义颜色" style={{ backgroundColor: SPK_COLORS.includes(color) ? undefined : color }}>
               {SPK_COLORS.includes(color) ? "+" : ""}
               <input type="color" value={color} className="absolute inset-0 cursor-pointer opacity-0" onChange={(e) => setColor(e.target.value)} />
-            </label>
+                          </label>
           </div>
         </div>
         <div className="mt-3 flex justify-end gap-2">
@@ -2693,8 +2704,8 @@ function NameModal({
           <button className="btn-primary" disabled={!name.trim()} onClick={submit}>确认</button>
         </div>
       </div>
-    </div>
-  );
+                        </div>
+                      );
 }
 
 // Feishu-style control strip that sits just under the native player: -15s / +15s,
@@ -2738,8 +2749,8 @@ function PlayerBar({
         )}
       </div>
       <button onClick={onSetCover} className={btn} title="设置封面">🖼 设置封面</button>
-    </div>
-  );
+                </div>
+              );
 }
 
 // Draw a video frame (at its current time) to a JPEG data URL, capped to maxW wide.
@@ -2871,7 +2882,7 @@ function CoverModal({
         <div className="flex items-center justify-between border-b border-neutral-800 px-4 py-3">
           <div className="text-base font-medium text-neutral-100">设置封面</div>
           <button className="rounded px-2 text-neutral-400 hover:bg-neutral-800" onClick={onClose}>✕</button>
-        </div>
+          </div>
 
         <div className="flex gap-1 border-b border-neutral-800 px-2">
           {isVideo && tabBtn("rec", "系统推荐")}
@@ -2890,7 +2901,7 @@ function CoverModal({
                   className={`overflow-hidden rounded-lg border-2 ${sel === u ? "border-emerald-500" : "border-transparent hover:border-neutral-600"}`}
                 >
                   <img src={u} className="aspect-video w-full object-cover" />
-                </button>
+            </button>
               ))}
             </div>
           )}
@@ -2911,7 +2922,7 @@ function CoverModal({
                     <img src={s.url} className="h-12 w-20 object-cover" />
                   </button>
                 ))}
-              </div>
+          </div>
               <div className="flex items-center gap-2">
                 <button
                   className="rounded bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:brightness-110"
@@ -2925,7 +2936,7 @@ function CoverModal({
                 <div className="flex items-center gap-2">
                   <span className="text-xs text-neutral-400">已选:</span>
                   <img src={sel} className="h-16 rounded border border-emerald-500 object-cover" />
-                </div>
+              </div>
               )}
             </div>
           )}
@@ -2959,7 +2970,7 @@ function CoverModal({
             title={rec.hasCover ? "移除封面,恢复默认" : "当前没有自定义封面"}
           >
             取消封面(恢复默认)
-          </button>
+              </button>
           <div className="flex items-center gap-2">
             <button className="rounded px-3 py-1.5 text-sm text-neutral-300 hover:bg-neutral-800" onClick={onClose} disabled={busy}>取消</button>
             <button
@@ -2968,10 +2979,10 @@ function CoverModal({
               disabled={busy || !chosen}
             >
               {busy ? "保存中…" : "确定"}
-            </button>
-          </div>
-        </div>
-      </div>
+              </button>
+            </div>
+                </div>
+              </div>
     </div>
   );
 }
@@ -3110,7 +3121,7 @@ function ClipList({ clips, onOpen, kind, onCreate }: { clips: RecordSummary[]; o
       <div className="mb-2 flex items-center justify-end gap-1 text-xs">
         <button className={`rounded px-1.5 py-0.5 ${view === "card" ? "bg-neutral-800 text-neutral-100" : "text-neutral-500 hover:text-neutral-300"}`} title="卡片视图" onClick={() => setV("card")}>▦ 卡片</button>
         <button className={`rounded px-1.5 py-0.5 ${view === "list" ? "bg-neutral-800 text-neutral-100" : "text-neutral-500 hover:text-neutral-300"}`} title="列表视图" onClick={() => setV("list")}>☰ 列表</button>
-      </div>
+            </div>
       {view === "card" ? (
         <div className="grid gap-3" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${minW}px, 1fr))` }}>
           {clips.map((c) => (
@@ -3173,7 +3184,7 @@ function SpeakerStats({ rec }: { rec: RecordFull }) {
             <div className="mb-0.5 flex items-center gap-2">
               <SpeakerChip spk={spk} names={names} colors={colors} />
               <span className="ml-auto tabular-nums text-neutral-400">{pct}%</span>
-            </div>
+          </div>
             <div className="h-1.5 w-full overflow-hidden rounded bg-neutral-800">
               <div className="h-full rounded" style={{ width: `${pct}%`, background: colorFor(spk, colors) }} />
             </div>
@@ -3221,7 +3232,7 @@ function CoverThumb({ r, className }: { r: RecordSummary; className?: string }) 
       {r.clipOf && (
         <span className="absolute left-0.5 top-0.5 rounded bg-sky-600/90 px-1 text-[10px] font-medium leading-tight text-white" title={r.continuous ? "连续片段" : "非连续片段"}>
           ✂️ 片段{r.continuous === false ? "·非连续" : ""}
-        </span>
+          </span>
       )}
       {r.status === "generating" && (
         <span className="absolute inset-0 flex items-center justify-center bg-black/45 text-xs text-sky-200">
@@ -3346,10 +3357,10 @@ export default function App() {
   // Status + primary action for a record — shared by the grid and list views.
   const statusActions = (r: RecordSummary) => {
     if (r.status === "generating") {
-      return (
+  return (
         <span className="flex-1 truncate text-xs text-sky-400">
           <span className="mr-1 inline-block animate-pulse">●</span>片段生成中…
-        </span>
+            </span>
       );
     }
     if (r.status === "preparing") {
@@ -3358,16 +3369,16 @@ export default function App() {
           <div className="min-w-0 flex-1">
             <div className="mb-1 truncate text-xs text-sky-400">
               <span className="mr-1 inline-block animate-pulse">●</span>{statusText(r)}
-            </div>
+          </div>
             <div className="h-1.5 w-full overflow-hidden rounded bg-neutral-800">
               <div className="h-full bg-sky-500 transition-[width] duration-500" style={{ width: `${r.progress || 3}%` }} />
             </div>
-          </div>
-        </div>
-      );
-    }
+      </div>
+    </div>
+  );
+}
     if (r.status === "processing") {
-      return (
+  return (
         <div className="flex flex-1 items-center gap-2">
           <div className="min-w-0 flex-1">
             <div className="mb-1 truncate text-xs text-amber-400">{statusText(r)}</div>
@@ -3383,19 +3394,19 @@ export default function App() {
           >
             {busyIds.has(r.id) ? "…" : "停止"}
           </button>
-        </div>
-      );
-    }
+    </div>
+  );
+}
     if (r.status === "done") {
       const warns = (r.notices || []).filter((n) => n.level !== "info").length;
-      return (
+  return (
         <>
           <span className="min-w-0 flex-1 truncate text-xs text-emerald-400">
             已完成 · {r.speakers} 位说话人
             {warns > 0 && (
               <span className="ml-1.5 rounded bg-amber-950/60 px-1 py-0.5 text-[10px] text-amber-300" title="本次处理有提示,点开查看「处理记录」">
                 ⚠ {warns} 条提示
-              </span>
+            </span>
             )}
           </span>
           {!r.clipOf && (
@@ -3412,7 +3423,7 @@ export default function App() {
       );
     }
     if (r.status === "error") {
-      return (
+          return (
         <>
           <span className="min-w-0 flex-1 truncate text-xs text-red-400" title={r.error}>失败:{r.error}</span>
           {!r.clipOf && (
@@ -3540,14 +3551,14 @@ export default function App() {
               <button className="btn-primary" onClick={() => fileRef.current?.click()} disabled={uploadPct != null}>
                 ＋ {(config?.autoTranscribe ?? true) ? "上传并转录" : "上传音视频"}
               </button>
+              </div>
             </div>
-          </div>
 
           {err && (
             <div className="mb-3 flex items-start gap-2 rounded bg-red-950/60 px-3 py-2 text-sm text-red-300">
               <span className="min-w-0 flex-1">{err}</span>
               <button className="shrink-0 rounded px-1 text-red-300 hover:bg-red-900/60 hover:text-red-100" title="关闭" onClick={() => setErr("")}>✕</button>
-            </div>
+      </div>
           )}
 
           {records.length === 0 ? (

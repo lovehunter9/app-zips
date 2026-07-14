@@ -1,0 +1,23 @@
+---
+alwaysApply: true
+---
+
+# 本地起/重启服务（用户指定端口时）
+
+当用户说「在某端口上(重)启动服务」（例如「在 8090 上重启服务」）时，**必须**一次成功，禁止让用户重复指导：
+
+1. **禁止探测端口是否被占用**，也不要问。直接**无条件干掉该端口上的一切**：
+   `lsof -ti :<PORT> | xargs -r kill -9` 外加 `pkill -9 -f` 匹配该服务进程。
+2. **必须在沙盒外**运行（Shell 工具 `required_permissions: ["all"]`），否则进程连不上外部网络（如 LLM 网关）。
+3. **必须作为「受管理的后台 shell 作业」启动**：直接把 `node server.js`（不加 `nohup`/`&`/
+   `setsid`/`disown`）作为 Shell 工具命令，并设 `block_until_ms: 0`。
+   ⚠ 教训：`nohup … & disown` / `setsid` 这类自行脱离的方式，工具调用结束后会被连带回收，
+   服务起来几秒就没——**别再用**。让 Shell 工具自己托管这个长驻进程才不会被杀。
+4. 起完后**另起一次** Shell 做单次监听检查（`lsof -iTCP:<PORT> -sTCP:LISTEN`），不要反复轮询。
+
+## audiominutesxdemo 专用
+
+- 工作目录：`audiominutesxdemo-app`
+- 启动命令：`DATA_DIR=./data PORT=<PORT> APP_VERSION=<版本标记> node server.js`
+- 数据目录固定 `./data`（保留用户已有记录）；日志 `/tmp/audiominutes_<PORT>.log`
+- 部署到测试机/上架**永远是用户手动**，AI 只负责本地代码、打包、本地起服务。

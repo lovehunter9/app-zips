@@ -248,7 +248,7 @@ function recordSummary(rec) {
     createdAt: rec.createdAt,
     speakers: rec.result?.speakers?.length || 0,
     segments: rec.result?.segments?.length || 0,
-    options: rec.options || { language: "auto", segmentedStt: false, translate: false, enhance: false },
+    options: rec.options || { language: "auto", segmentedStt: false, translate: false, enhance: false, maxSpeakers: 0 },
     translated: !!(rec.result?.segments || []).some((s) => s.translation),
     jobKind: rec.jobKind || "full",
     notices: Array.isArray(rec.notices) ? rec.notices : [],
@@ -946,6 +946,8 @@ function debugReportData(rec) {
   const d = rec.debug || {};
   const align = d.align || null;
   const spans = Array.isArray(align?.interpSpans) ? align.interpSpans : [];
+  const uncovered = Array.isArray(align?.uncoveredSpans) ? align.uncoveredSpans : [];
+  const candidates = Array.isArray(align?.candidateSpans) ? align.candidateSpans : [];
   const segs = Array.isArray(rec.result?.segments) ? rec.result.segments : [];
   const names = rec.result?.speakerNames || {};
   const interpAt = (s) => spans.some((sp) => Math.min(+s.end, sp.b) - Math.max(+s.start, sp.a) > 0.05);
@@ -956,7 +958,7 @@ function debugReportData(rec) {
   }));
   const interpCount = segRows.filter((r) => r.interp).length;
   const interpSecs = spans.reduce((n, sp) => n + Math.max(0, sp.b - sp.a), 0);
-  return { d, align, spans, segRows, interpCount, interpSecs };
+  return { d, align, spans, uncovered, candidates, segRows, interpCount, interpSecs };
 }
 const mmss = (sec) => {
   let s = Math.max(0, Math.round(sec || 0));
@@ -966,7 +968,8 @@ const mmss = (sec) => {
   return h ? `${h}:${p(m)}:${p(s)}` : `${m}:${p(s)}`;
 };
 function debugReportText(rec) {
-  const { d, align, spans, segRows, interpCount, interpSecs } = debugReportData(rec);
+  const { d, align, spans, uncovered, candidates, segRows, interpCount, interpSecs } = debugReportData(rec);
+  const uncReason = (r) => (r === "badcand" ? "候选时间不合理→插值" : "无对齐候选");
   const L = [];
   L.push(`详细处理记录 — ${rec.title || rec.id}`);
   L.push("=".repeat(60));
@@ -980,7 +983,7 @@ function debugReportText(rec) {
   L.push(`模型 对齐    ${d.models?.align || "—"}`);
   L.push(`模型 分离    ${d.models?.diar || "—"}`);
   L.push(`模型 翻译    ${d.models?.translate || "—"}`);
-  L.push(`选项         分段转写=${d.options?.segmentedStt ? "开" : "关"} · 转写时翻译=${d.options?.translate ? "开" : "关"} · 降噪=${d.options?.enhance ? "开" : "关"}`);
+  L.push(`选项         分段转写=${d.options?.segmentedStt ? "开" : "关"} · 转写时翻译=${d.options?.translate ? "开" : "关"} · 降噪=${d.options?.enhance ? "开" : "关"} · 最多说话人=${d.options?.maxSpeakers ? d.options.maxSpeakers + "人" : "自动"}`);
   L.push(`分离窗口     ${d.diarWindows ?? "—"} 段`);
   L.push(`整段STT字数  ${d.sttChars || 0}   对齐单元 ${d.unitCount || 0}   最终分段 ${d.segCount ?? segRows.length}`);
   if (d.fallbackError) L.push(`回退原因     ${d.fallbackError}`);
@@ -1000,6 +1003,10 @@ function debugReportText(rec) {
   } else {
     L.push(`  初始窗=${align.winInit}s 安全区=${align.safe}s 最小窗=${align.minWin}s`);
     L.push(`  缩窗次数=${align.shrinks}  降级/插值窗=${align.degraded}  插值区间=${spans.length} 段  插值总时长≈${mmss(interpSecs)}`);
+    if (align.totalChars != null) {
+      const uc = align.uncoveredChars || 0;
+      L.push(`  字符覆盖   总 ${align.totalChars} 字 · 真实对齐+候选救回 ${align.coveredChars ?? "—"} 字（其中候选救回 ${align.rescuedChars || 0} 字）· 无对齐候选(纯插值) ${uc} 字 / ${uncovered.length} 段${uc ? "  ⚠" : "  ✓"}`);
+    }
     L.push("");
     L.push(`  ${"#".padStart(3)} ${"区间".padEnd(15)} ${"窗长".padStart(5)} ${"单元".padStart(5)} ${"covA".padStart(6)} ${"covC".padStart(6)} ${"匹配".padStart(5)}  结果`);
     for (const r of align.rows || []) {
@@ -1010,6 +1017,24 @@ function debugReportText(rec) {
       L.push("");
       L.push("  插值区间（这些音频时间段的字幕时间为估算，可能不准）:");
       for (const sp of spans) L.push(`    ${mmss(sp.a)} – ${mmss(sp.b)}  (${Math.round(sp.b - sp.a)}s, ${sp.reason})`);
+    }
+    if (candidates.length) {
+      L.push("");
+      L.push("  采用候选时间的字/词（时间取自其它对齐尝试的候选，非本窗真实对齐，可能飘移）:");
+      for (const u of candidates) {
+        const t = (u.text || "").replace(/\s+/g, " ");
+        const shown = t.length > 60 ? t.slice(0, 60) + "…" : t;
+        L.push(`    ${mmss(u.tStart)}–${mmss(u.tEnd)}  字[${u.c0}–${u.c1})  「${shown}」`);
+      }
+    }
+    if (uncovered.length) {
+      L.push("");
+      L.push("  ⚠ 未获真实对齐的字/词（已线性插值兜底，需人工核对）:");
+      for (const u of uncovered) {
+        const t = (u.text || "").replace(/\s+/g, " ");
+        const shown = t.length > 60 ? t.slice(0, 60) + "…" : t;
+        L.push(`    [${uncReason(u.reason)}] 字[${u.c0}–${u.c1}) ${u.c1 - u.c0}字  ${mmss(u.tStart)}–${mmss(u.tEnd)}  「${shown}」`);
+      }
     }
   }
   L.push("");
@@ -1027,7 +1052,8 @@ function debugReportText(rec) {
   return L.join("\n");
 }
 function debugReportHtml(rec) {
-  const { d, align, spans, segRows, interpCount, interpSecs } = debugReportData(rec);
+  const { d, align, spans, uncovered, candidates, segRows, interpCount, interpSecs } = debugReportData(rec);
+  const uncReason = (r) => (r === "badcand" ? "候选时间不合理→插值" : "无对齐候选");
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   const kv = (k, v) => `<div class="kv"><span class="k">${esc(k)}</span><span class="v">${v}</span></div>`;
   const tim = d.timings || rec.timings || {};
@@ -1038,6 +1064,9 @@ function debugReportHtml(rec) {
     return `<tr class="${interp ? "bad" : shrink ? "warn" : ""}"><td class="num">${r.pass}</td><td>${mmss(r.a)}→${mmss(r.b)}</td><td class="num">${r.winLen}s</td><td class="num">${r.n}</td><td class="num">${r.covA == null ? "–" : r.covA + "s"}</td><td class="num">${r.covC == null ? "–" : r.covC}</td><td class="num">${r.matchRate == null ? "–" : r.matchRate.toFixed(2)}</td><td>${esc(r.outcome)}</td></tr>`;
   }).join("") : "";
   const spansHtml = spans.map((sp) => `<li><code>${mmss(sp.a)} – ${mmss(sp.b)}</code> · ${Math.round(sp.b - sp.a)}s · ${esc(sp.reason)}</li>`).join("");
+  const uncovChars = align?.uncoveredChars || 0;
+  const uncovHtml = uncovered.map((u) => { const t = (u.text || "").replace(/\s+/g, " "); return `<tr><td>${esc(uncReason(u.reason))}</td><td class="num">${u.c0}–${u.c1}</td><td class="num">${u.c1 - u.c0}</td><td>${mmss(u.tStart)}–${mmss(u.tEnd)}</td><td>${esc(t)}</td></tr>`; }).join("");
+  const candHtml = candidates.map((u) => { const t = (u.text || "").replace(/\s+/g, " "); return `<tr><td>${mmss(u.tStart)}–${mmss(u.tEnd)}</td><td class="num">${u.c0}–${u.c1}</td><td>${esc(t)}</td></tr>`; }).join("");
   const segHtml = segRows.map((r) => `<tr class="${r.interp ? "bad" : ""}"><td class="num">${r.i}</td><td class="num">${r.interp ? "⚠" : ""}</td><td>${mmss(r.start)}→${mmss(r.end)}</td><td class="num">${Math.round(r.end - r.start)}s</td><td>${esc(r.speaker)}</td><td>${esc(r.text)}</td></tr>`).join("");
   const notices = (rec.notices || []).map((n) => `<li class="lv-${esc(n.level || "info")}"><b>${esc(n.level || "info")}</b> ${esc(n.msg || n.text || "")}</li>`).join("");
   const pill = d.punctuated === null || d.punctuated === undefined ? "—" : d.punctuated ? "按标点" : "按停顿/说话人/长度";
@@ -1075,7 +1104,7 @@ ul{margin:6px 0;padding-left:20px}
   <a href="?format=txt" download>⬇ 下载 TXT</a>
   <span class="note">调试用页面 · 正式发布前移除</span>
 </div>
-<h1>详细处理记录 <span class="badge">${esc(rec.kind === "video" ? "视频" : "音频")}</span>${interpCount ? `<span class="badge bad-badge">⚠ ${interpCount} 段落在插值区间</span>` : ""}</h1>
+<h1>详细处理记录 <span class="badge">${esc(rec.kind === "video" ? "视频" : "音频")}</span>${interpCount ? `<span class="badge bad-badge">⚠ ${interpCount} 段落在插值区间</span>` : ""}${uncovChars ? `<span class="badge bad-badge">⚠ ${uncovChars} 字无对齐时间戳</span>` : ""}</h1>
 <div class="sub">${esc(rec.title || rec.id)} · 生成于 ${esc(d.builtAt || "—")}${d.version ? " · 版本 " + esc(d.version) : ""}</div>
 
 <h2>概览</h2>
@@ -1089,7 +1118,7 @@ ${kv("STT 模型", esc(d.models?.stt || "—"))}
 ${kv("对齐模型", esc(d.models?.align || "—"))}
 ${kv("分离模型", esc(d.models?.diar || "—"))}
 ${kv("翻译模型", esc(d.models?.translate || "—"))}
-${kv("选项", `分段=${d.options?.segmentedStt ? "开" : "关"} · 翻译=${d.options?.translate ? "开" : "关"} · 降噪=${d.options?.enhance ? "开" : "关"}`)}
+${kv("选项", `分段=${d.options?.segmentedStt ? "开" : "关"} · 翻译=${d.options?.translate ? "开" : "关"} · 降噪=${d.options?.enhance ? "开" : "关"} · 最多说话人=${d.options?.maxSpeakers ? d.options.maxSpeakers + "人" : "自动"}`)}
 ${kv("分离窗口", (d.diarWindows ?? "—") + " 段")}
 ${kv("STT字数/单元/分段", `${d.sttChars || 0} / ${d.unitCount || 0} / ${d.segCount ?? segRows.length}`)}
 ${d.fallbackError ? kv("回退原因", `<span style="color:#f87171">${esc(d.fallbackError)}</span>`) : ""}
@@ -1099,9 +1128,11 @@ ${d.fallbackError ? kv("回退原因", `<span style="color:#f87171">${esc(d.fall
 ${steps ? `<table><thead><tr><th>阶段</th><th class="num">用时</th></tr></thead><tbody>${steps}<tr><td><b>合计</b></td><td class="num"><b>${esc(fmtMs(tim.totalMs || 0))}</b></td></tr></tbody></table>` : `<div class="empty">无耗时数据</div>`}
 
 <h2>对齐诊断</h2>
-${align ? `<div class="sub">初始窗 ${align.winInit}s · 安全区 ${align.safe}s · 最小窗 ${align.minWin}s · 缩窗 ${align.shrinks} 次 · 降级/插值窗 ${align.degraded} · 插值区间 ${spans.length} 段（≈${mmss(interpSecs)}）</div>
+${align ? `<div class="sub">初始窗 ${align.winInit}s · 安全区 ${align.safe}s · 最小窗 ${align.minWin}s · 缩窗 ${align.shrinks} 次 · 降级/插值窗 ${align.degraded} · 插值区间 ${spans.length} 段（≈${mmss(interpSecs)}）${align.totalChars != null ? ` · 字符覆盖 ${align.coveredChars}/${align.totalChars}（候选救回 ${align.rescuedChars || 0} 字，纯插值 ${uncovChars} 字）${uncovChars ? " ⚠" : " ✓"}` : ""}</div>
 <table><thead><tr><th class="num">#</th><th>音频区间</th><th class="num">窗长</th><th class="num">单元</th><th class="num">covA</th><th class="num">covC</th><th class="num">匹配率</th><th>结果</th></tr></thead><tbody>${rowsHtml}</tbody></table>
-${spans.length ? `<h3 style="font-size:13px;color:#fca5a5;margin:14px 0 4px">插值区间（此段时间为估算，字幕可能不准）</h3><ul>${spansHtml}</ul>` : ""}` : `<div class="empty">本次未走整段 alignLong 路径（分段转写或回退），无逐窗对齐轨迹。</div>`}
+${spans.length ? `<h3 style="font-size:13px;color:#fca5a5;margin:14px 0 4px">插值区间（此段时间为估算，字幕可能不准）</h3><ul>${spansHtml}</ul>` : ""}
+${candidates.length ? `<h3 style="font-size:13px;color:#fcd34d;margin:14px 0 4px">采用候选时间的字/词（时间取自其它对齐尝试的候选，非本窗真实对齐，可能飘移）</h3><table><thead><tr><th>估算时间</th><th class="num">字符区间</th><th>文本</th></tr></thead><tbody>${candHtml}</tbody></table>` : ""}
+${uncovered.length ? `<h3 style="font-size:13px;color:#fca5a5;margin:14px 0 4px">⚠ 未获真实对齐的字/词（已线性插值兜底，需人工核对）</h3><table><thead><tr><th>原因</th><th class="num">字符区间</th><th class="num">字数</th><th>估算时间</th><th>文本</th></tr></thead><tbody>${uncovHtml}</tbody></table>` : ""}` : `<div class="empty">本次未走整段 alignLong 路径（分段转写或回退），无逐窗对齐轨迹。</div>`}
 
 <h2>最终分段（${segRows.length} 段 · ⚠ ${interpCount} 段插值）</h2>
 <table><thead><tr><th class="num">#</th><th class="num">插值</th><th>时间</th><th class="num">时长</th><th>说话人</th><th>文本</th></tr></thead><tbody>${segHtml}</tbody></table>
@@ -1483,6 +1514,120 @@ function buildCharToTime(units, map) {
   };
 }
 
+// GUARANTEE EVERY 字/词 A TIMESTAMP. Committed align units pass through verbatim; the
+// chars BETWEEN them (mainly forward-retry "shed" spans, plus any trailing text) are
+// holes, filled PER CHAR by the best pooled candidate (GOOD-window units weighted high),
+// clamped monotonically into the seam. Coverage & alarm are judged at TOKEN granularity:
+// each CJK char is one 字, each Latin/digit run is one 词. A token is fine if ANY of its
+// chars got a real align time (a word-internal fragment like "nt"/"ed" inherits the
+// word's time); only a token with NO covered char is truly unaligned → interpolated and
+// listed in uncoveredSpans so the record alarms exactly which 字/词 were guessed.
+function resolveCoverage(units, map, pool, fullText, total) {
+  const N = fullText.length;
+  const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
+  const isVis = (c) => c >= 0 && c < N && /[\p{L}\p{N}]/u.test(fullText[c]);          // 字母/数字/汉字才算“字”
+  const isCJK = (c) => c >= 0 && c < N && /[\p{sc=Han}\p{sc=Hiragana}\p{sc=Katakana}\p{sc=Hangul}]/u.test(fullText[c]);
+  const order = units.map((_, i) => i).sort((x, y) => (map[x].ci - map[y].ci) || (map[x].cj - map[y].cj));
+  const cU = order.map((i) => units[i]);
+  const cM = order.map((i) => map[i]);
+  const outU = [], outM = [];
+  const covered = new Uint8Array(N);   // 1 = committed real time, 2 = pooled-candidate rescue
+  const rejected = new Uint8Array(N);  // a candidate EXISTED but its time was unreasonable → interpolated
+  const SEAM_TOL = 1.0;                // a candidate must land within the seam ±1s, else it is bogus
+
+  // Fill hole [g0,g1) (no committed unit) between seam times tPrev..tNext.
+  const fillGap = (g0, g1, tPrev, tNext) => {
+    g0 = clamp(Math.round(g0), 0, N); g1 = clamp(Math.round(g1), g0, N);
+    if (g1 <= g0) return;
+    const n = g1 - g0;
+    const T = new Float64Array(n), Q = new Float64Array(n).fill(-1);
+    // per-char best candidate from the pool (highest quality wins)
+    for (const u of pool) {
+      if (u.cj <= g0 || u.ci >= g1) continue;
+      const s = Math.max(g0, u.ci), e = Math.min(g1, u.cj), w = Math.max(1, u.cj - u.ci);
+      for (let c = s; c < e; c++) {
+        const k = c - g0;
+        if (u.q > Q[k]) { Q[k] = u.q; T[k] = u.t0 + (u.t1 - u.t0) * ((c + 0.5 - u.ci) / w); }
+      }
+    }
+    // anchors: left seam + every ACCEPTED candidate char + right seam, monotonic.
+    // A candidate whose time falls outside the seam ±SEAM_TOL is unreasonable (it would
+    // only pile at a seam edge) → dropped here, marked `rejected`, and interpolated.
+    const lo = Math.min(tPrev, tNext), hi = Math.max(tPrev, tNext);
+    const aC = [g0], aT = [tPrev];
+    for (let k = 0; k < n; k++) {
+      if (Q[k] < 0) continue;
+      if (T[k] < lo - SEAM_TOL || T[k] > hi + SEAM_TOL) { rejected[g0 + k] = 1; continue; }
+      aC.push(g0 + k + 0.5); aT.push(clamp(T[k], lo, hi)); if (!covered[g0 + k]) covered[g0 + k] = 2;
+    }
+    aC.push(g1); aT.push(tNext);
+    for (let i = 1; i < aT.length; i++) if (aT[i] < aT[i - 1]) aT[i] = aT[i - 1];
+    const timeAt = (c) => {
+      for (let i = 1; i < aC.length; i++) if (c <= aC[i]) { const p = aC[i - 1], q = aC[i]; return q <= p ? aT[i] : aT[i - 1] + (aT[i] - aT[i - 1]) * (c - p) / (q - p); }
+      return aT[aT.length - 1];
+    };
+    // emit word tokens over the hole, timed by timeAt (never all-on-one-timestamp)
+    const span = fullText.slice(g0, g1);
+    const re = /\S+/g; let m, any = false;
+    while ((m = re.exec(span))) {
+      any = true;
+      const ci = g0 + m.index, cj = ci + m[0].length;
+      let st = timeAt(ci), en = timeAt(cj);
+      if (en < st) en = st;
+      outU.push({ text: m[0], start: round3(st), end: round3(en) });
+      outM.push({ ci, cj });
+    }
+    if (!any) { outU.push({ text: span, start: round3(tPrev), end: round3(tNext) }); outM.push({ ci: g0, cj: g1 }); }
+  };
+
+  let prevCj = 0, prevT = cU.length ? cU[0].start : 0;
+  for (let k = 0; k < cU.length; k++) {
+    const ci = cM[k].ci, cj = cM[k].cj;
+    if (ci > prevCj) fillGap(prevCj, ci, prevT, cU[k].start);
+    outU.push(cU[k]); outM.push(cM[k]);
+    for (let c = Math.max(ci, prevCj); c < Math.min(cj, N); c++) covered[c] = 1;
+    prevCj = Math.max(prevCj, cj); prevT = cU[k].end;
+  }
+  if (N > prevCj) fillGap(prevCj, N, prevT, total);
+
+  // TOKEN-LEVEL coverage & alarm. Walk 字/词: CJK char = 1 token, Latin/digit run = 1
+  // token. A token with ANY covered char is OK; a fully-uncovered token is alarmed with
+  // a reason ('badcand' if it had a rejected candidate, else 'nocand'). Tokens that used
+  // a pooled candidate are also reported (candidateSpans) so drift can be located.
+  const tAt = buildCharToTime(outU, outM);
+  const uncoveredSpans = [], candidateSpans = [];
+  let visTotal = 0, uncoveredChars = 0, rescuedChars = 0, committedChars = 0;
+  let pend = null, cpend = null;
+  const flush = () => { if (pend) { uncoveredSpans.push({ c0: pend.c0, c1: pend.c1, text: fullText.slice(pend.c0, pend.c1), tStart: round3(tAt(pend.c0)), tEnd: round3(tAt(pend.c1)), reason: pend.reason }); pend = null; } };
+  const cflush = () => { if (cpend) { candidateSpans.push({ c0: cpend.c0, c1: cpend.c1, text: fullText.slice(cpend.c0, cpend.c1), tStart: round3(tAt(cpend.c0)), tEnd: round3(tAt(cpend.c1)) }); cpend = null; } };
+  let c = 0;
+  while (c < N) {
+    if (!isVis(c)) { c++; continue; }
+    let e;
+    if (isCJK(c)) e = c + 1;
+    else { e = c; while (e < N && isVis(e) && !isCJK(e)) e++; }   // one Latin/digit 词
+    let anyCov = false, anyCand = false, anyRej = false, vis = 0;
+    for (let k = c; k < e; k++) {
+      if (isVis(k)) { vis++; if (covered[k] === 2) rescuedChars++; else if (covered[k] === 1) committedChars++; }
+      if (covered[k]) anyCov = true;
+      if (covered[k] === 2) anyCand = true;
+      if (rejected[k]) anyRej = true;
+    }
+    visTotal += vis;
+    if (anyCand) { if (cpend) cpend.c1 = e; else cpend = { c0: c, c1: e }; } else cflush();
+    if (!anyCov) {
+      uncoveredChars += vis;
+      const reason = anyRej ? "badcand" : "nocand";
+      if (pend && pend.reason === reason) pend.c1 = e; else { flush(); pend = { c0: c, c1: e, reason }; }
+    } else flush();
+    c = e;
+  }
+  flush(); cflush();
+
+  const coveredChars = visTotal - uncoveredChars;
+  return { units: outU, map: outM, uncoveredSpans, candidateSpans, rescuedChars, committedChars, coveredChars, totalChars: visTotal };
+}
+
 // De-burst the aligner's local micro-collapses. At pauses (usually sentence ends)
 // Qwen's aligner packs several words into an impossibly short span (>~8 words/sec)
 // and leaves the freed time as a gap, so karaoke highlight RACES then STALLS. We
@@ -1551,14 +1696,22 @@ function reliableAlignEnd(units, tMax, N = 6, dt = 0.12) {
 //       to (reliable-end), so the audio cursor `a` and char cursor `cOff` are derived
 //       from the SAME aligned word and cannot drift apart — this is what actually
 //       prevents leading text (a lagging char cursor was the 1.0.11 collapse cause).
-// A window that still collapses: push its text start forward a little and retry (shed
-// any residual leading text); if that fails, interpolate that one span. No diar →
-// uniform char-rate + fixed WINMAX cuts. Network errors throw and abort. Returns
-// {units, map, diag} in fullText coords; every non-interpolated time is pure ALIGN.
+// A window that still collapses pushes its text start forward and retries; a collapsed
+// or empty window is interpolated in place (1.0.14 behaviour, untouched). The ONE thing
+// 1.0.14 threw away — the text a successful forward-retry SHEDS (the "flew-by" chars) —
+// is now rescued: every attempt's units seed a candidate pool (GOOD windows weighted
+// high), and resolveCoverage() gives each shed char the best pooled time, or interpolates
+// + ALARMS it in diag.uncoveredSpans if nothing covers it. Chars 1.0.14 timed correctly
+// are passed through verbatim. No diar → uniform char-rate + fixed WINMAX cuts. Network
+// errors throw and abort. Returns {units, map, diag}.
 async function alignLong(alignSlice, fullText, total, diarSegs, onProg, id = "") {
   const WINMAX = 230, SAFE = 230, MAXRETRY = 2;    // WINMAX < aligner horizon (~255s)
   const N = fullText.length;
   const units = [], map = [];
+  // Candidate pool: EVERY unit of EVERY attempt (good OR failed), in global chars.
+  // resolveCoverage() uses it to give every hole char the best available real time
+  // instead of dropping forward-retry "shed" text to zero.
+  const pool = [];
   const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
   const diag = { winInit: WINMAX, safe: SAFE, minWin: 0, rows: [], interpSpans: [], shrinks: 0, degraded: 0 };
 
@@ -1632,8 +1785,8 @@ async function alignLong(alignSlice, fullText, total, diarSegs, onProg, id = "")
     covA: best ? round3(best.covA) : null, covC: best ? best.covC : null,
     matchRate: best ? Math.round(best.matchRate * 100) / 100 : null, outcome,
   });
-  // Spread fullText[cStart,cEnd) linearly over [tStart,tEnd] as word tokens so an
-  // interpolated span never piles every char onto one timestamp.
+  // 1.0.14 interpolation: spread fullText[cStart,cEnd) linearly over [tStart,tEnd] as
+  // word tokens so a collapsed/empty span never piles every char on one timestamp.
   const emitInterp = (cStart, cEnd, tStart, tEnd) => {
     cStart = clamp(Math.round(cStart), 0, N); cEnd = clamp(Math.round(cEnd), cStart, N);
     if (cEnd <= cStart || tEnd <= tStart) return;
@@ -1674,6 +1827,8 @@ async function alignLong(alignSlice, fullText, total, diarSegs, onProg, id = "")
         console.log(`[${id}] alignLong 空窗 pass${pass} a=${a.toFixed(0)} b=${b.toFixed(0)} c0=${c0}`);
         row(b, "插值·空窗", null);
         diag.interpSpans.push({ a: round3(a), b: round3(b), reason: "空窗" });
+        // 1.0.14 exactly: interpolate [c0,cEnd). Any shed [cOff,c0) from a prior retry
+        // stays a hole → resolveCoverage() rescues it from GOOD-window candidates.
         const cEnd = lastWin ? N : clamp(Math.round(charAtTime(b)), c0 + 1, N);
         emitInterp(c0, cEnd, a, b);
         cOff = clamp(cEnd, c0, N); a = b; resolved = true; break;
@@ -1698,7 +1853,10 @@ async function alignLong(alignSlice, fullText, total, diarSegs, onProg, id = "")
         // (validated "早切无害"). Interpolating a good short prefix was the 660→883 bug.
         earlyPlateau = dense && covRel < 8;
       }
-      const lm = mapUnitsBounded(cur.slice(0, ck + 1), part);
+      // Map ALL units (sequential scan → prefix == reliable slice) so the pool can
+      // hold candidates for EVERY char this attempt touched, not just the kept prefix.
+      const lmFull = mapUnitsBounded(cur, part);
+      const lm = lmFull.slice(0, ck + 1);
       const covC = lm.length ? lm[lm.length - 1].cj : 0;
       const matched = lm.reduce((n, x) => n + (x.hit ? 1 : 0), 0);
       const matchRate = matched / Math.max(1, lm.length);
@@ -1707,9 +1865,21 @@ async function alignLong(alignSlice, fullText, total, diarSegs, onProg, id = "")
         lagging = dense && covRel > 20 && covC < 0.3 * expC;
         bad = earlyPlateau || lagging;
       }
+      // Record this attempt's units into the candidate pool ONLY to rescue forward-
+      // retry "shed" holes later. A GOOD window's units (incl. its over-provided tail,
+      // which aligns the shed text over its REAL audio) get a big quality bonus so a
+      // shed hole prefers them over a failed attempt's piled/collapsed times.
+      const addToPool = (isGood) => {
+        const bonus = isGood ? 10 : 0;
+        for (let i = 0; i < cur.length; i++) {
+          const gi = c0 + lmFull[i].ci, gj = c0 + lmFull[i].cj;
+          if (gj > gi) pool.push({ ci: gi, cj: gj, t0: cur[i].start, t1: Math.max(cur[i].start, cur[i].end), q: bonus + matchRate * 2 + (i <= ckRel ? 1 : 0) + (lmFull[i].hit ? 0.5 : 0) });
+        }
+      };
       const best = { u: cur, k: ck, lm, covA: covRel, covC, matchRate };
       if (bad && attempt < MAXRETRY) {
         retries++; diag.shrinks++;
+        addToPool(false);
         row(b, `前移重试 +${PUSH}字（${earlyPlateau ? "塌窗" : "文本滞后"}）`, best);
         continue;
       }
@@ -1717,13 +1887,18 @@ async function alignLong(alignSlice, fullText, total, diarSegs, onProg, id = "")
         degraded++;
         const w0 = cur[0] || {};
         console.log(`[${id}] alignLong 塌窗直插 pass${pass} a=${a.toFixed(0)} b=${b.toFixed(0)} c0=${c0} units=${cur.length} covRel=${covRel.toFixed(0)}s covC=${covC} matchRate=${matchRate.toFixed(2)} 首unit="${(w0.text || "").slice(0, 16)}"@${(w0.start || 0).toFixed(1)}`);
+        addToPool(false);
         row(b, `插值·塌窗 ${Math.round(b - a)}s`, best);
         diag.interpSpans.push({ a: round3(a), b: round3(b), reason: earlyPlateau ? "塌窗" : "文本滞后" });
+        // 1.0.14 exactly: interpolate [cOff,cEnd) cleanly (NO candidate processing on a
+        // collapsed window — it wasn't a "dropped" span, it was interpolated already).
         const cEnd = lastWin ? N : clamp(Math.round(charAtTime(b)), cOff + 1, N);
         emitInterp(cOff, cEnd, a, b);
         cOff = clamp(cEnd, cOff, N); a = b; resolved = true; break;
       }
-      // GOOD: keep the reliable prefix, clamped into the window, mapped to global chars.
+      // GOOD: keep the reliable prefix (exactly 1.0.14); its units also seed the pool
+      // (with the good bonus) so a following window's shed hole can borrow this tail.
+      addToPool(true);
       for (let i = 0; i <= ck; i++) {
         const st = clamp(cur[i].start, a, b);
         units.push({ text: cur[i].text, start: round3(st), end: round3(clamp(cur[i].end, st, b)) });
@@ -1738,9 +1913,24 @@ async function alignLong(alignSlice, fullText, total, diarSegs, onProg, id = "")
     }
     if (!resolved) a = b;  // safety net; should not happen
   }
-  if (degraded) console.log(`[${id}] alignLong 完成：${degraded} 个窗塌窗/空窗并插值、${retries} 次前移重试（正常应为 0），DIAR=${hasDiar ? merged.length + "段" : "无"}`);
+  // Settlement — ONLY touches holes (chars no committed/interpolated unit covers, i.e.
+  // forward-retry "shed" spans + any trailing text). Everything 1.0.14 already timed
+  // (committed prefixes, collapsed/empty interpolation) is passed through untouched.
+  // A hole char takes the best pooled candidate (GOOD-window tail wins); a char with no
+  // candidate is interpolated + ALARMED. No char is ever left without a timestamp.
+  const cov = resolveCoverage(units, map, pool, fullText, total);
   diag.degraded = degraded;
-  return { units, map, diag };
+  diag.uncoveredSpans = cov.uncoveredSpans;
+  diag.candidateSpans = cov.candidateSpans;
+  diag.uncoveredChars = cov.totalChars - cov.coveredChars;
+  diag.rescuedChars = cov.rescuedChars;
+  diag.committedChars = cov.committedChars;
+  diag.coveredChars = cov.coveredChars;
+  diag.totalChars = cov.totalChars;
+  if (degraded || cov.rescuedChars || diag.uncoveredChars) {
+    console.log(`[${id}] alignLong 完成：${degraded} 个窗塌/空、${retries} 次前移；候选救回 ${cov.rescuedChars} 字（${cov.candidateSpans.length} 段），纯插值兜底 ${diag.uncoveredChars} 字（${cov.uncoveredSpans.length} 段），覆盖 ${cov.coveredChars}/${cov.totalChars}，DIAR=${hasDiar ? merged.length + "段" : "无"}`);
+  }
+  return { units: cov.units, map: cov.map, diag };
 }
 
 // Candidate cut positions: after every sentence-end / clause mark (swallowing
@@ -2480,11 +2670,13 @@ async function runJob(id) {
     }
     timer.begin("说话人分离");
     setP(3, "说话人分离（整段分析中）");
-    // 1) diarization over the whole clip
-    const diar = await gwAudioOp(cfg, "diarization", workAudio, cfg.models.diar);
+    // 1) diarization over the whole clip. maxSpk is an UPPER BOUND only (max_speakers) —
+    // never num_speakers — so the gateway may return FEWER if the audio has fewer voices.
+    const maxSpk = Math.max(0, Math.floor(Number(opts.maxSpeakers) || 0));
+    const diar = await gwAudioOp(cfg, "diarization", workAudio, cfg.models.diar, maxSpk > 0 ? { max_speakers: maxSpk } : {});
     ckCancel(id);
     const diarSegs = Array.isArray(diar?.segments) ? diar.segments : [];
-    console.log(`[${id}] 说话人分离完成: ${diarSegs.length} 段  workAudio=${path.basename(workAudio)}`);
+    console.log(`[${id}] 说话人分离完成: ${diarSegs.length} 段  workAudio=${path.basename(workAudio)}${maxSpk > 0 ? `  (max_speakers=${maxSpk})` : ""}`);
 
     // 2) transcription strategy (integral vs segmented). Both feed the same
     //    fuse/sort tail below via segsOut. Forced alignment needs a language NAME
@@ -2719,6 +2911,32 @@ async function runJob(id) {
     const segments = segsOut
       .filter((s) => s.text || (s.words && s.words.length))
       .sort((a, b) => a.start - b.start);
+    // Speaker smoothing: a collapsed/forward-retry "shed" span crams a whole sentence
+    // into a sub-second instant at a window seam. Such a degenerate segment then grabs
+    // whatever diar cluster happens to sit at that instant (often a spurious micro-blip),
+    // so one sentence shows as a different speaker for ~0s. Fix WITHOUT touching text or
+    // times: a run of abnormally-fast, very-short segments sandwiched between two
+    // segments of the SAME (other) speaker is a diar artifact → inherit that speaker.
+    // Real short interjections (neighbors differ, or normal speech rate) are untouched.
+    {
+      const visLen = (t) => ((t || "").match(/\S/g) || []).length;
+      const isCrammed = (s) => {
+        const d = (s.end - s.start), n = visLen(s.text);
+        return d < 1.2 && n >= 4 && n / Math.max(d, 0.01) > 12; // >12 字/秒 = 非真实语速
+      };
+      let smoothed = 0, i = 0;
+      while (i < segments.length) {
+        if (!isCrammed(segments[i])) { i++; continue; }
+        let j = i;
+        while (j + 1 < segments.length && isCrammed(segments[j + 1])) j++;
+        const prev = segments[i - 1], next = segments[j + 1];
+        if (prev && next && prev.speaker && prev.speaker === next.speaker) {
+          for (let k = i; k <= j; k++) if (segments[k].speaker !== prev.speaker) { segments[k].speaker = prev.speaker; smoothed++; }
+        }
+        i = j + 1;
+      }
+      if (smoothed) console.log(`[${id}] 说话人平滑：修正 ${smoothed} 个挤压伪段的说话人（并入前后同一说话人）`);
+    }
     // Relabel diar's raw cluster IDs to SPEAKER_0k in FIRST-APPEARANCE order so the
     // roster numbering matches speaking order. pyannote numbers by cluster, not by who
     // speaks first, so 说话人 8 could be the first voice — the same relabel the
@@ -2763,7 +2981,7 @@ async function runJob(id) {
       language: language || "",
       durationSec: rec.durationSec || 0,
       models: { stt: cfg.models?.stt || "", align: cfg.models?.align || "", diar: cfg.models?.diar || "", translate: cfg.translate?.model || "" },
-      options: { segmentedStt: !!cfg.segmentedStt, translate: !!rec.options?.translate, enhance: !!rec.options?.enhance },
+      options: { segmentedStt: !!cfg.segmentedStt, translate: !!rec.options?.translate, enhance: !!rec.options?.enhance, maxSpeakers: Math.max(0, Math.floor(Number(rec.options?.maxSpeakers) || 0)) },
       diarWindows: dbgDiar,
       sttChars: dbg?.sttChars || 0,
       unitCount: dbg?.units || 0,
@@ -2821,6 +3039,9 @@ app.post("/api/records/:id/transcribe", (req, res) => {
     segmentedStt: b.segmentedStt !== undefined ? !!b.segmentedStt : (prev.segmentedStt ?? !!cfg.segmentedStt),
     translate: b.translate !== undefined ? !!b.translate : (prev.translate ?? !!cfg.translate?.enabled),
     enhance: b.enhance !== undefined ? !!b.enhance : (prev.enhance ?? !!cfg.enhance?.enabled),
+    // Upper bound on speakers passed to diarization (0 = 自动/不限). Same semantics as
+    // 重新识别说话人: it's a MAX (max_speakers), never a forced count.
+    maxSpeakers: b.maxSpeakers !== undefined ? Math.max(0, Math.floor(Number(b.maxSpeakers) || 0)) : (prev.maxSpeakers ?? 0),
   };
   // Still extracting audio (or the wav isn't on disk yet)? Don't enqueue now —
   // remember the intent and let the prep job start transcription when it finishes.
@@ -3001,4 +3222,4 @@ if (!process.env.NO_LISTEN) {
   });
 }
 
-export { repairSegmentTimes, sentenceCuts, sentBounds, spreadWords, hasPunctuation, alignLong, reliableAlignEnd, mapUnitsBounded, buildCharToTime };
+export { repairSegmentTimes, sentenceCuts, sentBounds, spreadWords, hasPunctuation, alignLong, reliableAlignEnd, mapUnitsBounded, buildCharToTime, resolveCoverage };
