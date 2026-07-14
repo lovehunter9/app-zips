@@ -1512,6 +1512,14 @@ function deburstUnits(units, MINSLOT = 0.14, MAXCARRY = 1.5) {
 // is within the reliable time cap tMax, backed off to just before the FIRST collapse
 // plateau (>=N consecutive starts within dt seconds — the LIS-clamp signature Qwen's
 // aligner emits once it saturates). Never keeps piled-up timestamps.
+// Reliable end of an aligned window: cut at the FIRST dense plateau (>=N units within
+// dt seconds) — that is where Qwen's aligner starts saturating/cramming. Cutting EARLY
+// is deliberately safe here: the remaining audio simply flows into the next window and
+// re-aligns, so an early cut costs at most an extra window, NEVER a collapse. (Do NOT
+// try to "skip transient bursts" and extend the window past the first plateau: that
+// lets a saturating window keep cramming FUTURE text into its tail, inflating the char
+// cursor and starving later windows of text — the exact cause of a text-starved last
+// window collapsing. See WORK_LOG 2026-07-14.)
 function reliableAlignEnd(units, tMax, N = 6, dt = 0.12) {
   let k = units.length - 1;
   while (k > 0 && units[k].start > tMax) k--;
@@ -1526,103 +1534,159 @@ function reliableAlignEnd(units, tMax, N = 6, dt = 0.12) {
   return Math.max(0, k);
 }
 
-// Long-audio forced alignment. Qwen3-ForcedAligner-0.6B is only reliable to ~270s;
-// beyond that its indices saturate and the LIS monotonic pass collapses every
-// trailing word onto ONE timestamp (the "same-second pile-up"). So we chunk by the
-// aligner's OWN saturation point, never by guessed char proportions: align a <=WIN
-// audio window fed with MORE than a window's worth of text, keep only the reliable
-// prefix (words ending within SAFE seconds, cut before the first plateau), then
-// start the next window at the last reliable word's END time with the remaining text
-// (STT char ORDER tells us exactly which chars are left). Works for any length.
-// Returns {units, map} in fullText coords; every time is pure ALIGN.
-// Long-audio forced alignment by saturation chunking. The aligner is reliable to
-// ~SAFE seconds per call; past that its timestamps plateau, so each window keeps
-// only the reliable prefix and re-aligns the remainder from the next audio/text
-// cursor. Single shot per window — NO inter-request gap, NO retry, NO shrink: if a
-// window comes back collapsed we accept it and interpolate that span straight
-// through (drift-but-fast beats hang). Root cause of collapse is text/audio cursor
-// lag (leading text with no in-window audio) — see WORK_LOG 2026-07-13; the real
-// fix is TODO. Network errors still throw out of alignSlice and abort the job.
+// Long-audio forced alignment (方案 B: 音频锚定 char↔time 曲线). Qwen3-ForcedAligner
+// is reliable only to ~SAFE seconds; past that its timestamps plateau. We chunk the
+// audio into <=WIN windows, keep only each window's reliable prefix, and re-align the
+// remainder. The ROOT-CAUSE fix vs. the old sequential cursor: the text start `c0`
+// for each window is chosen from a GLOBAL time→char curve built from GOOD windows'
+// (char,time) anchors (plus the true terminal (N,total) for self-correction), NOT
+// from the previous window's char mapping. That decouples the text start from a
+// window that under-counted chars, so a lagging cursor can no longer feed LEADING
+// text (text whose audio is before the window) into the next window — the exact
+// trigger of the collapse (see WORK_LOG 2026-07-13). If a window still comes back
+// collapsed, we first push c0 FORWARD a little and retry (shed leading text), bounded
+// to MAXRETRY; only if that fails do we interpolate that one span straight through.
+// Network errors still throw out of alignSlice and abort the job. Returns
+// {units, map, diag} in fullText coords; every kept time is pure ALIGN.
 async function alignLong(alignSlice, fullText, total, onProg, id = "") {
-  const WIN = 290, SAFE = 255;
+  const WIN = 290, SAFE = 255, MAXRETRY = 2;
+  const N = fullText.length;
   const units = [], map = [];
-  let a = 0, cOff = 0, pass = 0, degraded = 0;
-  let cps = fullText.length / Math.max(1, total); // running chars/sec estimate
+  const anC = [0], anT = [0];                     // GOOD-window char↔time anchors (seed origin)
+  const cps0 = N / Math.max(1, total);            // global chars/sec (stable reference)
   const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
-  // Debug trace for the detailed processing report (per-window decisions + the
-  // audio spans that had to be interpolated). Purely observational.
+  // Time→char via the anchor curve; beyond the last good anchor, interpolate toward
+  // the TRUE terminal (N,total) so a trailing under-map self-corrects, not compounds.
+  const charAtTime = (t) => {
+    if (t <= anT[0]) return anC[0];
+    for (let i = 1; i < anT.length; i++) {
+      if (t <= anT[i]) { const t0 = anT[i - 1], t1 = anT[i]; return anC[i - 1] + (anC[i] - anC[i - 1]) * (t - t0) / Math.max(1e-6, t1 - t0); }
+    }
+    const lc = anC[anC.length - 1], lt = anT[anT.length - 1];
+    return total > lt + 0.5 ? lc + (N - lc) * (t - lt) / (total - lt) : Math.min(N, lc + cps0 * (t - lt));
+  };
+  let a = 0, cOff = 0, pass = 0, degraded = 0, retries = 0;
   const diag = { winInit: WIN, safe: SAFE, minWin: 0, rows: [], interpSpans: [], shrinks: 0, degraded: 0 };
   const row = (outcome, bb, bv) => diag.rows.push({
     pass, a: round3(a), b: round3(bv), winLen: WIN, n: bb ? bb.u.length : 0, k: bb ? bb.k : -1,
     covA: bb ? round3(bb.covA) : null, covC: bb ? bb.covC : null,
     matchRate: bb ? Math.round(bb.matchRate * 100) / 100 : null, outcome,
   });
-  while (a < total - 0.05 && cOff < fullText.length) {
+  // Emit PLACEHOLDER units for an interpolated (collapsed/empty) span: spread the
+  // text fullText[cStart,cEnd) linearly over [tStart,tEnd] by CHAR position, as word
+  // tokens. Without this the char→time curve has no anchors past the last good unit
+  // and every trailing char piles onto ONE timestamp (the whole tail on one time).
+  const emitInterp = (cStart, cEnd, tStart, tEnd) => {
+    cStart = clamp(Math.round(cStart), 0, N); cEnd = clamp(Math.round(cEnd), cStart, N);
+    if (cEnd <= cStart || tEnd <= tStart) return;
+    const span = fullText.slice(cStart, cEnd);
+    const dur = Math.max(1e-3, tEnd - tStart), wide = Math.max(1, cEnd - cStart);
+    const fc = (c) => tStart + dur * ((c - cStart) / wide);
+    const re = /\S+/g; let m, any = false;
+    while ((m = re.exec(span))) {
+      any = true;
+      const ci = cStart + m.index, cj = ci + m[0].length;
+      units.push({ text: m[0], start: round3(fc(ci)), end: round3(fc(cj)) });
+      map.push({ ci, cj });
+    }
+    if (!any) { units.push({ text: span, start: round3(tStart), end: round3(tEnd) }); map.push({ ci: cStart, cj: cEnd }); }
+  };
+  while (a < total - 0.05 && cOff < N) {
     pass++;
     const b = Math.min(total, a + WIN);
     const lastWin = b >= total - 0.05;
-    // Over-provide text so the reliable prefix is never starved; the surplus just
-    // collapses at the tail and gets discarded by reliableAlignEnd.
-    const want = lastWin ? fullText.length - cOff : Math.ceil(cps * (b - a) * 1.5) + 30;
-    const part = fullText.slice(cOff, Math.min(fullText.length, cOff + want));
-    const cur = await alignSlice(a, b, part, `wa_${pass}`); // single shot, no gap/retry
-    if (onProg) try { onProg(Math.min(1, b / Math.max(1, total))); } catch { /* ignore */ }
-    if (!cur.length) {
-      // Empty window: interpolate this span, advance both cursors by cps, move on.
-      degraded++;
-      console.log(`[${id}] alignLong 空窗 pass${pass} a=${a.toFixed(0)} b=${b.toFixed(0)}（按 cps 前进）`);
-      row("插值·空窗", null, b);
-      diag.interpSpans.push({ a: round3(a), b: round3(b), reason: "空窗" });
-      if (!lastWin) cOff = Math.min(fullText.length, cOff + Math.max(1, Math.round(cps * (b - a))));
-      a = b;
-      continue;
+    // Audio-anchored text start: the char the curve maps time `a` to, never before
+    // the last consumed char. On a collapse retry we push it forward (shed leading text).
+    const baseC0 = lastWin ? cOff : clamp(Math.round(charAtTime(a)), cOff, N - 1);
+    const PUSH = Math.round(cps0 * 20);            // ~20s of text per forward retry step
+    let resolved = false;
+    for (let attempt = 0; attempt <= MAXRETRY && !resolved; attempt++) {
+      const c0 = clamp(baseC0 + attempt * PUSH, cOff, N - 1);
+      // Over-provide TRAILING text (safe); the surplus collapses at the tail and is
+      // discarded by reliableAlignEnd. Leading text is the danger, never trailing.
+      const want = lastWin ? N - c0 : Math.min(N - c0, Math.ceil(cps0 * (b - a) * 1.5) + 60);
+      const part = fullText.slice(c0, c0 + want);
+      const cur = await alignSlice(a, b, part, attempt ? `wa_${pass}r${attempt}` : `wa_${pass}`);
+      if (onProg && attempt === 0) try { onProg(Math.min(1, b / Math.max(1, total))); } catch { /* ignore */ }
+      if (!cur.length) {
+        if (attempt < MAXRETRY) { retries++; diag.shrinks++; row("空窗·前移重试", null, b); continue; }
+        degraded++;
+        console.log(`[${id}] alignLong 空窗 pass${pass} a=${a.toFixed(0)} b=${b.toFixed(0)} c0=${c0}`);
+        row("插值·空窗", null, b);
+        diag.interpSpans.push({ a: round3(a), b: round3(b), reason: "空窗" });
+        const cEndSpan = lastWin ? N : clamp(Math.round(charAtTime(b)), c0 + 1, N);
+        emitInterp(c0, cEndSpan, a, b);   // spread the span's text so it doesn't pile on one time
+        cOff = clamp(cEndSpan, c0, N); a = b; resolved = true; break;
+      }
+      const ckRel = reliableAlignEnd(cur, a + SAFE);
+      const rawSpan = cur[cur.length - 1].end - a;              // how far the alignment reaches
+      const dense = cur.length > 40;
+      let ck, covRel, bad, earlyPlateau = false, lagging = false;
+      if (lastWin) {
+        // LAST window: keep ALL units (no continuation) — exactly like the original,
+        // which correctly aligned this Vault clip's tail (covA≈259s, 0 collapses). Do
+        // NOT run reliableAlignEnd here: its early-plateau cut FALSE-POSITIVES on a
+        // brief dense burst near the window start and would drop the whole (good) tail
+        // to covRel≈0. A last window is "collapsed" ONLY if the alignment PILES near
+        // the start, i.e. it reaches far less than the window it should span.
+        ck = cur.length - 1;
+        covRel = rawSpan;                                       // full reach of the alignment
+        bad = dense && rawSpan < Math.max(30, (b - a) * 0.3);
+        earlyPlateau = bad;                                     // a last-window pile-up IS a collapse
+      } else {
+        // Non-last: keep the reliable prefix; detect a collapsed prefix (tiny reliable
+        // span) or text-lag (audio moved, text didn't). Unchanged from the shipped path.
+        ck = ckRel;
+        covRel = cur[ckRel].end - a;
+        earlyPlateau = dense && covRel < 30 && (rawSpan > 60 || covRel < 8);
+      }
+      const lm = mapUnitsBounded(cur.slice(0, ck + 1), part);
+      const covC = lm.length ? lm[lm.length - 1].cj : 0;         // chars consumed in part
+      const matched = lm.reduce((n, x) => n + (x.hit ? 1 : 0), 0);
+      const matchRate = matched / Math.max(1, lm.length);
+      if (!lastWin) {
+        const expC = cps0 * Math.max(0, covRel);
+        lagging = dense && covRel > 20 && covC < 0.3 * expC;
+        bad = earlyPlateau || lagging;
+      }
+      const best = { u: cur, k: ck, lm, covA: covRel, covC, matchRate };
+      // Collapsed and retries left → push c0 forward and retry to shed leading text.
+      if (bad && attempt < MAXRETRY) {
+        retries++; diag.shrinks++;
+        row(`前移重试 +${PUSH}字（${earlyPlateau ? "塌窗" : "文本滞后"}）`, best, b);
+        continue;
+      }
+      if (bad) {
+        // Retries exhausted: interpolate the WHOLE span from the current char cursor,
+        // spreading its text linearly over [a,b] (emitInterp) so nothing piles on one
+        // timestamp and no chars are skipped. We start from cOff (not the pushed c0) to
+        // avoid leaving the retry-skipped chars uncovered. Char cursor then advances by
+        // the curve (terminal-corrected), NEVER by compounding this bad window's map.
+        degraded++;
+        const w0 = cur[0] || {};
+        console.log(`[${id}] alignLong 塌窗直插 pass${pass} a=${a.toFixed(0)} b=${b.toFixed(0)} c0=${c0} units=${cur.length} covRel=${covRel.toFixed(0)}s covC=${covC} matchRate=${matchRate.toFixed(2)} 首unit="${(w0.text || "").slice(0, 16)}"@${(w0.start || 0).toFixed(1)}`);
+        row(`插值·塌窗 ${Math.round(b - a)}s`, best, b);
+        diag.interpSpans.push({ a: round3(a), b: round3(b), reason: earlyPlateau ? "塌窗" : "文本滞后" });
+        const cEndSpan = lastWin ? N : clamp(Math.round(charAtTime(b)), cOff + 1, N);
+        emitInterp(cOff, cEndSpan, a, b);
+        cOff = clamp(cEndSpan, cOff, N); a = b; resolved = true; break;
+      }
+      // GOOD: keep the reliable prefix, clamped into this window, mapped to global chars.
+      for (let i = 0; i <= ck; i++) {
+        const st = clamp(cur[i].start, a, b);
+        units.push({ text: cur[i].text, start: st, end: clamp(cur[i].end, st, b) });
+        map.push({ ci: c0 + lm[i].ci, cj: c0 + lm[i].cj });
+      }
+      if (lastWin) { row("真实对齐(末窗)", best, b); cOff = N; a = b; resolved = true; break; }
+      // Register the (reliable-end char, time) anchor for the curve, then advance.
+      const endC = Math.min(N, c0 + lm[ckRel].cj), endT = cur[ckRel].end;
+      if (endT > anT[anT.length - 1] + 0.05 && endC > anC[anC.length - 1]) { anT.push(endT); anC.push(endC); }
+      row(attempt ? `真实对齐(前移${attempt})` : "真实对齐", best, b);
+      cOff = endC; a = endT; resolved = true; break;
     }
-    const ck = lastWin ? cur.length - 1 : reliableAlignEnd(cur, a + SAFE);
-    const lm = mapUnitsBounded(cur.slice(0, ck + 1), part);
-    const covA = cur[ck].end - a;                               // reliable prefix audio span
-    const covC = lm.length ? lm[lm.length - 1].cj : 0;          // chars consumed in part
-    const rawSpan = cur[cur.length - 1].end - a;               // content span of raw window
-    const matched = lm.reduce((n, x) => n + (x.hit ? 1 : 0), 0);
-    const matchRate = matched / Math.max(1, lm.length);
-    const expC = cps * Math.max(0, covA);                       // chars the audio span implies
-    const dense = cur.length > 40;
-    // Collapsed prefix (tiny reliable span) or text-lag (audio moved, text didn't).
-    const earlyPlateau = !lastWin && dense && covA < 30 && (rawSpan > 60 || covA < 8);
-    const lagging = !lastWin && dense && covA > 20 && covC < 0.3 * expC;
-    const bad = earlyPlateau || lagging;
-    const best = { u: cur, k: ck, lm, covA, covC, matchRate };
-    // Clamp every kept time into THIS window so no unit injects an out-of-window time.
-    for (let i = 0; i <= ck; i++) {
-      const st = clamp(cur[i].start, a, b);
-      units.push({ text: cur[i].text, start: st, end: clamp(cur[i].end, st, b) });
-      map.push({ ci: cOff + lm[i].ci, cj: cOff + lm[i].cj });
-    }
-    if (lastWin) { row("真实对齐(末窗)", best, b); break; }
-    let nextA = cur[ck].end, nextC = cOff + lm[ck].cj;
-    if (bad) {
-      // Collapsed window: interpolate the whole [a,b] span (drift bounded to one
-      // window) and advance both cursors by cps. No retry, no wait — accept & move on.
-      degraded++;
-      const w0 = cur[0] || {};
-      console.log(`[${id}] alignLong 塌窗直插 pass${pass} a=${a.toFixed(0)} b=${b.toFixed(0)} units=${cur.length} k=${ck} covA=${covA.toFixed(0)}s covC=${covC} matchRate=${matchRate.toFixed(2)} 首unit="${(w0.text || "").slice(0, 16)}"@${(w0.start || 0).toFixed(1)}`);
-      row(`插值·塌窗 ${Math.round(b - a)}s`, best, b);
-      diag.interpSpans.push({ a: round3(a), b: round3(b), reason: earlyPlateau ? "塌窗" : "文本滞后" });
-      nextA = b;
-      nextC = Math.min(fullText.length, cOff + Math.max(1, Math.round(cps * (b - a))));
-    } else if (nextA <= a + 1 || nextC <= cOff) {
-      // No usable progress: advance BOTH audio and text by cps (never leave text behind).
-      row("插值·零进展", best, b);
-      diag.interpSpans.push({ a: round3(a), b: round3(b), reason: "零进展" });
-      if (!lastWin) cOff = Math.min(fullText.length, Math.max(nextC, cOff + Math.max(1, Math.round(cps * (b - a)))));
-      a = b;
-      continue;
-    } else {
-      row("真实对齐", best, b);
-      cps = (nextC - cOff) / Math.max(0.5, nextA - a);
-    }
-    a = nextA; cOff = nextC;
+    if (!resolved) a = b;  // safety net; should not happen
   }
-  if (degraded) console.log(`[${id}] alignLong 完成：${degraded} 个窗塌窗并直接插值（正常应为 0）`);
+  if (degraded) console.log(`[${id}] alignLong 完成：${degraded} 个窗塌窗/空窗并直接插值、${retries} 次前移重试（正常应为 0）`);
   diag.degraded = degraded;
   return { units, map, diag };
 }
@@ -2885,4 +2949,4 @@ if (!process.env.NO_LISTEN) {
   });
 }
 
-export { repairSegmentTimes, sentenceCuts, sentBounds, spreadWords, hasPunctuation };
+export { repairSegmentTimes, sentenceCuts, sentBounds, spreadWords, hasPunctuation, alignLong, reliableAlignEnd, mapUnitsBounded, buildCharToTime };
