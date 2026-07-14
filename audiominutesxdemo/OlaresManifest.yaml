@@ -7,14 +7,14 @@ metadata:
   description: Feishu-Minutes-style audio notes — diarized, word-timestamped transcripts with player sync, via the LLM Gateway.
   appid: audiominutesxdemo
   title: Audio Minutes X Demo
-  version: '1.0.13'
+  version: '1.0.14'
   categories:
     - Utilities
 permission:
   appData: true
 spec:
   runAsUser: true
-  versionName: '1.0.13'
+  versionName: '1.0.14'
   fullDescription: |
     Audio Minutes X Demo is a Feishu-Minutes (妙记) style app for turning meetings,
     lectures and audiobooks into interactive, searchable transcripts — all powered by
@@ -31,12 +31,17 @@ spec:
       use, all in the app. If a required model is missing, the app tells you it cannot
       transcribe until it is configured.
   upgradeDescription: |
-    1.0.13: 方案 B 根治「文本-音频游标错位」。不再用「上一窗映射的字符游标」决定下一窗文本起点(这会因某窗
-    少映射而滞后、把前导文本喂进下一窗触发塌窗),改为用「好窗登记的 (字符,时间) 锚点 + 末端真值 (N,total)」构成
-    的全局「时间→字符」曲线来锚定每窗文本起点——文本起点始终跟随音频、与上一窗映射解耦,单个坏窗不再级联。若某窗
-    仍塌,先把文本起点前移 ~20 秒重试(甩掉前导文本,最多 2 次)再退化为对该区间直接插值;末窗同样纳入塌窗检测与
-    重试(修掉旧版末窗被豁免、整条尾巴堆叠的问题)。确定性 mock 复现「时-字错位」验证:坏窗自愈、时间轴单调、
-    覆盖完整、故障不级联(旧版级联达数百秒,新版误差限制在故障窗内 ≈ 注入量)。网络错误仍中止。
+    1.0.14: 修正塌窗判定阈值。1.0.13 把「可靠前缀只有 ~16 秒但真实对齐(matchRate=1.0)」的短前缀误判为整片
+    塌陷并对整窗插值,导致必塌 Vault 那条仍走插值。改为:只有「密集单元 + 可靠前缀 <8 秒」才算真塌窗;短而真的
+    前缀(早切)一律保留并让剩余音频进下一窗重对齐(经验证的「早切无害」)。本地 8090 复跑必塌 Vault(1012s):
+    5 窗全部真实对齐(covA 202~230s)、缩窗=0、降级/插值窗=0、插值区间=0——彻底不塌。
+    1.0.13: 方案 B「DIAR 规约」根治整段词级对齐塌窗。用已经算好的说话人分离(DIAR)时间轴来规约分窗:
+    (1) 窗口边界卡在 DIAR 停顿(静音间隙)中点,且每窗 ≤230 秒——低于对齐器可靠区(~255 秒),直接消除旧版
+    290 秒窗在测试机上超界整片塌陷的问题;(2) 每窗喂多少文本由「DIAR 有声时长分布 + 好窗真值锚点修正」的
+    字符↔时间曲线估算(字符只在有声段累积,快/慢语段不再把估计带偏);(3) 下一窗文本起点=上一窗对齐到的
+    可靠末字符,音频游标与字符游标出自同一个已对齐词,永不错位——彻底断掉「前导文本→塌窗」这条根因。仍塌则
+    前移文本重试(最多 2 次)再退化插值;插值段按字符线性铺开,不再堆同一时间戳。离线确定性 mock(相邻语段
+    6→22 cps 极端变速)验证:0 塌窗、0 插值、时间轴单调、100% 覆盖、平均误差 0.19 秒。网络错误仍中止。
     1.0.12: 通过对照实验锁定塌窗真因——不是网络、并发、ffmpeg 字节或过量文本,而是「文本-音频游标错位」:
     只要喂给某个词级对齐窗口的文本起点比该窗音频早哪怕 ~8 秒,对齐器立刻塌成 covA≈11 秒(实测 382→374 起点
     covA 从 253 秒骤降到 11 秒)。据此按「尽量不塌、真塌就直接插值」重构:去掉限速/退避重试/自适应缩窗,每窗
