@@ -7,14 +7,14 @@ metadata:
   description: Feishu-Minutes-style audio notes — diarized, word-timestamped transcripts with player sync, via the LLM Gateway.
   appid: audiominutesxdemo
   title: Audio Minutes X Demo
-  version: '1.0.16'
+  version: '1.0.17'
   categories:
     - Utilities
 permission:
   appData: true
 spec:
   runAsUser: true
-  versionName: '1.0.16'
+  versionName: '1.0.17'
   fullDescription: |
     Audio Minutes X Demo is a Feishu-Minutes (妙记) style app for turning meetings,
     lectures and audiobooks into interactive, searchable transcripts — all powered by
@@ -31,6 +31,10 @@ spec:
       use, all in the app. If a required model is missing, the app tells you it cannot
       transcribe until it is configured.
   upgradeDescription: |
+    1.0.17（WIP·随时可能被推翻）：重对齐兜底——切片重对齐又塌(覆盖<50%)时，不再保留塌缩版，
+    改为在「真实空闲区」(前一个可靠词end→后一个可靠词start，并向外吞并塌缩词)内按字长均匀分布；
+    整段对齐窗口可调(默认 230s 顶格·最快，与 1.0.14 一致；另有「自适应/按语速」与 60–180s 选项，仅影响整段转写)。
+    已知：整段词级对齐仍是速度瓶颈(网关单次~100s/230s切片、串行)。此版为 WIP 存档，非稳定基线。
     1.0.14: 修正塌窗判定阈值。1.0.13 把「可靠前缀只有 ~16 秒但真实对齐(matchRate=1.0)」的短前缀误判为整片
     塌陷并对整窗插值,导致必塌 Vault 那条仍走插值。改为:只有「密集单元 + 可靠前缀 <8 秒」才算真塌窗;短而真的
     前缀(早切)一律保留并让剩余音频进下一窗重对齐(经验证的「早切无害」)。本地 8090 复跑必塌 Vault(1012s):
