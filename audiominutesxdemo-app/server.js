@@ -248,7 +248,7 @@ function recordSummary(rec) {
     createdAt: rec.createdAt,
     speakers: rec.result?.speakers?.length || 0,
     segments: rec.result?.segments?.length || 0,
-    options: rec.options || { language: "auto", segmentedStt: false, translate: false, enhance: false, maxSpeakers: 0 },
+    options: rec.options || { language: "auto", segmentedStt: false, translate: false, enhance: false, maxSpeakers: 0, alignWindowSec: 230 },
     translated: !!(rec.result?.segments || []).some((s) => s.translation),
     jobKind: rec.jobKind || "full",
     notices: Array.isArray(rec.notices) ? rec.notices : [],
@@ -1074,7 +1074,7 @@ function debugReportText(rec) {
   L.push(`模型 对齐    ${d.models?.align || "—"}`);
   L.push(`模型 分离    ${d.models?.diar || "—"}`);
   L.push(`模型 翻译    ${d.models?.translate || "—"}`);
-  L.push(`选项         分段转写=${d.options?.segmentedStt ? "开" : "关"} · 转写时翻译=${d.options?.translate ? "开" : "关"} · 降噪=${d.options?.enhance ? "开" : "关"} · 最多说话人=${d.options?.maxSpeakers ? d.options.maxSpeakers + "人" : "自动"}`);
+  L.push(`选项         分段转写=${d.options?.segmentedStt ? "开" : "关"} · 转写时翻译=${d.options?.translate ? "开" : "关"} · 降噪=${d.options?.enhance ? "开" : "关"} · 最多说话人=${d.options?.maxSpeakers ? d.options.maxSpeakers + "人" : "自动"} · 对齐窗口=${d.options?.alignWindowSec ? d.options.alignWindowSec + "s" : "自适应"}`);
   L.push(`分离窗口     ${d.diarWindows ?? "—"} 段`);
   L.push(`整段STT字数  ${d.sttChars || 0}   对齐单元 ${d.unitCount || 0}   最终分段 ${d.segCount ?? segRows.length}`);
   if (d.fallbackError) L.push(`回退原因     ${d.fallbackError}`);
@@ -1134,7 +1134,7 @@ function debugReportText(rec) {
       for (const r of repairSpans) {
         const t = (r.text || "").replace(/\s+/g, " ");
         const shown = t.length > 54 ? t.slice(0, 54) + "…" : t;
-        const way = r.method === "realign" ? (r.kind === "debt" ? "重对齐·还债" : "重对齐·未获真实") : "启发式兜底";
+        const way = r.method === "realign" ? (r.kind === "debt" ? "重对齐·还债" : "重对齐·未获真实") : (r.method === "uniform" ? "均匀兜底(重对齐又塌)" : "启发式兜底");
         const spk = r.spikeText ? `  债spike「${(r.spikeText || "").trim()}」${r.spikeSecs ? "=" + r.spikeSecs + "s" : ""}` : "";
         L.push(`    字[${r.c0}–${r.c1}) ${r.c1 - r.c0}字  重铺至 ${mmss(r.tStart)}–${mmss(r.tEnd)} [${way}]${spk}  「${shown}」`);
       }
@@ -1193,7 +1193,7 @@ function debugReportHtml(rec) {
   const uncovHtml = uncovered.map((u) => { const t = (u.text || "").replace(/\s+/g, " "); const cand = u.candStart != null ? `${mmss(u.candStart)}–${mmss(u.candEnd)}` : "—"; return `<tr><td>${esc(uncReason(u.reason))}</td><td class="num">${u.c0}–${u.c1}</td><td class="num">${u.c1 - u.c0}</td><td>${mmss(u.tStart)}–${mmss(u.tEnd)}</td><td class="num">${cand}</td><td>${esc(t)}</td></tr>`; }).join("");
   const candHtml = candidates.map((u) => { const t = (u.text || "").replace(/\s+/g, " "); return `<tr><td>${mmss(u.tStart)}–${mmss(u.tEnd)}</td><td class="num">${u.c0}–${u.c1}</td><td>${esc(t)}</td></tr>`; }).join("");
   const segHtml = segRows.map((r) => `<tr class="${r.repair ? "repair" : r.interp ? "bad" : ""}"><td class="num">${r.i}</td><td class="num">${r.repair ? "★" : r.interp ? "⚠" : ""}</td><td>${mmss(r.start)}→${mmss(r.end)}</td><td class="num">${Math.round(r.end - r.start)}s</td><td>${esc(r.speaker)}</td><td>${esc(r.text)}</td></tr>`).join("");
-  const repairMethod = (r) => r.method === "realign" ? (r.kind === "debt" ? "重对齐·还债" : "重对齐·未获真实") : "启发式(兜底)";
+  const repairMethod = (r) => r.method === "realign" ? (r.kind === "debt" ? "重对齐·还债" : "重对齐·未获真实") : (r.method === "uniform" ? "均匀兜底(重对齐又塌)" : "启发式(兜底)");
   const repairHtml = repairSpans.map((r) => { const t = (r.text || "").replace(/\s+/g, " "); return `<tr class="repair"><td class="num">${r.c0}–${r.c1}</td><td class="num">${r.c1 - r.c0}</td><td>${mmss(r.tStart)}–${mmss(r.tEnd)}</td><td>${repairMethod(r)}</td><td>${r.spikeText ? esc((r.spikeText || "").trim()) + (r.spikeSecs ? " =" + r.spikeSecs + "s" : "") : "—"}</td><td>${esc(t)}</td></tr>`; }).join("");
   const suspHtml = suspects.map((s) => `<tr class="${s.kind === "cram" ? "bad" : "warn"}"><td>${esc(suspKind(s.kind))}</td><td>${mmss(s.start)}–${mmss(s.end)}</td><td class="num">${s.rate}/${s.ref}</td><td>${esc(s.text.length > 80 ? s.text.slice(0, 80) + "…" : s.text)}</td></tr>`).join("");
   const charHtml = charRows.map((c) => `<tr class="${c.repair ? "repair" : c.giant ? "giant" : c.piled ? "bad" : c.cram ? "cram" : c.interp ? "warn" : ""}"><td class="num">${c.gi}</td><td class="num">${c.si}</td><td>${esc(c.text)}</td><td class="num">${c.start.toFixed(3)}</td><td class="num">${c.end.toFixed(3)}</td><td class="num">${c.durMs}</td><td class="num">${c.gapMs == null ? "" : c.gapMs}</td></tr>`).join("");
@@ -1250,7 +1250,7 @@ ${kv("STT 模型", esc(d.models?.stt || "—"))}
 ${kv("对齐模型", esc(d.models?.align || "—"))}
 ${kv("分离模型", esc(d.models?.diar || "—"))}
 ${kv("翻译模型", esc(d.models?.translate || "—"))}
-${kv("选项", `分段=${d.options?.segmentedStt ? "开" : "关"} · 翻译=${d.options?.translate ? "开" : "关"} · 降噪=${d.options?.enhance ? "开" : "关"} · 最多说话人=${d.options?.maxSpeakers ? d.options.maxSpeakers + "人" : "自动"}`)}
+${kv("选项", `分段=${d.options?.segmentedStt ? "开" : "关"} · 翻译=${d.options?.translate ? "开" : "关"} · 降噪=${d.options?.enhance ? "开" : "关"} · 最多说话人=${d.options?.maxSpeakers ? d.options.maxSpeakers + "人" : "自动"} · 对齐窗口=${d.options?.alignWindowSec ? d.options.alignWindowSec + "s" : "自适应"}`)}
 ${kv("分离窗口", (d.diarWindows ?? "—") + " 段")}
 ${kv("STT字数/单元/分段", `${d.sttChars || 0} / ${d.unitCount || 0} / ${d.segCount ?? segRows.length}`)}
 ${d.fallbackError ? kv("回退原因", `<span style="color:#f87171">${esc(d.fallbackError)}</span>`) : ""}
@@ -1841,10 +1841,6 @@ async function realignGuessedSpans(segsOut, fullText, diag, alignSlice, id = "")
   const med = ds.length ? ds[Math.floor(ds.length / 2)] : 0.2;
   const cramMax = Math.max(0.06, med * 0.4);
   const giantAbs = Math.max(4, med * 15);
-  const rates = [];
-  for (let k = 0; k < n; k++) { const d = dur(k), vl = visLen(units[k].text); if (vl >= 1 && d > cramMax && d < giantAbs) rates.push(d / vl); }
-  rates.sort((a, b) => a - b);
-  const secPerChar = rates.length ? rates[Math.floor(rates.length / 2)] : med;
   const isCram = (i) => { const d = dur(i); return d > 0 && d <= cramMax; };
   const isSpike = (i) => {
     const d = dur(i);
@@ -1892,31 +1888,44 @@ async function realignGuessedSpans(segsOut, fullText, diag, alignSlice, id = "")
     else merged.push(cur);
   }
 
-  // ---- Re-align each window (parallel, bounded). Only its own units are rewritten. ----
+  // TRUE idle region: a large collapse piles many words at ONE instant, and LATE — so
+  // units[lo].start / units[hi].end are collapsed values, NOT real anchors. Grow the window
+  // over contiguous PILED neighbours, then take [prev reliable word END .. next reliable word
+  // START] — the real span this text occupies. Both the re-align slice AND the uniform fallback
+  // use it. (Zoom 4:33: 59 words piled into 1.3s; real region = [4:21.36 .. 4:35.44] ≈ 14s.)
+  const isPiled = (i) => dur(i) < 0.06;
+  for (const w of merged) {
+    while (w.lo - 1 >= 0 && isPiled(w.lo - 1)) w.lo--;
+    while (w.hi + 1 < n && isPiled(w.hi + 1)) w.hi++;
+    w.A = w.lo > 0 ? (units[w.lo - 1].end || 0) : (units[w.lo].start || 0);
+    w.B = w.hi < n - 1 ? (units[w.hi + 1].start || 0) : (units[w.hi].end || 0);
+    if (!(w.B > w.A + 0.05)) { w.A = units[w.lo].start || 0; w.B = Math.max(w.A + 0.05, units[w.hi].end || 0); }
+    let t = ""; for (let x = w.lo; x <= w.hi; x++) t += (units[x].text || ""); w.text = t;
+  }
+
+  // ---- Re-align each window over its TRUE idle region (parallel, bounded). ----
   await mapLimit(merged, 4, async (w, wi) => {
-    const { lo, hi } = w;
-    const A = units[lo].start || 0, B = units[hi].end || 0;
-    if (!(B > A + 0.15)) { w.ok = false; return; }
-    let text = ""; for (let x = lo; x <= hi; x++) text += (units[x].text || "");
-    if (visLen(text) < 2 || typeof alignSlice !== "function") { w.ok = false; return; }
+    const { A, B, text } = w;
+    if (!(B > A + 0.15) || visLen(text) < 2 || typeof alignSlice !== "function") { w.ok = false; return; }
     let reUnits = [];
     try { reUnits = await alignSlice(A, B, text, `re${wi}`); } catch { reUnits = []; }
     if (!Array.isArray(reUnits) || !reUnits.length) { w.ok = false; return; }
     const map = mapUnitsToRef(reUnits, text);
     const tAt = buildCharToTime(reUnits, map);
     const t0 = tAt(0), t1 = tAt(text.length);
-    if (!(t1 > t0 && t0 >= A - 0.05 && t1 <= B + 0.05 && (t1 - t0) >= Math.min(0.5, (B - A) * 0.2))) { w.ok = false; return; }
-    w.ok = true; w.tAt = tAt; w.A = A; w.B = B; w.text = text;
+    // Reject a re-align that COLLAPSED AGAIN inside the slice (text piled near one end, covering
+    // ≪ the window): require it to span ≥50% of [A,B]; otherwise we uniform-spread instead.
+    if (!(t1 > t0 && t0 >= A - 0.05 && t1 <= B + 0.05 && (t1 - t0) >= (B - A) * 0.5)) { w.ok = false; return; }
+    w.ok = true; w.tAt = tAt;
   });
 
-  // ---- Apply: write back real times for successes; heuristic fallback ONLY for windows that
-  // were extended through a spike (a bare uncovered window that fails re-align keeps its interp).
+  // ---- Apply: SUCCESS → real per-char times; FAILURE (re-align collapsed / unavailable) →
+  // UNIFORM distribution across the TRUE idle region [A,B] (never keep a collapsed version).
   const covered = [];                               // fullText char ranges now given REAL times
   const spans = [];
   for (const w of merged) {
-    const { lo, hi, spike, spDur } = w;
-    const A = units[lo].start || 0, B = units[hi].end || 0;
-    let blkText = ""; for (let x = lo; x <= hi; x++) blkText += (units[x].text || "");
+    const { lo, hi, spike, spDur, A, B } = w;
+    const blkText = w.text;
     if (w.ok) {
       let off = 0, last = A;
       for (let x = lo; x <= hi; x++) {
@@ -1925,20 +1934,21 @@ async function realignGuessedSpans(segsOut, fullText, diag, alignSlice, id = "")
         st = Math.min(Math.max(st, last), B); en = Math.min(Math.max(en, st + 0.02), B);
         units[x].start = round3(st); units[x].end = round3(en); last = en; off += len;
       }
-      covered.push([wci[lo], wcj[hi]]);
+      covered.push([wci[lo], wcj[hi]]);            // got REAL times → drop from uncovered alarm
       spans.push({ c0: wci[lo], c1: wcj[hi], tStart: round3(A), tEnd: round3(B), text: blkText, method: "realign", kind: spike >= 0 ? "debt" : "uncovered", spikeText: spike >= 0 ? units[spike].text : "", spikeSecs: spike >= 0 ? round3(spDur) : 0 });
       continue;
     }
-    if (spike >= 0) {                               // extended (debt) window → heuristic fallback
-      const avail = B - A, MINSLOT = 0.12;
-      const nat = []; let sum = 0;
-      for (let x = lo; x <= hi; x++) { const dd = Math.max(MINSLOT, Math.max(1, visLen(units[x].text)) * secPerChar); nat.push(dd); sum += dd; }
-      const scale = sum > avail ? avail / sum : 1;
-      let t = A;
-      for (let x = lo; x <= hi; x++) { const dd = nat[x - lo] * scale; const st = t; t += dd; units[x].start = round3(st); units[x].end = round3(Math.max(st + 0.02, t)); }
-      spans.push({ c0: wci[lo], c1: wcj[hi], tStart: round3(A), tEnd: round3(B), text: blkText, method: "heuristic", kind: "debt", spikeText: units[spike].text, spikeSecs: round3(spDur), laidSecs: round3(Math.min(sum, avail)), gapSecs: round3(Math.max(0, avail - sum)) });
+    // FALLBACK — uniform across [A,B], proportional to each unit's char length. Still a GUESS
+    // (not real alignment), so it STAYS in the uncovered alarm; we just refuse to leave the
+    // collapsed pile behind.
+    let totalLen = 0; for (let x = lo; x <= hi; x++) totalLen += Math.max(1, (units[x].text || "").length);
+    const span = B - A; let acc = 0;
+    for (let x = lo; x <= hi; x++) {
+      const len = Math.max(1, (units[x].text || "").length);
+      const st = A + span * (acc / totalLen); acc += len; const en = A + span * (acc / totalLen);
+      units[x].start = round3(st); units[x].end = round3(Math.max(st + 0.02, en));
     }
-    // bare uncovered window that failed re-align: leave the existing interpolation untouched.
+    spans.push({ c0: wci[lo], c1: wcj[hi], tStart: round3(A), tEnd: round3(B), text: blkText, method: "uniform", kind: spike >= 0 ? "debt" : "uncovered", spikeText: spike >= 0 ? units[spike].text : "", spikeSecs: spike >= 0 ? round3(spDur) : 0 });
   }
 
   if (spans.length) {
@@ -2036,9 +2046,22 @@ function reliableAlignEnd(units, tMax, N = 6, dt = 0.12) {
 // + ALARMS it in diag.uncoveredSpans if nothing covers it. Chars 1.0.14 timed correctly
 // are passed through verbatim. No diar → uniform char-rate + fixed WINMAX cuts. Network
 // errors throw and abort. Returns {units, map, diag}.
-async function alignLong(alignSlice, fullText, total, diarSegs, onProg, id = "") {
-  const WINMAX = 230, SAFE = 230, MAXRETRY = 2;    // WINMAX < aligner horizon (~255s)
+async function alignLong(alignSlice, fullText, total, diarSegs, onProg, id = "", winSec = 0) {
   const N = fullText.length;
+  // WINDOW SIZE is what actually decides whether the aligner collapses. The horizon is
+  // driven by TOKEN/CHAR COUNT per window, not wall-clock: English at ~13 char/s packs
+  // ~3000 chars into 230s (collapses), Chinese at ~3 char/s packs only ~700 (fine). So the
+  // AUTO window is a CHAR BUDGET ÷ this clip's char-rate — which naturally gives fast/English
+  // small windows and slow/Chinese big ones. A manual winSec (from 重新转写) overrides it.
+  const cpsAll = N / Math.max(1, total);
+  // Budget kept well UNDER the observed collapse point (~4000 chars @ 230s/17.5cps) but not so
+  // tiny it wastes calls — residual collapses are now caught by the re-align + uniform fallback,
+  // so we can afford a bigger (faster) window. 1800 → fast English ≈100s, Chinese stays at 230 cap.
+  const CHARBUDGET = 1800;
+  const autoWin = Math.max(80, Math.min(230, Math.round(CHARBUDGET / Math.max(0.5, cpsAll))));
+  const WINMAX = winSec && winSec > 0 ? Math.max(20, Math.min(300, Math.round(winSec))) : autoWin;
+  const SAFE = WINMAX, MAXRETRY = 2;
+  console.log(`[${id}] alignLong 窗口=${WINMAX}s（${winSec > 0 ? "手动" : "自适应"} · 字符率≈${cpsAll.toFixed(1)}/s · 自适应建议${autoWin}s）`);
   const units = [], map = [];
   // Candidate pool: EVERY unit of EVERY attempt (good OR failed), in global chars.
   // resolveCoverage() uses it to give every hole char the best available real time
@@ -3141,7 +3164,7 @@ async function runJob(id) {
         const { units, map, diag: alignDiag } = await alignLong(
           alignSlice, fullText, alignTotal, diarSegs,
           (frac) => setP(55 + Math.round(30 * frac), "词级对齐"),
-          id,
+          id, Math.max(0, Math.floor(Number(opts.alignWindowSec) || 0)),
         );
         console.log(`[${id}] 词级对齐(alignLong)完成：${units.length} 个单元，音频≈${Math.round(alignTotal)}s`);
         if (!units.length) throw new Error("对齐无结果");
@@ -3299,7 +3322,7 @@ async function runJob(id) {
       language: language || "",
       durationSec: rec.durationSec || 0,
       models: { stt: cfg.models?.stt || "", align: cfg.models?.align || "", diar: cfg.models?.diar || "", translate: cfg.translate?.model || "" },
-      options: { segmentedStt: !!cfg.segmentedStt, translate: !!rec.options?.translate, enhance: !!rec.options?.enhance, maxSpeakers: Math.max(0, Math.floor(Number(rec.options?.maxSpeakers) || 0)) },
+      options: { segmentedStt: !!cfg.segmentedStt, translate: !!rec.options?.translate, enhance: !!rec.options?.enhance, maxSpeakers: Math.max(0, Math.floor(Number(rec.options?.maxSpeakers) || 0)), alignWindowSec: Math.max(0, Math.floor(Number(rec.options?.alignWindowSec) || 0)) },
       diarWindows: dbgDiar,
       sttChars: dbg?.sttChars || 0,
       unitCount: dbg?.units || 0,
@@ -3360,6 +3383,8 @@ app.post("/api/records/:id/transcribe", (req, res) => {
     // Upper bound on speakers passed to diarization (0 = 自动/不限). Same semantics as
     // 重新识别说话人: it's a MAX (max_speakers), never a forced count.
     maxSpeakers: b.maxSpeakers !== undefined ? Math.max(0, Math.floor(Number(b.maxSpeakers) || 0)) : (prev.maxSpeakers ?? 0),
+    // 整段对齐窗口秒数. 默认 230(顶格·最快，塌窗由兜底修复); 0 = 自适应(按字符率算窗); >0 = 固定秒数.
+    alignWindowSec: b.alignWindowSec !== undefined ? Math.max(0, Math.floor(Number(b.alignWindowSec) || 0)) : (prev.alignWindowSec ?? 230),
   };
   // Still extracting audio (or the wav isn't on disk yet)? Don't enqueue now —
   // remember the intent and let the prep job start transcription when it finishes.

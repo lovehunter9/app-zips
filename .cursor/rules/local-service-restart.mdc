@@ -8,12 +8,23 @@ alwaysApply: true
 
 1. **禁止探测端口是否被占用**，也不要问。直接**无条件干掉该端口上的一切**：
    `lsof -ti :<PORT> | xargs -r kill -9` 外加 `pkill -9 -f` 匹配该服务进程。
-2. **必须在沙盒外**运行（Shell 工具 `required_permissions: ["all"]`），否则进程连不上外部网络（如 LLM 网关）。
+2. **必须在沙盒外且有网络**运行：Shell 工具 `required_permissions: ["all", "full_network"]`。
+   ⚠ 教训（最坑，反复翻车）：**只给 `["all"]` 不够**——进程仍可能被掐掉外网，表现为服务能起、
+   一调 LLM 网关就 `FETCH FAILED`。**启动命令必须同时带 `full_network`**，一次到位。
 3. **必须作为「受管理的后台 shell 作业」启动**：直接把 `node server.js`（不加 `nohup`/`&`/
    `setsid`/`disown`）作为 Shell 工具命令，并设 `block_until_ms: 0`。
    ⚠ 教训：`nohup … & disown` / `setsid` 这类自行脱离的方式，工具调用结束后会被连带回收，
    服务起来几秒就没——**别再用**。让 Shell 工具自己托管这个长驻进程才不会被杀。
-4. 起完后**另起一次** Shell 做单次监听检查（`lsof -iTCP:<PORT> -sTCP:LISTEN`），不要反复轮询。
+   ⚠ 教训（更坑）：**启动命令里禁止带 `lsof … | xargs kill` 前缀**。Shell 工具对命令有
+   `pipefail`/`errexit` 语义，端口为空时 `lsof` 返回退出码 1 → 整条命令在 node 之前就被中止，
+   表现为「exit 1、~250ms、无任何输出」的假秒退。**杀端口要单独一条命令**（且末尾加 `|| true`：
+   `lsof -ti :<PORT> | xargs -r kill -9 2>/dev/null || true; sleep 2; echo KILLED`），
+   启动那条命令**只放** `node server.js`，干净、无管道，才不会被 pipefail 误杀。
+4. 起完后**必须验网，不是验监听**：另起一条 Shell（也带 `["all","full_network"]`）
+   `sleep 3; curl -s -o /dev/null -w "%{http_code}" http://localhost:<PORT>/api/models`。
+   ⚠ 教训：进程**在沙盒里也会 LISTEN**（端口起来了但没网），所以 `lsof … LISTEN` 通过≠有网。
+   **只认网关 HTTP 200**。若不是 200（或 curl 失败）→ 说明又被沙盒掐网了 → **立即重杀重起一次**
+   （回到第 1 步，启动命令确保带 `full_network`），直到 curl 拿到 200 为止，全程别让用户重复指导。
 
 ## audiominutesxdemo 专用
 

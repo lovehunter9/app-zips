@@ -1025,6 +1025,7 @@ function RecordDetail({
   const [optTr, setOptTr] = useState(false);
   const [optEnh, setOptEnh] = useState(false);
   const [optMaxSpk, setOptMaxSpk] = useState(0); // 0 = 自动/不限；>0 = 最多这么多人
+  const [optAlignWin, setOptAlignWin] = useState(230); // 整段对齐窗口秒数：默认 230（顶格·最快）；0 = 自适应（按语速）
   const [showOpts, setShowOpts] = useState(false);
   // Translation UI is entirely hidden unless the global feature is ON. `available`
   // additionally requires a translate model (needed to actually run 补翻译).
@@ -1121,6 +1122,7 @@ function RecordDetail({
     setOptTr(fresh ? !!config.translate?.enabled : (o?.translate ?? !!config.translate?.enabled));
     setOptEnh(fresh ? !!config.enhance?.enabled : (o?.enhance ?? !!config.enhance?.enabled));
     setOptMaxSpk(fresh ? 0 : (o?.maxSpeakers ?? 0));
+    setOptAlignWin(fresh ? 230 : (o?.alignWindowSec ?? 230));
   }, [rec, config]);
 
   // Normalize word times so EVERY word is clickable/highlightable even on older
@@ -1607,7 +1609,7 @@ function RecordDetail({
 
   async function doTranscribe() {
     try {
-      await api.transcribeRecord(id, { language: optLang, segmentedStt: optSeg, translate: optTr, enhance: optEnh, maxSpeakers: optMaxSpk });
+      await api.transcribeRecord(id, { language: optLang, segmentedStt: optSeg, translate: optTr, enhance: optEnh, maxSpeakers: optMaxSpk, alignWindowSec: optAlignWin });
       setShowOpts(false);
       await load(); onChanged();
     } catch (e: any) { setErr(String(e?.message || e)); }
@@ -2001,6 +2003,16 @@ function RecordDetail({
               {Array.from({ length: 10 }, (_, i) => i + 1).map((n) => (
                 <option key={n} value={n}>{n} 人</option>
               ))}
+            </select>
+          </label>
+          <label className="flex items-center gap-2" title="仅影响「整段转写」：整段词级对齐的窗口大小。默认 230s（顶格·最快，塌窗由兜底修复）。窗口越小越稳、对齐越准但更慢（网关调用次数变多）。想要质量就调小窗；自适应=按本文件语速自动估算（英文/快→小窗，中文/慢→大窗）。">
+            <span className="shrink-0 whitespace-nowrap text-neutral-400">对齐窗口</span>
+            <select className="input !w-auto py-1" value={optAlignWin} onChange={(e) => setOptAlignWin(Math.max(0, Math.floor(Number(e.target.value) || 0)))}>
+              <option value={230}>230s（默认·最快）</option>
+              {[60, 90, 120, 150, 180].map((n) => (
+                <option key={n} value={n}>{n}s</option>
+              ))}
+              <option value={0}>自适应（按语速）</option>
             </select>
           </label>
           <label className="flex items-center gap-2">
