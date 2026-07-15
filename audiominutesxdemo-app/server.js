@@ -947,6 +947,7 @@ function debugReportData(rec) {
   const align = d.align || null;
   const spans = Array.isArray(align?.interpSpans) ? align.interpSpans : [];
   const uncovered = Array.isArray(align?.uncoveredSpans) ? align.uncoveredSpans : [];
+  const candidates = Array.isArray(align?.candidateSpans) ? align.candidateSpans : [];
   const segs = Array.isArray(rec.result?.segments) ? rec.result.segments : [];
   const names = rec.result?.speakerNames || {};
   const interpAt = (s) => spans.some((sp) => Math.min(+s.end, sp.b) - Math.max(+s.start, sp.a) > 0.05);
@@ -959,9 +960,8 @@ function debugReportData(rec) {
   const interpSecs = spans.reduce((n, sp) => n + Math.max(0, sp.b - sp.a), 0);
   const suspects = detectSuspects(segs);
   // 逐字时间戳：从最终 segments[].words 铺平（CJK 粒度即逐字）。给出每字 start/end、时长、
-  // 距上一字的间隔，标记「0s 堆叠」「插值区间」「前移修复区(紫)」——用于人工可视化。
-  const repairSpans = Array.isArray(align?.repairSpans) ? align.repairSpans : [];
-  const inRepair = (t) => repairSpans.some((sp) => t >= sp.tStart - 1e-3 && t <= sp.tEnd + 1e-3);
+  // 距上一字的间隔，并标记「0s 堆叠」(接缝处飞掠) 与落在插值区间的字——用于人工可视化，
+  // 好据此设计更好的插值（如向后插值：用后一字 start 作锚点反推被堆叠字的时间）。
   const charRows = [];
   {
     let gi = 0, prevEnd = null;
@@ -976,16 +976,36 @@ function debugReportData(rec) {
           gapMs: prevEnd == null ? null : Math.round((st - prevEnd) * 1000),
           piled: en - st < 0.02,
           interp: inSpan(st, spans),
-          repair: inRepair(st),
+          cram: false, giant: false, repair: false,
         });
         prevEnd = en;
       });
     });
   }
+  // 逐字异常标注（诊断用）：
+  //   • cram（非人类语速）：单字时长 ≤ max(60ms, 0.4×中位)——被压扁飞掠的字（含 0s 堆叠）。
+  //   • giant（巨无霸）：单字时长 ≥ max(4s, 15×中位)——一个字吞掉好几秒。
+  //   这两个是「原始症状」；重铺后症状消失，所以「修复区(紫)」不靠重算，而是读取重铺算法
+  //   落盘的 align.repairSpans（权威）——按时间区间命中即紫，各处一致。
+  {
+    const durs = charRows.filter((c) => !c.piled && c.durMs > 0).map((c) => c.durMs).sort((a, b) => a - b);
+    const med = durs.length ? durs[Math.floor(durs.length / 2)] : 0;
+    const giantMs = Math.max(4000, med * 15);
+    const cramMs = Math.max(60, med * 0.4);
+    for (const c of charRows) {
+      if (c.durMs > 0 && c.durMs <= cramMs) c.cram = true;
+      if (!c.piled && c.durMs >= giantMs) c.giant = true;
+    }
+  }
+  const repairSpans = Array.isArray(align?.repairSpans) ? align.repairSpans : [];
+  const inRepair = (t) => repairSpans.some((sp) => t >= sp.tStart - 1e-3 && t <= sp.tEnd + 1e-3);
+  for (const c of charRows) if (inRepair(c.start)) c.repair = true;
   for (const r of segRows) r.repair = repairSpans.some((sp) => Math.min(r.end, sp.tEnd) - Math.max(r.start, sp.tStart) > 0.05);
   const piledChars = charRows.filter((c) => c.piled).length;
+  const cramChars = charRows.filter((c) => c.cram).length;
+  const giantChars = charRows.filter((c) => c.giant).length;
   const repairChars = charRows.filter((c) => c.repair).length;
-  return { d, align, spans, uncovered, segRows, interpCount, interpSecs, suspects, charRows, piledChars, repairChars, repairSpans };
+  return { d, align, spans, uncovered, candidates, segRows, interpCount, interpSecs, suspects, charRows, piledChars, cramChars, giantChars, repairChars, repairSpans };
 }
 
 // A档·可视化：从最终词级时间反推「可疑对齐区间」，让 committed 里看不出来的问题现形。
@@ -1038,7 +1058,8 @@ const mmss = (sec) => {
   return h ? `${h}:${p(m)}:${p(s)}` : `${m}:${p(s)}`;
 };
 function debugReportText(rec) {
-  const { d, align, spans, uncovered, segRows, interpCount, interpSecs, suspects, charRows, piledChars, repairChars, repairSpans } = debugReportData(rec);
+  const { d, align, spans, uncovered, candidates, segRows, interpCount, interpSecs, suspects, charRows, piledChars, cramChars, giantChars, repairChars, repairSpans } = debugReportData(rec);
+  const uncReason = (r) => (r === "badcand" ? "候选时间不合理→插值" : "无对齐候选");
   const suspKind = (k) => (k === "cram" ? "挤压·飞速掠过" : "疑似停滞/漂移");
   const L = [];
   L.push(`详细处理记录 — ${rec.title || rec.id}`);
@@ -1075,7 +1096,7 @@ function debugReportText(rec) {
     L.push(`  缩窗次数=${align.shrinks}  降级/插值窗=${align.degraded}  插值区间=${spans.length} 段  插值总时长≈${mmss(interpSecs)}`);
     if (align.totalChars != null) {
       const uc = align.uncoveredChars || 0;
-      L.push(`  字符覆盖   总 ${align.totalChars} 字 · 真实对齐(含前移修复) ${align.coveredChars ?? "—"} 字 · 残余纯插值 ${uc} 字 / ${uncovered.length} 段${uc ? "  ⚠" : "  ✓"}`);
+      L.push(`  字符覆盖   总 ${align.totalChars} 字 · 真实对齐+候选救回 ${align.coveredChars ?? "—"} 字（其中候选救回 ${align.rescuedChars || 0} 字）· 无对齐候选(纯插值) ${uc} 字 / ${uncovered.length} 段${uc ? "  ⚠" : "  ✓"}`);
     }
     L.push("");
     L.push(`  ${"#".padStart(3)} ${"区间".padEnd(15)} ${"窗长".padStart(5)} ${"单元".padStart(5)} ${"covA".padStart(6)} ${"covC".padStart(6)} ${"匹配".padStart(5)}  结果`);
@@ -1088,23 +1109,34 @@ function debugReportText(rec) {
       L.push("  插值区间（这些音频时间段的字幕时间为估算，可能不准）:");
       for (const sp of spans) L.push(`    ${mmss(sp.a)} – ${mmss(sp.b)}  (${Math.round(sp.b - sp.a)}s, ${sp.reason})`);
     }
-    if (repairSpans.length) {
+    if (candidates.length) {
       L.push("");
-      L.push("  ★ 前移修复区（第一遍发现前移重试丢时间戳 → 第二遍重叠窗重对齐；紫色标注）:");
-      for (const r of repairSpans) {
-        const t = (r.text || "").replace(/\s+/g, " ").trim();
-        const shown = t.length > 140 ? t.slice(0, 140) + "…" : t;
-        const way = r.method === "realign" ? "重叠窗·真实对齐" : "重叠窗又塌→均匀铺";
-        L.push(`    字[${r.c0}–${r.c1}) ${r.c1 - r.c0}字  重铺至 ${mmss(r.tStart)}–${mmss(r.tEnd)} [${way}]  「${shown}」`);
+      L.push("  采用候选时间的字/词（时间取自其它对齐尝试的候选，非本窗真实对齐，可能飘移）:");
+      for (const u of candidates) {
+        const t = (u.text || "").replace(/\s+/g, " ");
+        const shown = t.length > 60 ? t.slice(0, 60) + "…" : t;
+        L.push(`    ${mmss(u.tStart)}–${mmss(u.tEnd)}  字[${u.c0}–${u.c1})  「${shown}」`);
       }
     }
     if (uncovered.length) {
       L.push("");
-      L.push("  ⚠ 残余未获真实对齐的字/词（安全网线性插值，应为空；需人工核对）:");
+      L.push("  ⚠ 未获真实对齐的字/词（已线性插值兜底，需人工核对）:");
       for (const u of uncovered) {
         const t = (u.text || "").replace(/\s+/g, " ");
         const shown = t.length > 60 ? t.slice(0, 60) + "…" : t;
-        L.push(`    字[${u.c0}–${u.c1}) ${u.c1 - u.c0}字  用时${mmss(u.tStart)}–${mmss(u.tEnd)}  「${shown}」`);
+        const cand = u.candStart != null ? `  候选建议${mmss(u.candStart)}–${mmss(u.candEnd)}` : "";
+        L.push(`    [${uncReason(u.reason)}] 字[${u.c0}–${u.c1}) ${u.c1 - u.c0}字  用时${mmss(u.tStart)}–${mmss(u.tEnd)}${cand}  「${shown}」`);
+      }
+    }
+    if (repairSpans.length) {
+      L.push("");
+      L.push("  ★ 重对齐区（未获真实=触发；与飞掠重叠则扩到突变spike；紫色标注）:");
+      for (const r of repairSpans) {
+        const t = (r.text || "").replace(/\s+/g, " ").trim();
+        const shown = t.length > 140 ? t.slice(0, 140) + "…" : t;
+        const way = r.method === "realign" ? (r.kind === "debt" ? "重对齐·还债" : "重对齐·未获真实") : (r.method === "uniform" ? "均匀兜底(重对齐又塌)" : "启发式兜底");
+        const spk = r.spikeText ? `  债spike「${(r.spikeText || "").trim()}」${r.spikeSecs ? "=" + r.spikeSecs + "s" : ""}` : "";
+        L.push(`    字[${r.c0}–${r.c1}) ${r.c1 - r.c0}字  重铺至 ${mmss(r.tStart)}–${mmss(r.tEnd)} [${way}]${spk}  「${shown}」`);
       }
     }
   }
@@ -1128,10 +1160,10 @@ function debugReportText(rec) {
   }
   if (charRows.length) {
     L.push("");
-    L.push(`逐字时间戳（${charRows.length} 字 · ★=前移修复区(紫) · P=0s堆叠 · I=插值区间 · start→end 秒、时长/间隔 毫秒）`);
+    L.push(`逐字时间戳（${charRows.length} 字 · ★=停顿债重铺块(紫) · P=0s堆叠 · C=非人类语速 · G=巨无霸 · I=插值区间 · start→end 秒、时长/间隔 毫秒）`);
     L.push("-".repeat(60));
     for (const c of charRows) {
-      const fl = c.repair ? "*" : c.piled ? "P" : c.interp ? "I" : " ";
+      const fl = c.repair ? "*" : c.piled ? "P" : c.giant ? "G" : c.cram ? "C" : c.interp ? "I" : " ";
       const gap = c.gapMs == null ? "  —" : String(c.gapMs);
       L.push(`  ${fl} ${String(c.gi).padStart(5)} 段${String(c.si).padStart(4)}  ${c.start.toFixed(3)}→${c.end.toFixed(3)}  ${String(c.durMs).padStart(5)}ms  gap${gap.padStart(6)}  「${c.text}」`);
     }
@@ -1144,7 +1176,8 @@ function debugReportText(rec) {
   return L.join("\n");
 }
 function debugReportHtml(rec) {
-  const { d, align, spans, uncovered, segRows, interpCount, interpSecs, suspects, charRows, piledChars, repairChars, repairSpans } = debugReportData(rec);
+  const { d, align, spans, uncovered, candidates, segRows, interpCount, interpSecs, suspects, charRows, piledChars, cramChars, giantChars, repairChars, repairSpans } = debugReportData(rec);
+  const uncReason = (r) => (r === "badcand" ? "候选时间不合理→插值" : "无对齐候选");
   const suspKind = (k) => (k === "cram" ? "挤压·飞速掠过" : "疑似停滞/漂移");
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   const kv = (k, v) => `<div class="kv"><span class="k">${esc(k)}</span><span class="v">${v}</span></div>`;
@@ -1157,12 +1190,13 @@ function debugReportHtml(rec) {
   }).join("") : "";
   const spansHtml = spans.map((sp) => `<li><code>${mmss(sp.a)} – ${mmss(sp.b)}</code> · ${Math.round(sp.b - sp.a)}s · ${esc(sp.reason)}</li>`).join("");
   const uncovChars = align?.uncoveredChars || 0;
-  const uncovHtml = uncovered.map((u) => { const t = (u.text || "").replace(/\s+/g, " "); return `<tr><td class="num">${u.c0}–${u.c1}</td><td class="num">${u.c1 - u.c0}</td><td>${mmss(u.tStart)}–${mmss(u.tEnd)}</td><td>${esc(t)}</td></tr>`; }).join("");
+  const uncovHtml = uncovered.map((u) => { const t = (u.text || "").replace(/\s+/g, " "); const cand = u.candStart != null ? `${mmss(u.candStart)}–${mmss(u.candEnd)}` : "—"; return `<tr><td>${esc(uncReason(u.reason))}</td><td class="num">${u.c0}–${u.c1}</td><td class="num">${u.c1 - u.c0}</td><td>${mmss(u.tStart)}–${mmss(u.tEnd)}</td><td class="num">${cand}</td><td>${esc(t)}</td></tr>`; }).join("");
+  const candHtml = candidates.map((u) => { const t = (u.text || "").replace(/\s+/g, " "); return `<tr><td>${mmss(u.tStart)}–${mmss(u.tEnd)}</td><td class="num">${u.c0}–${u.c1}</td><td>${esc(t)}</td></tr>`; }).join("");
   const segHtml = segRows.map((r) => `<tr class="${r.repair ? "repair" : r.interp ? "bad" : ""}"><td class="num">${r.i}</td><td class="num">${r.repair ? "★" : r.interp ? "⚠" : ""}</td><td>${mmss(r.start)}→${mmss(r.end)}</td><td class="num">${Math.round(r.end - r.start)}s</td><td>${esc(r.speaker)}</td><td>${esc(r.text)}</td></tr>`).join("");
-  const repairMethod = (r) => r.method === "realign" ? "重叠窗·真实对齐" : "重叠窗又塌→均匀铺";
-  const repairHtml = repairSpans.map((r) => { const t = (r.text || "").replace(/\s+/g, " "); return `<tr class="repair"><td class="num">${r.c0}–${r.c1}</td><td class="num">${r.c1 - r.c0}</td><td>${mmss(r.tStart)}–${mmss(r.tEnd)}</td><td>${repairMethod(r)}</td><td>${esc(t)}</td></tr>`; }).join("");
+  const repairMethod = (r) => r.method === "realign" ? (r.kind === "debt" ? "重对齐·还债" : "重对齐·未获真实") : (r.method === "uniform" ? "均匀兜底(重对齐又塌)" : "启发式(兜底)");
+  const repairHtml = repairSpans.map((r) => { const t = (r.text || "").replace(/\s+/g, " "); return `<tr class="repair"><td class="num">${r.c0}–${r.c1}</td><td class="num">${r.c1 - r.c0}</td><td>${mmss(r.tStart)}–${mmss(r.tEnd)}</td><td>${repairMethod(r)}</td><td>${r.spikeText ? esc((r.spikeText || "").trim()) + (r.spikeSecs ? " =" + r.spikeSecs + "s" : "") : "—"}</td><td>${esc(t)}</td></tr>`; }).join("");
   const suspHtml = suspects.map((s) => `<tr class="${s.kind === "cram" ? "bad" : "warn"}"><td>${esc(suspKind(s.kind))}</td><td>${mmss(s.start)}–${mmss(s.end)}</td><td class="num">${s.rate}/${s.ref}</td><td>${esc(s.text.length > 80 ? s.text.slice(0, 80) + "…" : s.text)}</td></tr>`).join("");
-  const charHtml = charRows.map((c) => `<tr class="${c.repair ? "repair" : c.piled ? "bad" : c.interp ? "warn" : ""}"><td class="num">${c.gi}</td><td class="num">${c.si}</td><td>${esc(c.text)}</td><td class="num">${c.start.toFixed(3)}</td><td class="num">${c.end.toFixed(3)}</td><td class="num">${c.durMs}</td><td class="num">${c.gapMs == null ? "" : c.gapMs}</td></tr>`).join("");
+  const charHtml = charRows.map((c) => `<tr class="${c.repair ? "repair" : c.giant ? "giant" : c.piled ? "bad" : c.cram ? "cram" : c.interp ? "warn" : ""}"><td class="num">${c.gi}</td><td class="num">${c.si}</td><td>${esc(c.text)}</td><td class="num">${c.start.toFixed(3)}</td><td class="num">${c.end.toFixed(3)}</td><td class="num">${c.durMs}</td><td class="num">${c.gapMs == null ? "" : c.gapMs}</td></tr>`).join("");
   const notices = (rec.notices || []).map((n) => `<li class="lv-${esc(n.level || "info")}"><b>${esc(n.level || "info")}</b> ${esc(n.msg || n.text || "")}</li>`).join("");
   const pill = d.punctuated === null || d.punctuated === undefined ? "—" : d.punctuated ? "按标点" : "按停顿/说话人/长度";
   return `<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1202,7 +1236,7 @@ ul{margin:6px 0;padding-left:20px}
   <a href="?format=txt" download>⬇ 下载 TXT</a>
   <span class="note">调试用页面 · 正式发布前移除</span>
 </div>
-<h1>详细处理记录 <span class="badge">${esc(rec.kind === "video" ? "视频" : "音频")}</span>${repairSpans.length ? `<span class="badge" style="color:#c084fc;border-color:#6b21a8">★ ${repairSpans.length} 处前移修复</span>` : ""}${interpCount ? `<span class="badge bad-badge">⚠ ${interpCount} 段落在插值区间</span>` : ""}${uncovChars ? `<span class="badge bad-badge">⚠ ${uncovChars} 字无对齐时间戳</span>` : ""}</h1>
+<h1>详细处理记录 <span class="badge">${esc(rec.kind === "video" ? "视频" : "音频")}</span>${repairSpans.length ? `<span class="badge" style="color:#c084fc;border-color:#6b21a8">★ ${repairSpans.length} 处重对齐</span>` : ""}${interpCount ? `<span class="badge bad-badge">⚠ ${interpCount} 段落在插值区间</span>` : ""}${uncovChars ? `<span class="badge bad-badge">⚠ ${uncovChars} 字无对齐时间戳</span>` : ""}</h1>
 <div class="sub">${esc(rec.title || rec.id)} · 生成于 ${esc(d.builtAt || "—")}${d.version ? " · 版本 " + esc(d.version) : ""}</div>
 
 <h2>概览</h2>
@@ -1226,18 +1260,19 @@ ${d.fallbackError ? kv("回退原因", `<span style="color:#f87171">${esc(d.fall
 ${steps ? `<table><thead><tr><th>阶段</th><th class="num">用时</th></tr></thead><tbody>${steps}<tr><td><b>合计</b></td><td class="num"><b>${esc(fmtMs(tim.totalMs || 0))}</b></td></tr></tbody></table>` : `<div class="empty">无耗时数据</div>`}
 
 <h2>对齐诊断</h2>
-${align ? `<div class="sub">初始窗 ${align.winInit}s · 安全区 ${align.safe}s · 最小窗 ${align.minWin}s · 缩窗 ${align.shrinks} 次 · 降级/插值窗 ${align.degraded} · 插值区间 ${spans.length} 段（≈${mmss(interpSecs)}）${align.totalChars != null ? ` · 字符覆盖 ${align.coveredChars}/${align.totalChars}（前移修复 ${repairSpans.length} 段，残余纯插值 ${uncovChars} 字）${uncovChars ? " ⚠" : " ✓"}` : ""}</div>
+${align ? `<div class="sub">初始窗 ${align.winInit}s · 安全区 ${align.safe}s · 最小窗 ${align.minWin}s · 缩窗 ${align.shrinks} 次 · 降级/插值窗 ${align.degraded} · 插值区间 ${spans.length} 段（≈${mmss(interpSecs)}）${align.totalChars != null ? ` · 字符覆盖 ${align.coveredChars}/${align.totalChars}（候选救回 ${align.rescuedChars || 0} 字，纯插值 ${uncovChars} 字）${uncovChars ? " ⚠" : " ✓"}` : ""}</div>
 <table><thead><tr><th class="num">#</th><th>音频区间</th><th class="num">窗长</th><th class="num">单元</th><th class="num">covA</th><th class="num">covC</th><th class="num">匹配率</th><th>结果</th></tr></thead><tbody>${rowsHtml}</tbody></table>
 ${spans.length ? `<h3 style="font-size:13px;color:#fca5a5;margin:14px 0 4px">插值区间（此段时间为估算，字幕可能不准）</h3><ul>${spansHtml}</ul>` : ""}
-${repairSpans.length ? `<h3 style="font-size:13px;color:#c084fc;margin:14px 0 4px">★ 前移修复区（两遍法 · 紫色标注）</h3><div class="sub"><b>第一遍</b>：alignLong 主循环发现「前移重试丢了时间戳」的区域（被跨过的字没有真实对齐）。<b>第二遍</b>：对每个这样的区域，取<b>重叠窗 [A,B]</b>（A=窗起=上一可靠词end；B=首个真正前进的 committed 词=右真锚）喂回对齐器拿真实逐字时间（<b>重叠窗·真实对齐</b>）；若又塌（覆盖&lt;50%）则在 [A,B] 内<b>均匀铺</b>。两端钉真锚 → 不漏 GAP、不堆接缝。<b>调用次数 = 前移区个数</b>。</div><table><thead><tr><th class="num">字符区间</th><th class="num">字数</th><th>重铺至</th><th>方式</th><th>文本</th></tr></thead><tbody>${repairHtml}</tbody></table>` : ""}
-${uncovered.length ? `<h3 style="font-size:13px;color:#fca5a5;margin:14px 0 4px">⚠ 残余未获真实对齐的字/词（安全网线性插值，应为空）</h3><table><thead><tr><th class="num">字符区间</th><th class="num">字数</th><th>估算时间</th><th>文本</th></tr></thead><tbody>${uncovHtml}</tbody></table>` : ""}` : `<div class="empty">本次未走整段 alignLong 路径（分段转写或回退），无逐窗对齐轨迹。</div>`}
+${candidates.length ? `<h3 style="font-size:13px;color:#fcd34d;margin:14px 0 4px">采用候选时间的字/词（时间取自其它对齐尝试的候选，非本窗真实对齐，可能飘移）</h3><table><thead><tr><th>估算时间</th><th class="num">字符区间</th><th>文本</th></tr></thead><tbody>${candHtml}</tbody></table>` : ""}
+${uncovered.length ? `<h3 style="font-size:13px;color:#fca5a5;margin:14px 0 4px">⚠ 未获真实对齐的字/词（已线性插值兜底，需人工核对）</h3><div class="sub">「候选建议」=被拒候选原本想放的时间；若它明显超出「估算时间」的右界，说明是右接缝(下一committed单元)塌了/太早，候选其实更可信 → 应向后扩锚重插。</div><table><thead><tr><th>原因</th><th class="num">字符区间</th><th class="num">字数</th><th>估算时间</th><th class="num">候选建议</th><th>文本</th></tr></thead><tbody>${uncovHtml}</tbody></table>` : ""}
+${repairSpans.length ? `<h3 style="font-size:13px;color:#c084fc;margin:14px 0 4px">★ 重对齐区（触发=未获真实时间戳；与飞掠重叠则扩到突变spike）</h3><div class="sub"><b>触发器只有「未获真实时间戳」的字</b>（resolveCoverage 只能线性插值的洞）。每段未获真实区取<b>自己的音频切片</b>喂回对齐器拿真实逐字时间（重对齐·未获真实）；若它与「飞掠区」重叠，则窗口右扩过 飞掠+伪正常 直到「突变spike」末端（那才是可信右锚），标为<b>重对齐·还债</b>。切片对齐失败：还债窗回退<b>启发式(兜底)</b>，纯未获真实窗保留原插值。<b>只改窗内的字，窗外一律不动</b>；两端为 committed 真锚点，零级联。成功重对齐的区间会从上面的「未获真实」告警中移除。紫色标注全篇一致。</div><table><thead><tr><th class="num">字符区间</th><th class="num">字数</th><th>重铺至</th><th>方式</th><th>飞掠spike</th><th>文本</th></tr></thead><tbody>${repairHtml}</tbody></table>` : ""}` : `<div class="empty">本次未走整段 alignLong 路径（分段转写或回退），无逐窗对齐轨迹。</div>`}
 
 <h2>可疑对齐区间（语速异常自动检出 · ${suspects.length} 段）</h2>
 ${suspects.length ? `<div class="sub">启发式，需人工核对：<b style="color:#fca5a5">挤压·飞速掠过</b>=一整句被压进一瞬；<b style="color:#fbbf24">疑似停滞/漂移</b>=语速异常慢。整体平移式漂移（局部语速正常）此表测不出，需重叠共识(C档)量化。</div>
 <table><thead><tr><th>类型</th><th>时间</th><th class="num">语速/基准</th><th>文本</th></tr></thead><tbody>${suspHtml}</tbody></table>` : `<div class="empty">未检出语速异常区间。（注：整体平移式漂移此法测不出。）</div>`}
 
-<h2>逐字时间戳（${charRows.length} 字${repairChars ? ` · <span style="color:#c084fc">${repairChars} 字 前移修复区</span>` : ""}${piledChars ? ` · <span style="color:#fca5a5">${piledChars} 字 0s堆叠</span>` : ""}）</h2>
-${charRows.length ? `<div class="sub"><b style="color:#c084fc">紫（左边框）=前移修复区</b>（第二遍重叠窗重对齐/均匀铺后的最终结果，来自 align.repairSpans）；<b style="color:#fca5a5">红=0s堆叠</b>（&lt;20ms）；<b style="color:#fbbf24">黄=落在插值区间</b>。前移修复后红/黄应基本消失；若仍见残留，说明该处重叠窗又塌或属抢话/重叠。</div>
+<h2>逐字时间戳（${charRows.length} 字${repairChars ? ` · <span style="color:#c084fc">${repairChars} 字 修复区</span>` : ""}${piledChars ? ` · <span style="color:#fca5a5">${piledChars} 字 0s堆叠</span>` : ""}${giantChars ? ` · <span style="color:#7dd3fc">${giantChars} 字 巨无霸</span>` : ""}）</h2>
+${charRows.length ? `<div class="sub"><b style="color:#c084fc">紫（左边框）=停顿债重铺块</b>：飞掠run+下游债spike 已整块重排后的最终结果（来自 align.repairSpans，全篇一致）。<b style="color:#fca5a5">红=0s堆叠</b>（&lt;20ms）；<b style="color:#f0a868">橙=非人类语速</b>（≤max(60ms,0.4×中位)，重铺后应基本消失）；<b style="color:#7dd3fc">蓝=巨无霸</b>（≥max(4s,15×中位)，重铺后应基本消失）；<b style="color:#fbbf24">黄=落在插值区间</b>。若重铺后仍见红/蓝残留，说明该处未命中模式（如抢话/重叠）。</div>
 <details open><summary style="cursor:pointer;color:#93c5fd;margin-bottom:8px">展开 / 收起逐字表</summary>
 <table><thead><tr><th class="num">#</th><th class="num">段</th><th>字</th><th class="num">start</th><th class="num">end</th><th class="num">时长ms</th><th class="num">距上字ms</th></tr></thead><tbody>${charHtml}</tbody></table>
 </details>` : `<div class="empty">无逐字时间戳数据。</div>`}
@@ -1622,13 +1657,15 @@ function buildCharToTime(units, map) {
   };
 }
 
-// GUARANTEE EVERY 字/词 A TIMESTAMP (settlement, pass-2-aware). Committed + pass-2
-// re-aligned units pass through verbatim; any char BETWEEN them (should be ≈0 now that
-// pass 2 re-aligns every forward-retry shed region) is linearly interpolated between the
-// two neighbouring real times. Coverage & alarm are at TOKEN granularity: each CJK char
-// is one 字, each Latin/digit run is one 词. A token with NO covered char is alarmed in
-// uncoveredSpans (a safety-net; expected empty). No candidate pool any more.
-function resolveCoverage(units, map, fullText, total) {
+// GUARANTEE EVERY 字/词 A TIMESTAMP. Committed align units pass through verbatim; the
+// chars BETWEEN them (mainly forward-retry "shed" spans, plus any trailing text) are
+// holes, filled PER CHAR by the best pooled candidate (GOOD-window units weighted high),
+// clamped monotonically into the seam. Coverage & alarm are judged at TOKEN granularity:
+// each CJK char is one 字, each Latin/digit run is one 词. A token is fine if ANY of its
+// chars got a real align time (a word-internal fragment like "nt"/"ed" inherits the
+// word's time); only a token with NO covered char is truly unaligned → interpolated and
+// listed in uncoveredSpans so the record alarms exactly which 字/词 were guessed.
+function resolveCoverage(units, map, pool, fullText, total) {
   const N = fullText.length;
   const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
   const isVis = (c) => c >= 0 && c < N && /[\p{L}\p{N}]/u.test(fullText[c]);          // 字母/数字/汉字才算“字”
@@ -1637,20 +1674,50 @@ function resolveCoverage(units, map, fullText, total) {
   const cU = order.map((i) => units[i]);
   const cM = order.map((i) => map[i]);
   const outU = [], outM = [];
-  const covered = new Uint8Array(N);   // 1 = has a real (committed / re-aligned) time
+  const covered = new Uint8Array(N);   // 1 = committed real time, 2 = pooled-candidate rescue
+  const rejected = new Uint8Array(N);  // a candidate EXISTED but its time was unreasonable → interpolated
+  const rejTime = new Float64Array(N).fill(-1); // the (bogus-per-seam) time that candidate SUGGESTED — kept for diagnosis
+  const SEAM_TOL = 1.0;                // a candidate must land within the seam ±1s, else it is bogus
 
-  // Fill hole [g0,g1) (no unit covers it) by LINEAR interpolation between seam times.
+  // Fill hole [g0,g1) (no committed unit) between seam times tPrev..tNext.
   const fillGap = (g0, g1, tPrev, tNext) => {
     g0 = clamp(Math.round(g0), 0, N); g1 = clamp(Math.round(g1), g0, N);
     if (g1 <= g0) return;
-    const dur = Math.max(1e-3, tNext - tPrev), wide = Math.max(1, g1 - g0);
-    const fc = (c) => tPrev + dur * ((c - g0) / wide);
+    const n = g1 - g0;
+    const T = new Float64Array(n), Q = new Float64Array(n).fill(-1);
+    // per-char best candidate from the pool (highest quality wins)
+    for (const u of pool) {
+      if (u.cj <= g0 || u.ci >= g1) continue;
+      const s = Math.max(g0, u.ci), e = Math.min(g1, u.cj), w = Math.max(1, u.cj - u.ci);
+      for (let c = s; c < e; c++) {
+        const k = c - g0;
+        if (u.q > Q[k]) { Q[k] = u.q; T[k] = u.t0 + (u.t1 - u.t0) * ((c + 0.5 - u.ci) / w); }
+      }
+    }
+    // anchors: left seam + every ACCEPTED candidate char + right seam, monotonic.
+    // A candidate whose time falls outside the seam ±SEAM_TOL is unreasonable (it would
+    // only pile at a seam edge) → dropped here, marked `rejected`, and interpolated.
+    const lo = Math.min(tPrev, tNext), hi = Math.max(tPrev, tNext);
+    const aC = [g0], aT = [tPrev];
+    for (let k = 0; k < n; k++) {
+      if (Q[k] < 0) continue;
+      if (T[k] < lo - SEAM_TOL || T[k] > hi + SEAM_TOL) { rejected[g0 + k] = 1; rejTime[g0 + k] = T[k]; continue; }
+      aC.push(g0 + k + 0.5); aT.push(clamp(T[k], lo, hi)); if (!covered[g0 + k]) covered[g0 + k] = 2;
+    }
+    aC.push(g1); aT.push(tNext);
+    for (let i = 1; i < aT.length; i++) if (aT[i] < aT[i - 1]) aT[i] = aT[i - 1];
+    const timeAt = (c) => {
+      for (let i = 1; i < aC.length; i++) if (c <= aC[i]) { const p = aC[i - 1], q = aC[i]; return q <= p ? aT[i] : aT[i - 1] + (aT[i] - aT[i - 1]) * (c - p) / (q - p); }
+      return aT[aT.length - 1];
+    };
+    // emit word tokens over the hole, timed by timeAt (never all-on-one-timestamp)
     const span = fullText.slice(g0, g1);
     const re = /\S+/g; let m, any = false;
     while ((m = re.exec(span))) {
       any = true;
       const ci = g0 + m.index, cj = ci + m[0].length;
-      let st = fc(ci), en = fc(cj); if (en < st) en = st;
+      let st = timeAt(ci), en = timeAt(cj);
+      if (en < st) en = st;
       outU.push({ text: m[0], start: round3(st), end: round3(en) });
       outM.push({ ci, cj });
     }
@@ -1667,29 +1734,49 @@ function resolveCoverage(units, map, fullText, total) {
   }
   if (N > prevCj) fillGap(prevCj, N, prevT, total);
 
-  // TOKEN-LEVEL coverage & alarm. A token with ANY covered char is OK; a fully-uncovered
-  // token (only reachable if a hole had to be interpolated) is alarmed in uncoveredSpans.
+  // TOKEN-LEVEL coverage & alarm. Walk 字/词: CJK char = 1 token, Latin/digit run = 1
+  // token. A token with ANY covered char is OK; a fully-uncovered token is alarmed with
+  // a reason ('badcand' if it had a rejected candidate, else 'nocand'). Tokens that used
+  // a pooled candidate are also reported (candidateSpans) so drift can be located.
   const tAt = buildCharToTime(outU, outM);
-  const uncoveredSpans = [];
-  let visTotal = 0, uncoveredChars = 0, pend = null;
-  const flush = () => { if (pend) { uncoveredSpans.push({ c0: pend.c0, c1: pend.c1, text: fullText.slice(pend.c0, pend.c1), tStart: round3(tAt(pend.c0)), tEnd: round3(tAt(pend.c1)) }); pend = null; } };
+  const uncoveredSpans = [], candidateSpans = [];
+  let visTotal = 0, uncoveredChars = 0, rescuedChars = 0, committedChars = 0;
+  let pend = null, cpend = null;
+  const flush = () => { if (pend) { uncoveredSpans.push({ c0: pend.c0, c1: pend.c1, text: fullText.slice(pend.c0, pend.c1), tStart: round3(tAt(pend.c0)), tEnd: round3(tAt(pend.c1)), reason: pend.reason, candStart: pend.candLo == null ? null : round3(pend.candLo), candEnd: pend.candHi == null ? null : round3(pend.candHi) }); pend = null; } };
+  const cflush = () => { if (cpend) { candidateSpans.push({ c0: cpend.c0, c1: cpend.c1, text: fullText.slice(cpend.c0, cpend.c1), tStart: round3(tAt(cpend.c0)), tEnd: round3(tAt(cpend.c1)) }); cpend = null; } };
   let c = 0;
   while (c < N) {
     if (!isVis(c)) { c++; continue; }
     let e;
     if (isCJK(c)) e = c + 1;
     else { e = c; while (e < N && isVis(e) && !isCJK(e)) e++; }   // one Latin/digit 词
-    let anyCov = false, vis = 0;
-    for (let k = c; k < e; k++) { if (isVis(k)) vis++; if (covered[k]) anyCov = true; }
+    let anyCov = false, anyCand = false, anyRej = false, vis = 0;
+    for (let k = c; k < e; k++) {
+      if (isVis(k)) { vis++; if (covered[k] === 2) rescuedChars++; else if (covered[k] === 1) committedChars++; }
+      if (covered[k]) anyCov = true;
+      if (covered[k] === 2) anyCand = true;
+      if (rejected[k]) anyRej = true;
+    }
     visTotal += vis;
-    if (!anyCov) { uncoveredChars += vis; if (pend) pend.c1 = e; else pend = { c0: c, c1: e }; }
-    else flush();
+    if (anyCand) { if (cpend) cpend.c1 = e; else cpend = { c0: c, c1: e }; } else cflush();
+    if (!anyCov) {
+      uncoveredChars += vis;
+      const reason = anyRej ? "badcand" : "nocand";
+      // for badcand: what time did the rejected candidates SUGGEST for this token? (min/max)
+      let tlo = Infinity, thi = -Infinity;
+      if (anyRej) for (let k = c; k < e; k++) if (rejected[k] && rejTime[k] >= 0) { if (rejTime[k] < tlo) tlo = rejTime[k]; if (rejTime[k] > thi) thi = rejTime[k]; }
+      const hasCand = thi !== -Infinity;
+      if (pend && pend.reason === reason) {
+        pend.c1 = e;
+        if (hasCand) { pend.candLo = pend.candLo == null ? tlo : Math.min(pend.candLo, tlo); pend.candHi = pend.candHi == null ? thi : Math.max(pend.candHi, thi); }
+      } else { flush(); pend = { c0: c, c1: e, reason, candLo: hasCand ? tlo : null, candHi: hasCand ? thi : null }; }
+    } else flush();
     c = e;
   }
-  flush();
+  flush(); cflush();
 
   const coveredChars = visTotal - uncoveredChars;
-  return { units: outU, map: outM, uncoveredSpans, coveredChars, totalChars: visTotal };
+  return { units: outU, map: outM, uncoveredSpans, candidateSpans, rescuedChars, committedChars, coveredChars, totalChars: visTotal };
 }
 
 // De-burst the aligner's local micro-collapses. At pauses (usually sentence ends)
@@ -1717,14 +1804,179 @@ function deburstUnits(units, MINSLOT = 0.14, MAXCARRY = 1.5) {
   return units;
 }
 
+// Re-align GUESSED spans to real per-char times. TRIGGER = "未获真实时间戳" (uncovered) chars
+// only — the spans resolveCoverage had to LINEARLY INTERPOLATE (no committed align time). For
+// each contiguous uncovered run we take its own audio slice [left anchor .. right anchor] and
+// feed it back to the aligner for REAL times. EXTENSION: if an uncovered run overlaps a "flying
+// run" (cram) whose borrowed time was DUMPED on a downstream duration SPIKE (突变点), the
+// uncovered right anchor is itself the collapsed spike and thus untrustworthy — so we extend
+// the window rightward through the flying run + the "pseudo-normal" tail up to (and including)
+// the spike, whose END is the next reliable anchor. A flying run that overlaps NO uncovered
+// region does NOT trigger (leave it). Only units inside the chosen window are ever rewritten;
+// committed words outside stay put. Successful re-aligns are dropped from diag.uncoveredSpans
+// (they're no longer guessed) and recorded in diag.repairSpans for the report.
+async function realignGuessedSpans(segsOut, fullText, diag, alignSlice, id = "") {
+  const uncov = Array.isArray(diag?.uncoveredSpans) ? diag.uncoveredSpans : [];
+  if (!uncov.length) return;                        // nothing was guessed → nothing to re-align
+  // Flatten to per-word units (CJK flying appears only after sliceToWords splits per char).
+  const units = [];
+  for (const s of segsOut) for (const w of (s.words || [])) units.push(w);
+  const n = units.length;
+  if (n < 2) return;
+  const visLen = (t) => ((t || "").match(/[\p{L}\p{N}]/gu) || []).length;
+  const dur = (i) => Math.max(0, (units[i].end || 0) - (units[i].start || 0));
+
+  // Map each flat word to its fullText [ci,cj) by a forward scan (word.text is an exact
+  // substring of fullText, in order) — lets us mark which words are uncovered (char coords).
+  const wci = new Array(n), wcj = new Array(n);
+  { let cur = 0; for (let k = 0; k < n; k++) { const t = units[k].text || ""; const at = t ? fullText.indexOf(t, cur) : -1; if (at >= 0) { wci[k] = at; wcj[k] = at + t.length; cur = at + t.length; } else { wci[k] = cur; wcj[k] = cur; } } }
+  const isUncovWord = (k) => uncov.some((u) => wci[k] < u.c1 && wcj[k] > u.c0);
+  const uw = new Uint8Array(n); for (let k = 0; k < n; k++) uw[k] = isUncovWord(k) ? 1 : 0;
+  if (!uw.some((x) => x)) return;
+
+  // duration stats (over the CURRENT/pre-realign timeline) for cram & spike detection
+  const ds = [];
+  for (let i = 0; i < n; i++) { const d = dur(i); if (d > 0.001) ds.push(d); }
+  ds.sort((a, b) => a - b);
+  const med = ds.length ? ds[Math.floor(ds.length / 2)] : 0.2;
+  const cramMax = Math.max(0.06, med * 0.4);
+  const giantAbs = Math.max(4, med * 15);
+  const isCram = (i) => { const d = dur(i); return d > 0 && d <= cramMax; };
+  const isSpike = (i) => {
+    const d = dur(i);
+    if (i <= 0 || i >= n - 1) return d >= giantAbs;
+    return d >= 3 * med && d >= 2.5 * dur(i - 1) && d >= 2.5 * dur(i + 1);
+  };
+  // Given a start index inside/at a flying run, return the block [runStart..spike] or null.
+  const flyingBlock = (from) => {
+    // walk left to the run start, right to the run end (allow single 1-unit gaps)
+    let s = from; while (s - 1 >= 0 && (isCram(s - 1) || (s - 2 >= 0 && isCram(s - 2)))) s--;
+    let e = from; while (e + 1 < n && (isCram(e + 1) || (e + 2 < n && isCram(e + 2)))) e++;
+    let runLen = 0; for (let k = s; k <= e; k++) if (isCram(k)) runLen++;
+    if (runLen < 3) return null;
+    let sp = -1, spDur = 0;
+    for (let k = e + 1; k < n && k - e <= 15; k++) if (isSpike(k) && dur(k) > spDur) { sp = k; spDur = dur(k); }
+    if (sp < 0) return null;
+    return { s, sp, spDur };
+  };
+  const anyCramIn = (a, b) => { for (let k = a; k <= b; k++) if (isCram(k)) return k; return -1; };
+
+  // ---- Build re-align windows from uncovered runs (with the flying→spike extension) ----
+  const windows = [];
+  let k = 0;
+  while (k < n) {
+    if (!uw[k]) { k++; continue; }
+    let u0 = k; while (k + 1 < n && uw[k + 1]) k++; let u1 = k; k++;
+    let lo = u0, hi = u1, spike = -1, spDur = 0;
+    // does the uncovered run touch a flying run? (a cram inside it, or a cram just after it)
+    let seed = anyCramIn(u0, u1);
+    if (seed < 0 && u1 + 1 < n && isCram(u1 + 1)) seed = u1 + 1;
+    if (seed < 0 && u0 - 1 >= 0 && isCram(u0 - 1)) seed = u0 - 1;
+    if (seed >= 0) {
+      const blk = flyingBlock(seed);
+      if (blk) { lo = Math.min(lo, blk.s); hi = Math.max(hi, blk.sp); spike = blk.sp; spDur = blk.spDur; }
+    }
+    windows.push({ lo, hi, spike, spDur });
+  }
+  if (!windows.length) return;
+  // merge windows that overlap/abut (extension can make two uncovered runs share a block)
+  windows.sort((a, b) => a.lo - b.lo);
+  const merged = [windows[0]];
+  for (let w = 1; w < windows.length; w++) {
+    const last = merged[merged.length - 1], cur = windows[w];
+    if (cur.lo <= last.hi + 1) { last.hi = Math.max(last.hi, cur.hi); if (cur.spike > last.spike || (last.spike < 0)) { last.spike = cur.spike; last.spDur = cur.spDur; } }
+    else merged.push(cur);
+  }
+
+  // TRUE idle region: a large collapse piles many words at ONE instant, and LATE — so
+  // units[lo].start / units[hi].end are collapsed values, NOT real anchors. Grow the window
+  // over contiguous PILED neighbours, then take [prev reliable word END .. next reliable word
+  // START] — the real span this text occupies. Both the re-align slice AND the uniform fallback
+  // use it. (Zoom 4:33: 59 words piled into 1.3s; real region = [4:21.36 .. 4:35.44] ≈ 14s.)
+  const isPiled = (i) => dur(i) < 0.06;
+  for (const w of merged) {
+    while (w.lo - 1 >= 0 && isPiled(w.lo - 1)) w.lo--;
+    while (w.hi + 1 < n && isPiled(w.hi + 1)) w.hi++;
+    w.A = w.lo > 0 ? (units[w.lo - 1].end || 0) : (units[w.lo].start || 0);
+    w.B = w.hi < n - 1 ? (units[w.hi + 1].start || 0) : (units[w.hi].end || 0);
+    if (!(w.B > w.A + 0.05)) { w.A = units[w.lo].start || 0; w.B = Math.max(w.A + 0.05, units[w.hi].end || 0); }
+    let t = ""; for (let x = w.lo; x <= w.hi; x++) t += (units[x].text || ""); w.text = t;
+  }
+
+  // ---- Re-align each window over its TRUE idle region (parallel, bounded). ----
+  await mapLimit(merged, 4, async (w, wi) => {
+    const { A, B, text } = w;
+    if (!(B > A + 0.15) || visLen(text) < 2 || typeof alignSlice !== "function") { w.ok = false; return; }
+    let reUnits = [];
+    try { reUnits = await alignSlice(A, B, text, `re${wi}`); } catch { reUnits = []; }
+    if (!Array.isArray(reUnits) || !reUnits.length) { w.ok = false; return; }
+    const map = mapUnitsToRef(reUnits, text);
+    const tAt = buildCharToTime(reUnits, map);
+    const t0 = tAt(0), t1 = tAt(text.length);
+    // Reject a re-align that COLLAPSED AGAIN inside the slice (text piled near one end, covering
+    // ≪ the window): require it to span ≥50% of [A,B]; otherwise we uniform-spread instead.
+    if (!(t1 > t0 && t0 >= A - 0.05 && t1 <= B + 0.05 && (t1 - t0) >= (B - A) * 0.5)) { w.ok = false; return; }
+    w.ok = true; w.tAt = tAt;
+  });
+
+  // ---- Apply: SUCCESS → real per-char times; FAILURE (re-align collapsed / unavailable) →
+  // UNIFORM distribution across the TRUE idle region [A,B] (never keep a collapsed version).
+  const covered = [];                               // fullText char ranges now given REAL times
+  const spans = [];
+  for (const w of merged) {
+    const { lo, hi, spike, spDur, A, B } = w;
+    // DISPLAY text = original slice of fullText (keeps real spaces/punctuation). w.text is the
+    // units concatenation (no separators) — fine to FEED the aligner, but "wehadsome…" for
+    // English in the report. fullText.slice(c0,c1) reads correctly for both English and CJK.
+    const blkText = fullText.slice(wci[lo], wcj[hi]);
+    if (w.ok) {
+      let off = 0, last = A;
+      for (let x = lo; x <= hi; x++) {
+        const len = (units[x].text || "").length;
+        let st = w.tAt(off), en = w.tAt(off + len);
+        st = Math.min(Math.max(st, last), B); en = Math.min(Math.max(en, st + 0.02), B);
+        units[x].start = round3(st); units[x].end = round3(en); last = en; off += len;
+      }
+      covered.push([wci[lo], wcj[hi]]);            // got REAL times → drop from uncovered alarm
+      spans.push({ c0: wci[lo], c1: wcj[hi], tStart: round3(A), tEnd: round3(B), text: blkText, method: "realign", kind: spike >= 0 ? "debt" : "uncovered", spikeText: spike >= 0 ? units[spike].text : "", spikeSecs: spike >= 0 ? round3(spDur) : 0 });
+      continue;
+    }
+    // FALLBACK — uniform across [A,B], proportional to each unit's char length. Still a GUESS
+    // (not real alignment), so it STAYS in the uncovered alarm; we just refuse to leave the
+    // collapsed pile behind.
+    let totalLen = 0; for (let x = lo; x <= hi; x++) totalLen += Math.max(1, (units[x].text || "").length);
+    const span = B - A; let acc = 0;
+    for (let x = lo; x <= hi; x++) {
+      const len = Math.max(1, (units[x].text || "").length);
+      const st = A + span * (acc / totalLen); acc += len; const en = A + span * (acc / totalLen);
+      units[x].start = round3(st); units[x].end = round3(Math.max(st + 0.02, en));
+    }
+    spans.push({ c0: wci[lo], c1: wcj[hi], tStart: round3(A), tEnd: round3(B), text: blkText, method: "uniform", kind: spike >= 0 ? "debt" : "uncovered", spikeText: spike >= 0 ? units[spike].text : "", spikeSecs: spike >= 0 ? round3(spDur) : 0 });
+  }
+
+  if (spans.length) {
+    diag.repairSpans = spans;
+    for (const s of segsOut) { const ws = s.words || []; if (ws.length) { s.start = ws[0].start; s.end = ws[ws.length - 1].end; } }
+  }
+  // Drop the now-REAL spans from the uncovered alarm (they got true timestamps).
+  if (covered.length) {
+    diag.uncoveredSpans = uncov.filter((u) => !covered.some(([c0, c1]) => u.c0 >= c0 && u.c1 <= c1));
+    // recount the headline uncovered-chars figure so the report/badge matches
+    if (typeof diag.uncoveredChars === "number") {
+      let uc = 0; for (const u of diag.uncoveredSpans) uc += visLen(u.text || "");
+      diag.uncoveredChars = uc;
+    }
+  }
+}
+
 // Speaker smoothing: a collapsed/forward-retry "shed" span crams a whole sentence into a
 // sub-second instant at a window seam; that degenerate ~0s segment then grabs whatever diar
 // cluster sits at that instant (often a spurious micro-blip), so one sentence shows as a
 // different speaker. Fix WITHOUT touching text or times: a run of abnormally-fast, very-short
 // segments sandwiched between two segments of the SAME (other) speaker is a diar artifact →
 // inherit that speaker. Real short interjections (neighbors differ, or normal rate) untouched.
-// NOTE: forward-retry shed regions are re-timed INSIDE alignLong (pass 2), so by the time the
-// segments reach here the only crammed ~0s spans left are genuine diar artifacts to smooth.
+// MUST run BEFORE redistributeParkedDebt — once the crammed segment is spread back to a normal
+// duration, the "crammed" test no longer fires and the wrong speaker would survive.
 function smoothSpeakers(segments, id = "") {
   const visLen = (t) => ((t || "").match(/\S/g) || []).length;
   const isCrammed = (s) => {
@@ -1792,22 +2044,19 @@ function reliableAlignEnd(units, tMax, N = 6, dt = 0.12) {
 // A window that still collapses pushes its text start forward and retries; a collapsed
 // or empty window is interpolated in place (1.0.14 behaviour, untouched). The ONE thing
 // 1.0.14 threw away — the text a successful forward-retry SHEDS (the "flew-by" chars) —
-// is now fixed by a TWO-PASS method (1.0.20): PASS 1 = this main loop, which RECORDS each
-// forward-retry shed region into shed[] (chars + true time anchors) but otherwise runs as
-// 1.0.14; PASS 2 (after the loop) re-aligns each shed region ONCE over an overlap window
-// [A,B], or uniform-spreads it there if that collapses again. resolveCoverage() then just
-// sorts + fills any residual hole by interpolation and ALARMS it. Chars 1.0.14 timed
-// correctly are passed through verbatim. No diar → uniform char-rate + fixed WINMAX cuts.
-// Network errors throw and abort. Returns {units, map, diag}.
+// is now rescued: every attempt's units seed a candidate pool (GOOD windows weighted
+// high), and resolveCoverage() gives each shed char the best pooled time, or interpolates
+// + ALARMS it in diag.uncoveredSpans if nothing covers it. Chars 1.0.14 timed correctly
+// are passed through verbatim. No diar → uniform char-rate + fixed WINMAX cuts. Network
+// errors throw and abort. Returns {units, map, diag}.
 async function alignLong(alignSlice, fullText, total, diarSegs, onProg, id = "") {
   const WINMAX = 230, SAFE = 230, MAXRETRY = 2;    // WINMAX < aligner horizon (~255s)
   const N = fullText.length;
   const units = [], map = [];
-  // PASS-1 product: forward-retry SHED regions — chars a window only aligned AFTER
-  // shedding leading text via forward retry, so they got NO real time (the "flew-by"
-  // text). Pass 2 re-aligns each region over an overlap window. shed.length == the
-  // number of overlap re-align calls (bounded exactly to the forward-retry regions).
-  const shed = [];
+  // Candidate pool: EVERY unit of EVERY attempt (good OR failed), in global chars.
+  // resolveCoverage() uses it to give every hole char the best available real time
+  // instead of dropping forward-retry "shed" text to zero.
+  const pool = [];
   const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
   const diag = { winInit: WINMAX, safe: SAFE, minWin: 0, rows: [], interpSpans: [], shrinks: 0, degraded: 0 };
 
@@ -1924,8 +2173,7 @@ async function alignLong(alignSlice, fullText, total, diarSegs, onProg, id = "")
         row(b, "插值·空窗", null);
         diag.interpSpans.push({ a: round3(a), b: round3(b), reason: "空窗" });
         // 1.0.14 exactly: interpolate [c0,cEnd). Any shed [cOff,c0) from a prior retry
-        // stays a hole → resolveCoverage() interpolates + alarms it (empty windows do not
-        // seed a pass-2 shed region; only GOOD-after-retry windows do).
+        // stays a hole → resolveCoverage() rescues it from GOOD-window candidates.
         const cEnd = lastWin ? N : clamp(Math.round(charAtTime(b)), c0 + 1, N);
         emitInterp(c0, cEnd, a, b);
         cOff = clamp(cEnd, c0, N); a = b; resolved = true; break;
@@ -1950,8 +2198,8 @@ async function alignLong(alignSlice, fullText, total, diarSegs, onProg, id = "")
         // (validated "早切无害"). Interpolating a good short prefix was the 660→883 bug.
         earlyPlateau = dense && covRel < 8;
       }
-      // Map ALL units (sequential scan → prefix == reliable slice); the reliable prefix
-      // [0..ck] is what we commit, the rest is discarded (pass 2 re-derives shed times).
+      // Map ALL units (sequential scan → prefix == reliable slice) so the pool can
+      // hold candidates for EVERY char this attempt touched, not just the kept prefix.
       const lmFull = mapUnitsBounded(cur, part);
       const lm = lmFull.slice(0, ck + 1);
       const covC = lm.length ? lm[lm.length - 1].cj : 0;
@@ -1962,9 +2210,21 @@ async function alignLong(alignSlice, fullText, total, diarSegs, onProg, id = "")
         lagging = dense && covRel > 20 && covC < 0.3 * expC;
         bad = earlyPlateau || lagging;
       }
+      // Record this attempt's units into the candidate pool ONLY to rescue forward-
+      // retry "shed" holes later. A GOOD window's units (incl. its over-provided tail,
+      // which aligns the shed text over its REAL audio) get a big quality bonus so a
+      // shed hole prefers them over a failed attempt's piled/collapsed times.
+      const addToPool = (isGood) => {
+        const bonus = isGood ? 10 : 0;
+        for (let i = 0; i < cur.length; i++) {
+          const gi = c0 + lmFull[i].ci, gj = c0 + lmFull[i].cj;
+          if (gj > gi) pool.push({ ci: gi, cj: gj, t0: cur[i].start, t1: Math.max(cur[i].start, cur[i].end), q: bonus + matchRate * 2 + (i <= ckRel ? 1 : 0) + (lmFull[i].hit ? 0.5 : 0) });
+        }
+      };
       const best = { u: cur, k: ck, lm, covA: covRel, covC, matchRate };
       if (bad && attempt < MAXRETRY) {
         retries++; diag.shrinks++;
+        addToPool(false);
         row(b, `前移重试 +${PUSH}字（${earlyPlateau ? "塌窗" : "文本滞后"}）`, best);
         continue;
       }
@@ -1972,6 +2232,7 @@ async function alignLong(alignSlice, fullText, total, diarSegs, onProg, id = "")
         degraded++;
         const w0 = cur[0] || {};
         console.log(`[${id}] alignLong 塌窗直插 pass${pass} a=${a.toFixed(0)} b=${b.toFixed(0)} c0=${c0} units=${cur.length} covRel=${covRel.toFixed(0)}s covC=${covC} matchRate=${matchRate.toFixed(2)} 首unit="${(w0.text || "").slice(0, 16)}"@${(w0.start || 0).toFixed(1)}`);
+        addToPool(false);
         row(b, `插值·塌窗 ${Math.round(b - a)}s`, best);
         diag.interpSpans.push({ a: round3(a), b: round3(b), reason: earlyPlateau ? "塌窗" : "文本滞后" });
         // 1.0.14 exactly: interpolate [cOff,cEnd) cleanly (NO candidate processing on a
@@ -1980,21 +2241,13 @@ async function alignLong(alignSlice, fullText, total, diarSegs, onProg, id = "")
         emitInterp(cOff, cEnd, a, b);
         cOff = clamp(cEnd, cOff, N); a = b; resolved = true; break;
       }
-      // GOOD: keep the reliable prefix (exactly 1.0.14).
+      // GOOD: keep the reliable prefix (exactly 1.0.14); its units also seed the pool
+      // (with the good bonus) so a following window's shed hole can borrow this tail.
+      addToPool(true);
       for (let i = 0; i <= ck; i++) {
         const st = clamp(cur[i].start, a, b);
         units.push({ text: cur[i].text, start: round3(st), end: round3(clamp(cur[i].end, st, b)) });
         map.push({ ci: c0 + lm[i].ci, cj: c0 + lm[i].cj });
-      }
-      // PASS-1 capture: this window only aligned AFTER a forward retry (attempt>0), so the
-      // skipped [cOff,c0) chars got NO real time. Record the region + TRUE time anchors for
-      // the pass-2 overlap re-align. RIGHT anchor = first committed unit whose time genuinely
-      // advances past the window start `a` (skip the piled 塌头 head); the piled head [c0,cr)
-      // is part of the same collapse → re-written together. LEFT anchor = a (prev reliable end).
-      if (attempt > 0 && c0 > cOff) {
-        let j = 0; while (j < ck && cur[j].start <= a + 0.3) j++;
-        const cr = Math.min(N, c0 + lm[j].ci);
-        shed.push({ C0: cOff, C1: Math.max(c0, cr), A: round3(a), B: round3(Math.max(a + 0.1, cur[j].start)) });
       }
       if (lastWin) { row(b, "真实对齐(末窗)", best); cOff = N; a = b; resolved = true; break; }
       // Register the (reliable-end char, time) anchor, then continue from it EXACTLY.
@@ -2005,75 +2258,22 @@ async function alignLong(alignSlice, fullText, total, diarSegs, onProg, id = "")
     }
     if (!resolved) a = b;  // safety net; should not happen
   }
-  // ---- PASS 2: fix each forward-retry SHED region with ONE overlap-window re-align.
-  // Pass 1 (the loop above) only DISCOVERED these regions; here we give them REAL times.
-  // Bounded to exactly shed.length gateway calls (parallel). Each region [C0,C1) is
-  // re-aligned over its overlap window [A,B] (A = window start = prev reliable end;
-  // B = first genuinely-advanced committed word). A re-align that COLLAPSED AGAIN (covers
-  // <50% of [A,B]) → uniform spread across [A,B]. Only [C0,C1) is (re)written; committed
-  // words outside stay put, so BOTH edges stay pinned to real anchors → no seam pile, no gap.
-  diag.repairSpans = [];
-  if (shed.length) {
-    await mapLimit(shed, 4, async (sh, si) => {
-      const { C0, C1, A, B } = sh;
-      const text = fullText.slice(C0, C1);
-      sh.newU = []; sh.method = "uniform";
-      const visN = (text.match(/[\p{L}\p{N}]/gu) || []).length;
-      if (B > A + 0.15 && visN >= 1 && typeof alignSlice === "function") {
-        let reUnits = [];
-        try { reUnits = await alignSlice(A, B, text, `re${si}`); } catch { reUnits = []; }
-        if (reUnits.length) {
-          const rMap = mapUnitsToRef(reUnits, text);
-          const tAt = buildCharToTime(reUnits, rMap);
-          const t0 = tAt(0), t1 = tAt(text.length);
-          // accept only if it spans ≥50% of [A,B] (else it collapsed again → uniform)
-          if (t1 > t0 && t0 >= A - 0.05 && t1 <= B + 0.05 && (t1 - t0) >= (B - A) * 0.5) {
-            for (let i = 0; i < reUnits.length; i++) {
-              const gi = C0 + rMap[i].ci, gj = C0 + rMap[i].cj;
-              if (gj > gi) sh.newU.push({ text: reUnits[i].text, start: round3(clamp(reUnits[i].start, A, B)), end: round3(clamp(reUnits[i].end, A, B)), ci: gi, cj: gj });
-            }
-            if (sh.newU.length) sh.method = "realign";
-          }
-        }
-      }
-      if (sh.method !== "realign") {
-        // FALLBACK: uniform spread of [C0,C1) across [A,B], proportional to char length.
-        sh.newU = [];
-        const span = Math.max(0.05, B - A), tot = Math.max(1, C1 - C0);
-        const re = /\S+/g; let m;
-        while ((m = re.exec(text))) {
-          const ci = C0 + m.index, cj = ci + m[0].length;
-          const st = A + span * ((ci - C0) / tot), en = A + span * ((cj - C0) / tot);
-          sh.newU.push({ text: m[0], start: round3(st), end: round3(Math.max(st + 0.02, en)), ci, cj });
-        }
-      }
-    });
-    // Apply: drop committed units that fall inside any re-written [C0,C1), then add the
-    // re-aligned/uniform units. resolveCoverage() below re-sorts by char and fills holes.
-    const done = shed.filter((s) => s.newU && s.newU.length);
-    if (done.length) {
-      const inAny = (ci, cj) => done.some((s) => ci < s.C1 && cj > s.C0);
-      for (let i = units.length - 1; i >= 0; i--) if (inAny(map[i].ci, map[i].cj)) { units.splice(i, 1); map.splice(i, 1); }
-      for (const s of done) {
-        for (const u of s.newU) { units.push({ text: u.text, start: u.start, end: u.end }); map.push({ ci: u.ci, cj: u.cj }); }
-        diag.repairSpans.push({ c0: s.C0, c1: s.C1, tStart: s.A, tEnd: s.B, method: s.method, text: fullText.slice(s.C0, s.C1).replace(/\s+/g, " ").slice(0, 140) });
-      }
-    }
-  }
-
-  // Settlement — sort committed + re-aligned units by char, fill any STILL-uncovered char
-  // by linear interpolation between neighbours, and ALARM it (should be ≈0 after pass 2).
-  const cov = resolveCoverage(units, map, fullText, total);
+  // Settlement — ONLY touches holes (chars no committed/interpolated unit covers, i.e.
+  // forward-retry "shed" spans + any trailing text). Everything 1.0.14 already timed
+  // (committed prefixes, collapsed/empty interpolation) is passed through untouched.
+  // A hole char takes the best pooled candidate (GOOD-window tail wins); a char with no
+  // candidate is interpolated + ALARMED. No char is ever left without a timestamp.
+  const cov = resolveCoverage(units, map, pool, fullText, total);
   diag.degraded = degraded;
   diag.uncoveredSpans = cov.uncoveredSpans;
+  diag.candidateSpans = cov.candidateSpans;
   diag.uncoveredChars = cov.totalChars - cov.coveredChars;
+  diag.rescuedChars = cov.rescuedChars;
+  diag.committedChars = cov.committedChars;
   diag.coveredChars = cov.coveredChars;
   diag.totalChars = cov.totalChars;
-  diag.repairCount = diag.repairSpans.length;
-  if (degraded || shed.length || diag.uncoveredChars) {
-    const nre = diag.repairSpans.filter((s) => s.method === "realign").length;
-    const nun = diag.repairSpans.filter((s) => s.method === "uniform").length;
-    console.log(`[${id}] alignLong 完成：${degraded} 窗塌/空、${retries} 次前移；前移修复区 ${diag.repairSpans.length} 段（重对齐 ${nre} / 均匀 ${nun}），残余纯插值 ${diag.uncoveredChars} 字/${cov.uncoveredSpans.length} 段，覆盖 ${cov.coveredChars}/${cov.totalChars}，DIAR=${hasDiar ? merged.length + "段" : "无"}`);
+  if (degraded || cov.rescuedChars || diag.uncoveredChars) {
+    console.log(`[${id}] alignLong 完成：${degraded} 个窗塌/空、${retries} 次前移；候选救回 ${cov.rescuedChars} 字（${cov.candidateSpans.length} 段），纯插值兜底 ${diag.uncoveredChars} 字（${cov.uncoveredSpans.length} 段），覆盖 ${cov.coveredChars}/${cov.totalChars}，DIAR=${hasDiar ? merged.length + "段" : "无"}`);
   }
   return { units: cov.units, map: cov.map, diag };
 }
@@ -3039,10 +3239,15 @@ async function runJob(id) {
           const words = finalizeWords(sliceToWords(fullText, 0, fullText.length, timeAtChar), 0, rec.durationSec || 0);
           segsOut = [{ start: 0, end: round3(rec.durationSec || 0), speaker: pickSpeaker(0, rec.durationSec || 0), text: fullText, words }];
         }
-        // Speaker smoothing (keys off crammed ~0s segments). The forward-retry SHED regions
-        // are already given real times INSIDE alignLong (two-pass: pass 1 discovers, pass 2
-        // overlap-re-aligns), so there is no separate post-pass here any more.
+        // Speaker smoothing MUST run BEFORE the re-align pass: it keys off the crammed (~0s)
+        // state, which the re-align is about to spread back to a normal duration.
         smoothSpeakers(segsOut, id);
+        // Re-align GUESSED spans on the FINAL per-word timeline (CJK flying appears only after
+        // sliceToWords): TRIGGER = uncovered (interpolated) chars; each uncovered run gets its
+        // own audio slice re-aligned for REAL times, extended through a flying-run→spike block
+        // when it overlaps one. Only units inside the chosen window are rewritten. alignDiag is
+        // the same obj stashed in dbg.align (drives the report + uncovered alarm).
+        await realignGuessedSpans(segsOut, fullText, alignDiag, alignSlice, id);
       } catch (e) {
         // A stop must abort, not fall into the fallback path.
         if ((e && e.cancelled) || cancelled.has(id)) throw e;

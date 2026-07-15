@@ -7,14 +7,14 @@ metadata:
   description: Feishu-Minutes-style audio notes — diarized, word-timestamped transcripts with player sync, via the LLM Gateway.
   appid: audiominutesxdemo
   title: Audio Minutes X Demo
-  version: '1.0.20'
+  version: '1.0.19'
   categories:
     - Utilities
 permission:
   appData: true
 spec:
   runAsUser: true
-  versionName: '1.0.20'
+  versionName: '1.0.19'
   fullDescription: |
     Audio Minutes X Demo is a Feishu-Minutes (妙记) style app for turning meetings,
     lectures and audiobooks into interactive, searchable transcripts — all powered by
@@ -31,11 +31,6 @@ spec:
       use, all in the app. If a required model is missing, the app tells you it cannot
       transcribe until it is configured.
   upgradeDescription: |
-    1.0.20（WIP）：整段词级对齐改为「两遍法」根治前移重试丢时间戳。第一遍=alignLong 主循环照常跑，
-    只把「因前移重试被跨过、没拿到真实对齐」的区域(shed)连同两端真实时间锚记下来；第二遍=对每个 shed
-    区取重叠窗 [A,B](A=窗起=上一可靠词end；B=首个真正前进的 committed 词=右真锚)重对齐一次拿真值，又塌
-    则在 [A,B] 内均匀铺。两端钉真锚→不漏 GAP、不堆接缝；重对齐调用次数=前移区个数(有界)。彻底删除候选池、
-    SEAM_TOL、cram/spike/巨无霸/还债块等事后启发式；详细记录同步精简为「前移修复区」两遍法视图。
     1.0.19（WIP·存档快照）：冻结当前「重对齐 + 均匀兜底」实现的状态，作为算法重构前的存档点。
     与 1.0.17 代码等价，仅版本号 bump；下一步将按新的对齐算法重做，此版随时可能被整体推翻。
     1.0.17（WIP·随时可能被推翻）：重对齐兜底——切片重对齐又塌(覆盖<50%)时，不再保留塌缩版，
