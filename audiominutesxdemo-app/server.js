@@ -248,7 +248,7 @@ function recordSummary(rec) {
     createdAt: rec.createdAt,
     speakers: rec.result?.speakers?.length || 0,
     segments: rec.result?.segments?.length || 0,
-    options: rec.options || { language: "auto", segmentedStt: false, translate: false, enhance: false, maxSpeakers: 0, alignWindowSec: 230 },
+    options: rec.options || { language: "auto", segmentedStt: false, translate: false, enhance: false, maxSpeakers: 0 },
     translated: !!(rec.result?.segments || []).some((s) => s.translation),
     jobKind: rec.jobKind || "full",
     notices: Array.isArray(rec.notices) ? rec.notices : [],
@@ -1074,7 +1074,7 @@ function debugReportText(rec) {
   L.push(`模型 对齐    ${d.models?.align || "—"}`);
   L.push(`模型 分离    ${d.models?.diar || "—"}`);
   L.push(`模型 翻译    ${d.models?.translate || "—"}`);
-  L.push(`选项         分段转写=${d.options?.segmentedStt ? "开" : "关"} · 转写时翻译=${d.options?.translate ? "开" : "关"} · 降噪=${d.options?.enhance ? "开" : "关"} · 最多说话人=${d.options?.maxSpeakers ? d.options.maxSpeakers + "人" : "自动"} · 对齐窗口=${d.options?.alignWindowSec ? d.options.alignWindowSec + "s" : "自适应"}`);
+  L.push(`选项         分段转写=${d.options?.segmentedStt ? "开" : "关"} · 转写时翻译=${d.options?.translate ? "开" : "关"} · 降噪=${d.options?.enhance ? "开" : "关"} · 最多说话人=${d.options?.maxSpeakers ? d.options.maxSpeakers + "人" : "自动"}`);
   L.push(`分离窗口     ${d.diarWindows ?? "—"} 段`);
   L.push(`整段STT字数  ${d.sttChars || 0}   对齐单元 ${d.unitCount || 0}   最终分段 ${d.segCount ?? segRows.length}`);
   if (d.fallbackError) L.push(`回退原因     ${d.fallbackError}`);
@@ -1132,8 +1132,8 @@ function debugReportText(rec) {
       L.push("");
       L.push("  ★ 重对齐区（未获真实=触发；与飞掠重叠则扩到突变spike；紫色标注）:");
       for (const r of repairSpans) {
-        const t = (r.text || "").replace(/\s+/g, " ");
-        const shown = t.length > 54 ? t.slice(0, 54) + "…" : t;
+        const t = (r.text || "").replace(/\s+/g, " ").trim();
+        const shown = t.length > 140 ? t.slice(0, 140) + "…" : t;
         const way = r.method === "realign" ? (r.kind === "debt" ? "重对齐·还债" : "重对齐·未获真实") : (r.method === "uniform" ? "均匀兜底(重对齐又塌)" : "启发式兜底");
         const spk = r.spikeText ? `  债spike「${(r.spikeText || "").trim()}」${r.spikeSecs ? "=" + r.spikeSecs + "s" : ""}` : "";
         L.push(`    字[${r.c0}–${r.c1}) ${r.c1 - r.c0}字  重铺至 ${mmss(r.tStart)}–${mmss(r.tEnd)} [${way}]${spk}  「${shown}」`);
@@ -1250,7 +1250,7 @@ ${kv("STT 模型", esc(d.models?.stt || "—"))}
 ${kv("对齐模型", esc(d.models?.align || "—"))}
 ${kv("分离模型", esc(d.models?.diar || "—"))}
 ${kv("翻译模型", esc(d.models?.translate || "—"))}
-${kv("选项", `分段=${d.options?.segmentedStt ? "开" : "关"} · 翻译=${d.options?.translate ? "开" : "关"} · 降噪=${d.options?.enhance ? "开" : "关"} · 最多说话人=${d.options?.maxSpeakers ? d.options.maxSpeakers + "人" : "自动"} · 对齐窗口=${d.options?.alignWindowSec ? d.options.alignWindowSec + "s" : "自适应"}`)}
+${kv("选项", `分段=${d.options?.segmentedStt ? "开" : "关"} · 翻译=${d.options?.translate ? "开" : "关"} · 降噪=${d.options?.enhance ? "开" : "关"} · 最多说话人=${d.options?.maxSpeakers ? d.options.maxSpeakers + "人" : "自动"}`)}
 ${kv("分离窗口", (d.diarWindows ?? "—") + " 段")}
 ${kv("STT字数/单元/分段", `${d.sttChars || 0} / ${d.unitCount || 0} / ${d.segCount ?? segRows.length}`)}
 ${d.fallbackError ? kv("回退原因", `<span style="color:#f87171">${esc(d.fallbackError)}</span>`) : ""}
@@ -1925,7 +1925,10 @@ async function realignGuessedSpans(segsOut, fullText, diag, alignSlice, id = "")
   const spans = [];
   for (const w of merged) {
     const { lo, hi, spike, spDur, A, B } = w;
-    const blkText = w.text;
+    // DISPLAY text = original slice of fullText (keeps real spaces/punctuation). w.text is the
+    // units concatenation (no separators) — fine to FEED the aligner, but "wehadsome…" for
+    // English in the report. fullText.slice(c0,c1) reads correctly for both English and CJK.
+    const blkText = fullText.slice(wci[lo], wcj[hi]);
     if (w.ok) {
       let off = 0, last = A;
       for (let x = lo; x <= hi; x++) {
@@ -2046,22 +2049,9 @@ function reliableAlignEnd(units, tMax, N = 6, dt = 0.12) {
 // + ALARMS it in diag.uncoveredSpans if nothing covers it. Chars 1.0.14 timed correctly
 // are passed through verbatim. No diar → uniform char-rate + fixed WINMAX cuts. Network
 // errors throw and abort. Returns {units, map, diag}.
-async function alignLong(alignSlice, fullText, total, diarSegs, onProg, id = "", winSec = 0) {
+async function alignLong(alignSlice, fullText, total, diarSegs, onProg, id = "") {
+  const WINMAX = 230, SAFE = 230, MAXRETRY = 2;    // WINMAX < aligner horizon (~255s)
   const N = fullText.length;
-  // WINDOW SIZE is what actually decides whether the aligner collapses. The horizon is
-  // driven by TOKEN/CHAR COUNT per window, not wall-clock: English at ~13 char/s packs
-  // ~3000 chars into 230s (collapses), Chinese at ~3 char/s packs only ~700 (fine). So the
-  // AUTO window is a CHAR BUDGET ÷ this clip's char-rate — which naturally gives fast/English
-  // small windows and slow/Chinese big ones. A manual winSec (from 重新转写) overrides it.
-  const cpsAll = N / Math.max(1, total);
-  // Budget kept well UNDER the observed collapse point (~4000 chars @ 230s/17.5cps) but not so
-  // tiny it wastes calls — residual collapses are now caught by the re-align + uniform fallback,
-  // so we can afford a bigger (faster) window. 1800 → fast English ≈100s, Chinese stays at 230 cap.
-  const CHARBUDGET = 1800;
-  const autoWin = Math.max(80, Math.min(230, Math.round(CHARBUDGET / Math.max(0.5, cpsAll))));
-  const WINMAX = winSec && winSec > 0 ? Math.max(20, Math.min(300, Math.round(winSec))) : autoWin;
-  const SAFE = WINMAX, MAXRETRY = 2;
-  console.log(`[${id}] alignLong 窗口=${WINMAX}s（${winSec > 0 ? "手动" : "自适应"} · 字符率≈${cpsAll.toFixed(1)}/s · 自适应建议${autoWin}s）`);
   const units = [], map = [];
   // Candidate pool: EVERY unit of EVERY attempt (good OR failed), in global chars.
   // resolveCoverage() uses it to give every hole char the best available real time
@@ -3062,24 +3052,29 @@ async function runJob(id) {
       if (!text) return [];
       const slicePath = path.join(UPLOAD_DIR, `${id}-${tag}.wav`);
       tmp.push(slicePath);
+      const _t0 = Date.now();
+      let _tSlice = 0, _tGw = 0;
       try {
         await sliceWav(workAudio, aStart, aEnd, slicePath);
+        _tSlice = Date.now() - _t0;
         const langName = resolveAlignLang(cfg.language, text);
         if (!language) language = langName;
+        const _g0 = Date.now();
         const al = await gwAudioOp(cfg, "align", slicePath, cfg.models.align, { text, language: langName });
+        _tGw = Date.now() - _g0;
         if (al?.language) language = al.language;
         const units = (Array.isArray(al?.units) ? al.units : []).map((u) => ({
           text: u.text ?? u.word ?? u.token ?? "",
           start: round3(Number(u.start ?? u.start_time ?? 0) + aStart),
           end: round3(Number(u.end ?? u.end_time ?? 0) + aStart),
         }));
-        if (tag === "wa_full") {
-          console.log(`[${id}] 对齐(${tag}) 返回 ${units.length} 个单元 · 切片时长≈${round3(aEnd - aStart)}s · text长度=${text.length} · lang=${langName} · resp类型=${al && typeof al === "object" ? "keys[" + Object.keys(al).join(",") + "]" : typeof al}`);
-        }
+        // PER-CALL TIMING (every call): this is the only way to see where alignLong's wall
+        // time goes — slice ffmpeg vs gateway inference, and how many calls happen.
+        console.log(`[${id}] ⏱对齐(${tag}) 网关${(_tGw/1000).toFixed(1)}s 切片${(_tSlice/1000).toFixed(1)}s · 切片长${round3(aEnd - aStart)}s · text${text.length}字 · ${units.length}单元`);
         return units;
       } catch (e) {
         if (e && e.cancelled) throw e;
-        console.error(`[${id}] 对齐(${tag})调用失败: ${e?.message || e}`);
+        console.error(`[${id}] 对齐(${tag})调用失败(${((Date.now()-_t0)/1000).toFixed(1)}s): ${e?.message || e}`);
         return [];
       }
     };
@@ -3164,7 +3159,7 @@ async function runJob(id) {
         const { units, map, diag: alignDiag } = await alignLong(
           alignSlice, fullText, alignTotal, diarSegs,
           (frac) => setP(55 + Math.round(30 * frac), "词级对齐"),
-          id, Math.max(0, Math.floor(Number(opts.alignWindowSec) || 0)),
+          id,
         );
         console.log(`[${id}] 词级对齐(alignLong)完成：${units.length} 个单元，音频≈${Math.round(alignTotal)}s`);
         if (!units.length) throw new Error("对齐无结果");
@@ -3322,7 +3317,7 @@ async function runJob(id) {
       language: language || "",
       durationSec: rec.durationSec || 0,
       models: { stt: cfg.models?.stt || "", align: cfg.models?.align || "", diar: cfg.models?.diar || "", translate: cfg.translate?.model || "" },
-      options: { segmentedStt: !!cfg.segmentedStt, translate: !!rec.options?.translate, enhance: !!rec.options?.enhance, maxSpeakers: Math.max(0, Math.floor(Number(rec.options?.maxSpeakers) || 0)), alignWindowSec: Math.max(0, Math.floor(Number(rec.options?.alignWindowSec) || 0)) },
+      options: { segmentedStt: !!cfg.segmentedStt, translate: !!rec.options?.translate, enhance: !!rec.options?.enhance, maxSpeakers: Math.max(0, Math.floor(Number(rec.options?.maxSpeakers) || 0)) },
       diarWindows: dbgDiar,
       sttChars: dbg?.sttChars || 0,
       unitCount: dbg?.units || 0,
@@ -3383,8 +3378,6 @@ app.post("/api/records/:id/transcribe", (req, res) => {
     // Upper bound on speakers passed to diarization (0 = 自动/不限). Same semantics as
     // 重新识别说话人: it's a MAX (max_speakers), never a forced count.
     maxSpeakers: b.maxSpeakers !== undefined ? Math.max(0, Math.floor(Number(b.maxSpeakers) || 0)) : (prev.maxSpeakers ?? 0),
-    // 整段对齐窗口秒数. 默认 230(顶格·最快，塌窗由兜底修复); 0 = 自适应(按字符率算窗); >0 = 固定秒数.
-    alignWindowSec: b.alignWindowSec !== undefined ? Math.max(0, Math.floor(Number(b.alignWindowSec) || 0)) : (prev.alignWindowSec ?? 230),
   };
   // Still extracting audio (or the wav isn't on disk yet)? Don't enqueue now —
   // remember the intent and let the prep job start transcription when it finishes.

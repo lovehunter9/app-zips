@@ -57,8 +57,6 @@ export interface RecordOptions {
   // Upper bound on speakers for diarization (0 = 自动/不限). Same "最多" semantics as
   // 重新识别说话人 — a maximum, never a forced count.
   maxSpeakers?: number;
-  // 整段词级对齐的窗口秒数 (0 = 自动：按字符率估算；英文/快→小窗，中文/慢→大窗).
-  alignWindowSec?: number;
 }
 
 export interface RecordSummary {
