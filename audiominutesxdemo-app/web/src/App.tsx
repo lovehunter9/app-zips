@@ -1446,20 +1446,34 @@ function RecordDetail({
     }
     return ans;
   }
-  const wordStarts = useMemo(() => flat.map((w) => w.start), [flat]);
-  const twordStarts = useMemo(() => tflat.map((w) => w.start), [tflat]);
+  // The highlighter binary-searches word starts, which REQUIRES a monotonically
+  // ascending array. But `flat` is laid out in SEGMENT order, and segments can
+  // overlap in time (overlapping-speech diarization → windows that overlap; e.g.
+  // speaker A 15:01–15:21 with speaker B interjecting 15:13–15:15). Laid out by
+  // segment, the flat starts then dip backwards (…15:21 → 15:13) and the binary
+  // search silently returns garbage, so that whole overlap region stops
+  // highlighting. Fix WITHOUT moving any word time (alignment stays authoritative):
+  // search a TIME-SORTED copy and map the hit back to the real flat index (`gi`).
+  const sortedIndex = (arr: FlatWord[]) => {
+    const order = arr.map((_, i) => i).sort((a, b) => arr[a].start - arr[b].start);
+    return { order, starts: order.map((i) => arr[i].start) };
+  };
+  const wordSorted = useMemo(() => sortedIndex(flat), [flat]);
+  const twordSorted = useMemo(() => sortedIndex(tflat), [tflat]);
   const segStarts = useMemo(() => segments.map((s) => +s.start), [segments]);
   // Latest arrays kept in refs so the rAF loop reads fresh values without needing
   // to restart whenever they change.
-  const wordStartsRef = useRef(wordStarts);
-  const twordStartsRef = useRef(twordStarts);
+  const wordSortedRef = useRef(wordSorted);
+  const twordSortedRef = useRef(twordSorted);
   const segStartsRef = useRef(segStarts);
-  useEffect(() => { wordStartsRef.current = wordStarts; twordStartsRef.current = twordStarts; segStartsRef.current = segStarts; }, [wordStarts, twordStarts, segStarts]);
+  useEffect(() => { wordSortedRef.current = wordSorted; twordSortedRef.current = twordSorted; segStartsRef.current = segStarts; }, [wordSorted, twordSorted, segStarts]);
 
   const syncToTime = useCallback((t: number) => {
-    const gi = lastAtOrBefore(wordStartsRef.current, t);
+    const wp = lastAtOrBefore(wordSortedRef.current.starts, t);
+    const gi = wp < 0 ? -1 : wordSortedRef.current.order[wp];
     setActiveGi((prev) => (prev === gi ? prev : gi));
-    const ti = lastAtOrBefore(twordStartsRef.current, t);
+    const tp = lastAtOrBefore(twordSortedRef.current.starts, t);
+    const ti = tp < 0 ? -1 : twordSortedRef.current.order[tp];
     setActiveTi((prev) => (prev === ti ? prev : ti));
     const sg = lastAtOrBefore(segStartsRef.current, t);
     setActiveSeg((prev) => (prev === sg ? prev : sg));

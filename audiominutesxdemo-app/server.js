@@ -958,7 +958,51 @@ function debugReportData(rec) {
   }));
   const interpCount = segRows.filter((r) => r.interp).length;
   const interpSecs = spans.reduce((n, sp) => n + Math.max(0, sp.b - sp.a), 0);
-  return { d, align, spans, uncovered, candidates, segRows, interpCount, interpSecs };
+  const suspects = detectSuspects(segs);
+  return { d, align, spans, uncovered, candidates, segRows, interpCount, interpSecs, suspects };
+}
+
+// A档·可视化：从最终词级时间反推「可疑对齐区间」，让 committed 里看不出来的问题现形。
+// 纯启发式（无真值），基于 SPEECH-RATE 异常：
+//   • 挤压(飞速掠过)：极短段却语速爆表（>3×全局速率），一整句被塞进一瞬。
+//   • 疑似停滞/漂移：较长段语速异常慢（<0.4×全局速率），文字明显跟不上音频。
+// 基准 R0 = 该文件「总可见字 / 总段时长」的加权平均（非中位数），避免语种/语速差异误报。
+// committed uniform drift
+// （整体平移、局部语速仍正常）此法测不出——那需要重叠共识(C)才能量化。
+function visCharCount(t) { return ((t || "").match(/[\p{L}\p{N}]/gu) || []).length; }
+function detectSuspects(segs) {
+  const rows = [];
+  for (const s of segs) {
+    const dur = (+s.end || 0) - (+s.start || 0);
+    const n = visCharCount(s.text);
+    if (n >= 2 && dur > 0.01) rows.push({ start: +s.start, end: +s.end, dur, n, rate: n / dur, text: s.text || "" });
+  }
+  if (rows.length < 3) return [];
+  // 全局参考速率 = 总可见字 / 总有效段时长（排除极短/空段的噪声）。
+  const totN = rows.reduce((a, r) => a + r.n, 0), totD = rows.reduce((a, r) => a + r.dur, 0);
+  const R0 = totN / Math.max(0.5, totD);
+  const flagged = rows.map((r) => {
+    let kind = null;
+    if (r.dur < 2 && r.rate > 3 * R0) kind = "cram";
+    else if (r.dur >= 2 && r.rate < 0.4 * R0) kind = "slow";
+    return { ...r, kind };
+  });
+  // 合并相邻同类可疑段成一个区间，报告更紧凑。
+  const out = [];
+  for (const r of flagged) {
+    if (!r.kind) continue;
+    const last = out[out.length - 1];
+    if (last && last.kind === r.kind && r.start - last.end <= 1.5) {
+      last.end = r.end; last.n += r.n; last.dur += r.dur; last.text += " " + r.text;
+    } else {
+      out.push({ kind: r.kind, start: r.start, end: r.end, n: r.n, dur: r.dur, text: r.text });
+    }
+  }
+  return out.map((r) => ({
+    kind: r.kind, start: round3(r.start), end: round3(r.end),
+    rate: Math.round((r.n / Math.max(0.01, r.dur)) * 10) / 10, ref: Math.round(R0 * 10) / 10,
+    text: r.text.replace(/\s+/g, " ").trim(),
+  }));
 }
 const mmss = (sec) => {
   let s = Math.max(0, Math.round(sec || 0));
@@ -968,8 +1012,9 @@ const mmss = (sec) => {
   return h ? `${h}:${p(m)}:${p(s)}` : `${m}:${p(s)}`;
 };
 function debugReportText(rec) {
-  const { d, align, spans, uncovered, candidates, segRows, interpCount, interpSecs } = debugReportData(rec);
+  const { d, align, spans, uncovered, candidates, segRows, interpCount, interpSecs, suspects } = debugReportData(rec);
   const uncReason = (r) => (r === "badcand" ? "候选时间不合理→插值" : "无对齐候选");
+  const suspKind = (k) => (k === "cram" ? "挤压·飞速掠过" : "疑似停滞/漂移");
   const L = [];
   L.push(`详细处理记录 — ${rec.title || rec.id}`);
   L.push("=".repeat(60));
@@ -1037,6 +1082,17 @@ function debugReportText(rec) {
       }
     }
   }
+  if (suspects.length) {
+    L.push("");
+    L.push(`可疑对齐区间（按词级时间的语速异常自动检出 · ${suspects.length} 段 · 启发式，需人工核对）`);
+    L.push("-".repeat(60));
+    for (const s of suspects) {
+      const t = s.text.length > 54 ? s.text.slice(0, 54) + "…" : s.text;
+      L.push(`  [${suspKind(s.kind)}] ${mmss(s.start)}–${mmss(s.end)}  语速${s.rate}字/秒(基准${s.ref})  「${t}」`);
+    }
+    L.push("  注：挤压=一整句被压进一瞬（飞速掠过）；停滞/漂移=语速异常慢，文字跟不上音频。");
+    L.push("      整体平移式漂移（局部语速正常）此表测不出，需重叠共识(C档)才能量化。");
+  }
   L.push("");
   L.push(`最终分段（共 ${segRows.length} 段，其中 ${interpCount} 段落在插值区间，行首标 ⚠）`);
   L.push("-".repeat(60));
@@ -1052,8 +1108,9 @@ function debugReportText(rec) {
   return L.join("\n");
 }
 function debugReportHtml(rec) {
-  const { d, align, spans, uncovered, candidates, segRows, interpCount, interpSecs } = debugReportData(rec);
+  const { d, align, spans, uncovered, candidates, segRows, interpCount, interpSecs, suspects } = debugReportData(rec);
   const uncReason = (r) => (r === "badcand" ? "候选时间不合理→插值" : "无对齐候选");
+  const suspKind = (k) => (k === "cram" ? "挤压·飞速掠过" : "疑似停滞/漂移");
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   const kv = (k, v) => `<div class="kv"><span class="k">${esc(k)}</span><span class="v">${v}</span></div>`;
   const tim = d.timings || rec.timings || {};
@@ -1068,6 +1125,7 @@ function debugReportHtml(rec) {
   const uncovHtml = uncovered.map((u) => { const t = (u.text || "").replace(/\s+/g, " "); return `<tr><td>${esc(uncReason(u.reason))}</td><td class="num">${u.c0}–${u.c1}</td><td class="num">${u.c1 - u.c0}</td><td>${mmss(u.tStart)}–${mmss(u.tEnd)}</td><td>${esc(t)}</td></tr>`; }).join("");
   const candHtml = candidates.map((u) => { const t = (u.text || "").replace(/\s+/g, " "); return `<tr><td>${mmss(u.tStart)}–${mmss(u.tEnd)}</td><td class="num">${u.c0}–${u.c1}</td><td>${esc(t)}</td></tr>`; }).join("");
   const segHtml = segRows.map((r) => `<tr class="${r.interp ? "bad" : ""}"><td class="num">${r.i}</td><td class="num">${r.interp ? "⚠" : ""}</td><td>${mmss(r.start)}→${mmss(r.end)}</td><td class="num">${Math.round(r.end - r.start)}s</td><td>${esc(r.speaker)}</td><td>${esc(r.text)}</td></tr>`).join("");
+  const suspHtml = suspects.map((s) => `<tr class="${s.kind === "cram" ? "bad" : "warn"}"><td>${esc(suspKind(s.kind))}</td><td>${mmss(s.start)}–${mmss(s.end)}</td><td class="num">${s.rate}/${s.ref}</td><td>${esc(s.text.length > 80 ? s.text.slice(0, 80) + "…" : s.text)}</td></tr>`).join("");
   const notices = (rec.notices || []).map((n) => `<li class="lv-${esc(n.level || "info")}"><b>${esc(n.level || "info")}</b> ${esc(n.msg || n.text || "")}</li>`).join("");
   const pill = d.punctuated === null || d.punctuated === undefined ? "—" : d.punctuated ? "按标点" : "按停顿/说话人/长度";
   return `<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1133,6 +1191,10 @@ ${align ? `<div class="sub">初始窗 ${align.winInit}s · 安全区 ${align.saf
 ${spans.length ? `<h3 style="font-size:13px;color:#fca5a5;margin:14px 0 4px">插值区间（此段时间为估算，字幕可能不准）</h3><ul>${spansHtml}</ul>` : ""}
 ${candidates.length ? `<h3 style="font-size:13px;color:#fcd34d;margin:14px 0 4px">采用候选时间的字/词（时间取自其它对齐尝试的候选，非本窗真实对齐，可能飘移）</h3><table><thead><tr><th>估算时间</th><th class="num">字符区间</th><th>文本</th></tr></thead><tbody>${candHtml}</tbody></table>` : ""}
 ${uncovered.length ? `<h3 style="font-size:13px;color:#fca5a5;margin:14px 0 4px">⚠ 未获真实对齐的字/词（已线性插值兜底，需人工核对）</h3><table><thead><tr><th>原因</th><th class="num">字符区间</th><th class="num">字数</th><th>估算时间</th><th>文本</th></tr></thead><tbody>${uncovHtml}</tbody></table>` : ""}` : `<div class="empty">本次未走整段 alignLong 路径（分段转写或回退），无逐窗对齐轨迹。</div>`}
+
+<h2>可疑对齐区间（语速异常自动检出 · ${suspects.length} 段）</h2>
+${suspects.length ? `<div class="sub">启发式，需人工核对：<b style="color:#fca5a5">挤压·飞速掠过</b>=一整句被压进一瞬；<b style="color:#fbbf24">疑似停滞/漂移</b>=语速异常慢。整体平移式漂移（局部语速正常）此表测不出，需重叠共识(C档)量化。</div>
+<table><thead><tr><th>类型</th><th>时间</th><th class="num">语速/基准</th><th>文本</th></tr></thead><tbody>${suspHtml}</tbody></table>` : `<div class="empty">未检出语速异常区间。（注：整体平移式漂移此法测不出。）</div>`}
 
 <h2>最终分段（${segRows.length} 段 · ⚠ ${interpCount} 段插值）</h2>
 <table><thead><tr><th class="num">#</th><th class="num">插值</th><th>时间</th><th class="num">时长</th><th>说话人</th><th>文本</th></tr></thead><tbody>${segHtml}</tbody></table>
