@@ -969,6 +969,18 @@ function SettingsPage({
             </label>
             <span className="block text-[11px] leading-tight text-neutral-500">上传即生效;显示开关与压暗需点「保存」。</span>
           </div>
+
+          {/* 开发者 */}
+          <div className="space-y-1.5 rounded-lg border border-neutral-800 bg-neutral-900/50 p-2.5">
+            <div className="text-sm font-medium text-neutral-200">开发者</div>
+            <label className="flex items-start gap-2 text-sm">
+              <input type="checkbox" className="mt-0.5 h-4 w-4" defaultChecked={getDevMode()} onChange={(e) => setDevModePref(e.target.checked)} />
+              <span>
+                <span className="block text-neutral-200">开发者模式</span>
+                <span className="block text-[11px] leading-tight text-neutral-500">默认关。开启后详情页导出区才显示「详细记录」（对齐/插值/可疑区间等调试信息）。即时生效，无需保存。</span>
+              </span>
+            </label>
+          </div>
         </div>
       </div>
     </div>
@@ -3209,9 +3221,29 @@ function SpeakerStats({ rec }: { rec: RecordFull }) {
     </div>
   );
 }
+// 开发者模式（客户端偏好）：默认关，关闭时隐藏「详细记录」（调试用）按钮。存 localStorage，
+// 用自定义事件让「设置」里的勾选与各处按钮实时联动（同一标签页 storage 事件不触发，故自派发）。
+const DEV_MODE_KEY = "amx.devMode";
+const getDevMode = () => localStorage.getItem(DEV_MODE_KEY) === "1";
+function setDevModePref(v: boolean) {
+  localStorage.setItem(DEV_MODE_KEY, v ? "1" : "0");
+  window.dispatchEvent(new Event("amx.devmode"));
+}
+function useDevMode() {
+  const [dev, setDev] = useState<boolean>(getDevMode);
+  useEffect(() => {
+    const h = () => setDev(getDevMode());
+    window.addEventListener("amx.devmode", h);
+    window.addEventListener("storage", h);
+    return () => { window.removeEventListener("amx.devmode", h); window.removeEventListener("storage", h); };
+  }, []);
+  return dev;
+}
+
 function ExportButtons({ rec }: { rec: RecordFull }) {
   const segs = rec.result?.segments || [];
   const names = rec.result?.speakerNames || {};
+  const dev = useDevMode();
   const txt = () => download(`${rec.title}.txt`, segs.map((s) => `[${fmtTC(s.start)}] ${spkLabel(s.speaker, names)}: ${s.text}`).join("\n"));
   const srt = () => download(`${rec.title}.srt`, segs.map((s, i) => `${i + 1}\n${srtTime(s.start)} --> ${srtTime(s.end)}\n${spkLabel(s.speaker, names)}: ${s.text}`).join("\n\n"), "application/x-subrip");
   const json = () => download(`${rec.title}.json`, JSON.stringify(rec.result, null, 2), "application/json");
@@ -3221,7 +3253,7 @@ function ExportButtons({ rec }: { rec: RecordFull }) {
       <button className="btn-ghost" onClick={txt}>TXT</button>
       <button className="btn-ghost" onClick={srt}>SRT</button>
       <button className="btn-ghost" onClick={json}>JSON</button>
-      <button className="btn-ghost" onClick={debug} title="查看对齐分段/插值区间等详细处理记录（调试用，新标签打开）">详细记录</button>
+      {dev && <button className="btn-ghost" onClick={debug} title="查看对齐分段/插值区间等详细处理记录（调试用，新标签打开）">详细记录</button>}
     </div>
   );
 }
