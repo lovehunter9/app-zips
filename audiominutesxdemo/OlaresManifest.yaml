@@ -7,14 +7,14 @@ metadata:
   description: Feishu-Minutes-style audio notes — diarized, word-timestamped transcripts with player sync, via the LLM Gateway.
   appid: audiominutesxdemo
   title: Audio Minutes X Demo
-  version: '1.0.17'
+  version: '1.0.19'
   categories:
     - Utilities
 permission:
   appData: true
 spec:
   runAsUser: true
-  versionName: '1.0.17'
+  versionName: '1.0.19'
   fullDescription: |
     Audio Minutes X Demo is a Feishu-Minutes (妙记) style app for turning meetings,
     lectures and audiobooks into interactive, searchable transcripts — all powered by
@@ -31,6 +31,8 @@ spec:
       use, all in the app. If a required model is missing, the app tells you it cannot
       transcribe until it is configured.
   upgradeDescription: |
+    1.0.19（WIP·存档快照）：冻结当前「重对齐 + 均匀兜底」实现的状态，作为算法重构前的存档点。
+    与 1.0.17 代码等价，仅版本号 bump；下一步将按新的对齐算法重做，此版随时可能被整体推翻。
     1.0.17（WIP·随时可能被推翻）：重对齐兜底——切片重对齐又塌(覆盖<50%)时，不再保留塌缩版，
     改为在「真实空闲区」(前一个可靠词end→后一个可靠词start，并向外吞并塌缩词)内按字长均匀分布；
     整段对齐窗口可调(默认 230s 顶格·最快，与 1.0.14 一致；另有「自适应/按语速」与 60–180s 选项，仅影响整段转写)。
