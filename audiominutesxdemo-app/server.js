@@ -1130,11 +1130,13 @@ function debugReportText(rec) {
     }
     if (repairSpans.length) {
       L.push("");
-      L.push("  ★ 停顿债重铺（飞掠run 的时间被下游 spike 吞了，已整块按内容重排；紫色标注）:");
+      L.push("  ★ 重对齐区（未获真实=触发；与飞掠重叠则扩到突变spike；紫色标注）:");
       for (const r of repairSpans) {
         const t = (r.text || "").replace(/\s+/g, " ");
         const shown = t.length > 54 ? t.slice(0, 54) + "…" : t;
-        L.push(`    字[${r.c0}–${r.c1}) ${r.c1 - r.c0}字  重铺至 ${mmss(r.tStart)}–${mmss(r.tEnd)} [${r.method === "realign" ? "重对齐真值" : "启发式兜底"}]  债spike「${(r.spikeText || "").trim()}」${r.spikeSecs ? "=" + r.spikeSecs + "s" : ""}  「${shown}」`);
+        const way = r.method === "realign" ? (r.kind === "debt" ? "重对齐·还债" : "重对齐·未获真实") : "启发式兜底";
+        const spk = r.spikeText ? `  债spike「${(r.spikeText || "").trim()}」${r.spikeSecs ? "=" + r.spikeSecs + "s" : ""}` : "";
+        L.push(`    字[${r.c0}–${r.c1}) ${r.c1 - r.c0}字  重铺至 ${mmss(r.tStart)}–${mmss(r.tEnd)} [${way}]${spk}  「${shown}」`);
       }
     }
   }
@@ -1191,8 +1193,8 @@ function debugReportHtml(rec) {
   const uncovHtml = uncovered.map((u) => { const t = (u.text || "").replace(/\s+/g, " "); const cand = u.candStart != null ? `${mmss(u.candStart)}–${mmss(u.candEnd)}` : "—"; return `<tr><td>${esc(uncReason(u.reason))}</td><td class="num">${u.c0}–${u.c1}</td><td class="num">${u.c1 - u.c0}</td><td>${mmss(u.tStart)}–${mmss(u.tEnd)}</td><td class="num">${cand}</td><td>${esc(t)}</td></tr>`; }).join("");
   const candHtml = candidates.map((u) => { const t = (u.text || "").replace(/\s+/g, " "); return `<tr><td>${mmss(u.tStart)}–${mmss(u.tEnd)}</td><td class="num">${u.c0}–${u.c1}</td><td>${esc(t)}</td></tr>`; }).join("");
   const segHtml = segRows.map((r) => `<tr class="${r.repair ? "repair" : r.interp ? "bad" : ""}"><td class="num">${r.i}</td><td class="num">${r.repair ? "★" : r.interp ? "⚠" : ""}</td><td>${mmss(r.start)}→${mmss(r.end)}</td><td class="num">${Math.round(r.end - r.start)}s</td><td>${esc(r.speaker)}</td><td>${esc(r.text)}</td></tr>`).join("");
-  const repairMethod = (m) => m === "realign" ? "重对齐(真值)" : "启发式(兜底)";
-  const repairHtml = repairSpans.map((r) => { const t = (r.text || "").replace(/\s+/g, " "); return `<tr class="repair"><td class="num">${r.c0}–${r.c1}</td><td class="num">${r.c1 - r.c0}</td><td>${mmss(r.tStart)}–${mmss(r.tEnd)}</td><td>${repairMethod(r.method)}</td><td>${esc((r.spikeText || "").trim())}${r.spikeSecs ? " =" + r.spikeSecs + "s" : ""}</td><td>${esc(t)}</td></tr>`; }).join("");
+  const repairMethod = (r) => r.method === "realign" ? (r.kind === "debt" ? "重对齐·还债" : "重对齐·未获真实") : "启发式(兜底)";
+  const repairHtml = repairSpans.map((r) => { const t = (r.text || "").replace(/\s+/g, " "); return `<tr class="repair"><td class="num">${r.c0}–${r.c1}</td><td class="num">${r.c1 - r.c0}</td><td>${mmss(r.tStart)}–${mmss(r.tEnd)}</td><td>${repairMethod(r)}</td><td>${r.spikeText ? esc((r.spikeText || "").trim()) + (r.spikeSecs ? " =" + r.spikeSecs + "s" : "") : "—"}</td><td>${esc(t)}</td></tr>`; }).join("");
   const suspHtml = suspects.map((s) => `<tr class="${s.kind === "cram" ? "bad" : "warn"}"><td>${esc(suspKind(s.kind))}</td><td>${mmss(s.start)}–${mmss(s.end)}</td><td class="num">${s.rate}/${s.ref}</td><td>${esc(s.text.length > 80 ? s.text.slice(0, 80) + "…" : s.text)}</td></tr>`).join("");
   const charHtml = charRows.map((c) => `<tr class="${c.repair ? "repair" : c.giant ? "giant" : c.piled ? "bad" : c.cram ? "cram" : c.interp ? "warn" : ""}"><td class="num">${c.gi}</td><td class="num">${c.si}</td><td>${esc(c.text)}</td><td class="num">${c.start.toFixed(3)}</td><td class="num">${c.end.toFixed(3)}</td><td class="num">${c.durMs}</td><td class="num">${c.gapMs == null ? "" : c.gapMs}</td></tr>`).join("");
   const notices = (rec.notices || []).map((n) => `<li class="lv-${esc(n.level || "info")}"><b>${esc(n.level || "info")}</b> ${esc(n.msg || n.text || "")}</li>`).join("");
@@ -1234,7 +1236,7 @@ ul{margin:6px 0;padding-left:20px}
   <a href="?format=txt" download>⬇ 下载 TXT</a>
   <span class="note">调试用页面 · 正式发布前移除</span>
 </div>
-<h1>详细处理记录 <span class="badge">${esc(rec.kind === "video" ? "视频" : "音频")}</span>${repairSpans.length ? `<span class="badge" style="color:#c084fc;border-color:#6b21a8">★ ${repairSpans.length} 处停顿债重铺</span>` : ""}${interpCount ? `<span class="badge bad-badge">⚠ ${interpCount} 段落在插值区间</span>` : ""}${uncovChars ? `<span class="badge bad-badge">⚠ ${uncovChars} 字无对齐时间戳</span>` : ""}</h1>
+<h1>详细处理记录 <span class="badge">${esc(rec.kind === "video" ? "视频" : "音频")}</span>${repairSpans.length ? `<span class="badge" style="color:#c084fc;border-color:#6b21a8">★ ${repairSpans.length} 处重对齐</span>` : ""}${interpCount ? `<span class="badge bad-badge">⚠ ${interpCount} 段落在插值区间</span>` : ""}${uncovChars ? `<span class="badge bad-badge">⚠ ${uncovChars} 字无对齐时间戳</span>` : ""}</h1>
 <div class="sub">${esc(rec.title || rec.id)} · 生成于 ${esc(d.builtAt || "—")}${d.version ? " · 版本 " + esc(d.version) : ""}</div>
 
 <h2>概览</h2>
@@ -1263,7 +1265,7 @@ ${align ? `<div class="sub">初始窗 ${align.winInit}s · 安全区 ${align.saf
 ${spans.length ? `<h3 style="font-size:13px;color:#fca5a5;margin:14px 0 4px">插值区间（此段时间为估算，字幕可能不准）</h3><ul>${spansHtml}</ul>` : ""}
 ${candidates.length ? `<h3 style="font-size:13px;color:#fcd34d;margin:14px 0 4px">采用候选时间的字/词（时间取自其它对齐尝试的候选，非本窗真实对齐，可能飘移）</h3><table><thead><tr><th>估算时间</th><th class="num">字符区间</th><th>文本</th></tr></thead><tbody>${candHtml}</tbody></table>` : ""}
 ${uncovered.length ? `<h3 style="font-size:13px;color:#fca5a5;margin:14px 0 4px">⚠ 未获真实对齐的字/词（已线性插值兜底，需人工核对）</h3><div class="sub">「候选建议」=被拒候选原本想放的时间；若它明显超出「估算时间」的右界，说明是右接缝(下一committed单元)塌了/太早，候选其实更可信 → 应向后扩锚重插。</div><table><thead><tr><th>原因</th><th class="num">字符区间</th><th class="num">字数</th><th>估算时间</th><th class="num">候选建议</th><th>文本</th></tr></thead><tbody>${uncovHtml}</tbody></table>` : ""}
-${repairSpans.length ? `<h3 style="font-size:13px;color:#c084fc;margin:14px 0 4px">★ 停顿债重铺（飞掠run 的时间被下游 spike 吞了，已整块重对齐/重排）</h3><div class="sub">模式：一串「飞掠run」的时间被下游某个「时长 spike(债)」独吞。优先<b>重对齐(真值)</b>——把 [run起点→spike] 这块自己的音频切片喂回对齐器，取真实逐字时间；切片对齐失败才回退<b>启发式(兜底)</b>（按内容长度铺、余量留作尾部静音）。<b>只改块内 [run起点→spike] 的字，块外一律不动</b>；窗两端为 committed 锚点，零级联。紫色标注全篇一致。</div><table><thead><tr><th class="num">字符区间</th><th class="num">字数</th><th>重铺至</th><th>方式</th><th>债spike</th><th>文本</th></tr></thead><tbody>${repairHtml}</tbody></table>` : ""}` : `<div class="empty">本次未走整段 alignLong 路径（分段转写或回退），无逐窗对齐轨迹。</div>`}
+${repairSpans.length ? `<h3 style="font-size:13px;color:#c084fc;margin:14px 0 4px">★ 重对齐区（触发=未获真实时间戳；与飞掠重叠则扩到突变spike）</h3><div class="sub"><b>触发器只有「未获真实时间戳」的字</b>（resolveCoverage 只能线性插值的洞）。每段未获真实区取<b>自己的音频切片</b>喂回对齐器拿真实逐字时间（重对齐·未获真实）；若它与「飞掠区」重叠，则窗口右扩过 飞掠+伪正常 直到「突变spike」末端（那才是可信右锚），标为<b>重对齐·还债</b>。切片对齐失败：还债窗回退<b>启发式(兜底)</b>，纯未获真实窗保留原插值。<b>只改窗内的字，窗外一律不动</b>；两端为 committed 真锚点，零级联。成功重对齐的区间会从上面的「未获真实」告警中移除。紫色标注全篇一致。</div><table><thead><tr><th class="num">字符区间</th><th class="num">字数</th><th>重铺至</th><th>方式</th><th>飞掠spike</th><th>文本</th></tr></thead><tbody>${repairHtml}</tbody></table>` : ""}` : `<div class="empty">本次未走整段 alignLong 路径（分段转写或回退），无逐窗对齐轨迹。</div>`}
 
 <h2>可疑对齐区间（语速异常自动检出 · ${suspects.length} 段）</h2>
 ${suspects.length ? `<div class="sub">启发式，需人工核对：<b style="color:#fca5a5">挤压·飞速掠过</b>=一整句被压进一瞬；<b style="color:#fbbf24">疑似停滞/漂移</b>=语速异常慢。整体平移式漂移（局部语速正常）此表测不出，需重叠共识(C档)量化。</div>
@@ -1802,33 +1804,43 @@ function deburstUnits(units, MINSLOT = 0.14, MAXCARRY = 1.5) {
   return units;
 }
 
-// Redistribute "parked debt". PATTERN (validated on real files, both zh & en): the aligner
-// crams a RUN of words into an impossibly short span (a "flying run"), and DUMPS the borrowed
-// time onto a downstream DURATION SPIKE — one unit hogging seconds (NOT necessarily a 4s+
-// "giant"; en spikes are ~0.8–2s). The spike sits 8–14 units after the run, with a few
-// "normal-looking" (but globally left-shifted) words between. We spread the whole block
-// [run start .. spike] across its TRUE time [block.start .. spike.end] by content length, so
-// the crammed words get their time back and the spike shrinks to normal. T1 (spike end) is
-// PINNED, so nothing downstream moves — zero cascade (unlike plan C). A flying run with NO
-// downstream spike is overlapping speech / 抢话 (validated) → skipped. Each repaired block is
-// recorded in diag.repairSpans for the report (marked purple). Operates in place, after deburst.
-async function redistributeParkedDebt(segsOut, diag, alignSlice, id = "") {
-  // Flatten to per-word units (this is the granularity where CJK flying appears — a CJK
-  // badcand hole is ONE token in `units`, but sliceToWords splits it per-char here).
+// Re-align GUESSED spans to real per-char times. TRIGGER = "未获真实时间戳" (uncovered) chars
+// only — the spans resolveCoverage had to LINEARLY INTERPOLATE (no committed align time). For
+// each contiguous uncovered run we take its own audio slice [left anchor .. right anchor] and
+// feed it back to the aligner for REAL times. EXTENSION: if an uncovered run overlaps a "flying
+// run" (cram) whose borrowed time was DUMPED on a downstream duration SPIKE (突变点), the
+// uncovered right anchor is itself the collapsed spike and thus untrustworthy — so we extend
+// the window rightward through the flying run + the "pseudo-normal" tail up to (and including)
+// the spike, whose END is the next reliable anchor. A flying run that overlaps NO uncovered
+// region does NOT trigger (leave it). Only units inside the chosen window are ever rewritten;
+// committed words outside stay put. Successful re-aligns are dropped from diag.uncoveredSpans
+// (they're no longer guessed) and recorded in diag.repairSpans for the report.
+async function realignGuessedSpans(segsOut, fullText, diag, alignSlice, id = "") {
+  const uncov = Array.isArray(diag?.uncoveredSpans) ? diag.uncoveredSpans : [];
+  if (!uncov.length) return;                        // nothing was guessed → nothing to re-align
+  // Flatten to per-word units (CJK flying appears only after sliceToWords splits per char).
   const units = [];
   for (const s of segsOut) for (const w of (s.words || [])) units.push(w);
   const n = units.length;
-  if (n < 3) return;
+  if (n < 2) return;
   const visLen = (t) => ((t || "").match(/[\p{L}\p{N}]/gu) || []).length;
   const dur = (i) => Math.max(0, (units[i].end || 0) - (units[i].start || 0));
+
+  // Map each flat word to its fullText [ci,cj) by a forward scan (word.text is an exact
+  // substring of fullText, in order) — lets us mark which words are uncovered (char coords).
+  const wci = new Array(n), wcj = new Array(n);
+  { let cur = 0; for (let k = 0; k < n; k++) { const t = units[k].text || ""; const at = t ? fullText.indexOf(t, cur) : -1; if (at >= 0) { wci[k] = at; wcj[k] = at + t.length; cur = at + t.length; } else { wci[k] = cur; wcj[k] = cur; } } }
+  const isUncovWord = (k) => uncov.some((u) => wci[k] < u.c1 && wcj[k] > u.c0);
+  const uw = new Uint8Array(n); for (let k = 0; k < n; k++) uw[k] = isUncovWord(k) ? 1 : 0;
+  if (!uw.some((x) => x)) return;
+
+  // duration stats (over the CURRENT/pre-realign timeline) for cram & spike detection
   const ds = [];
   for (let i = 0; i < n; i++) { const d = dur(i); if (d > 0.001) ds.push(d); }
-  if (!ds.length) return;
   ds.sort((a, b) => a - b);
-  const med = ds[Math.floor(ds.length / 2)];
+  const med = ds.length ? ds[Math.floor(ds.length / 2)] : 0.2;
   const cramMax = Math.max(0.06, med * 0.4);
   const giantAbs = Math.max(4, med * 15);
-  // normal per-visible-char duration, from NORMAL units only (exclude crammed & giant)
   const rates = [];
   for (let k = 0; k < n; k++) { const d = dur(k), vl = visLen(units[k].text); if (vl >= 1 && d > cramMax && d < giantAbs) rates.push(d / vl); }
   rates.sort((a, b) => a - b);
@@ -1839,85 +1851,107 @@ async function redistributeParkedDebt(segsOut, diag, alignSlice, id = "") {
     if (i <= 0 || i >= n - 1) return d >= giantAbs;
     return d >= 3 * med && d >= 2.5 * dur(i - 1) && d >= 2.5 * dur(i + 1);
   };
-  // ---- PASS 1 (sync): detect every repair block [s..sp] over the CURRENT timeline ----
-  const blocks = [];
-  let i = 0;
-  while (i < n) {
-    if (!isCram(i)) { i++; continue; }
-    // extend contiguous flying run (allow a single 1-unit gap between crams)
-    let s = i, e = i, gap = 0, j = i + 1;
-    while (j < n) { if (isCram(j)) { e = j; gap = 0; } else { gap++; if (gap > 1) break; } j++; }
+  // Given a start index inside/at a flying run, return the block [runStart..spike] or null.
+  const flyingBlock = (from) => {
+    // walk left to the run start, right to the run end (allow single 1-unit gaps)
+    let s = from; while (s - 1 >= 0 && (isCram(s - 1) || (s - 2 >= 0 && isCram(s - 2)))) s--;
+    let e = from; while (e + 1 < n && (isCram(e + 1) || (e + 2 < n && isCram(e + 2)))) e++;
     let runLen = 0; for (let k = s; k <= e; k++) if (isCram(k)) runLen++;
-    if (runLen >= 6) {
-      // the debt is parked in the STRONGEST spike within 15 units after the run (not the first)
-      let sp = -1, spDur = 0;
-      for (let k = e + 1; k < n && k - e <= 15; k++) if (isSpike(k) && dur(k) > spDur) { sp = k; spDur = dur(k); }
-      if (sp >= 0) {
-        const T0 = units[s].start || 0, T1 = units[sp].end || 0;
-        if (T1 > T0 + 0.2) blocks.push({ s, sp, T0, T1, runLen, spDur });
-      }
-      i = e + 1; continue;
+    if (runLen < 3) return null;
+    let sp = -1, spDur = 0;
+    for (let k = e + 1; k < n && k - e <= 15; k++) if (isSpike(k) && dur(k) > spDur) { sp = k; spDur = dur(k); }
+    if (sp < 0) return null;
+    return { s, sp, spDur };
+  };
+  const anyCramIn = (a, b) => { for (let k = a; k <= b; k++) if (isCram(k)) return k; return -1; };
+
+  // ---- Build re-align windows from uncovered runs (with the flying→spike extension) ----
+  const windows = [];
+  let k = 0;
+  while (k < n) {
+    if (!uw[k]) { k++; continue; }
+    let u0 = k; while (k + 1 < n && uw[k + 1]) k++; let u1 = k; k++;
+    let lo = u0, hi = u1, spike = -1, spDur = 0;
+    // does the uncovered run touch a flying run? (a cram inside it, or a cram just after it)
+    let seed = anyCramIn(u0, u1);
+    if (seed < 0 && u1 + 1 < n && isCram(u1 + 1)) seed = u1 + 1;
+    if (seed < 0 && u0 - 1 >= 0 && isCram(u0 - 1)) seed = u0 - 1;
+    if (seed >= 0) {
+      const blk = flyingBlock(seed);
+      if (blk) { lo = Math.min(lo, blk.s); hi = Math.max(hi, blk.sp); spike = blk.sp; spDur = blk.spDur; }
     }
-    i = e + 1;
+    windows.push({ lo, hi, spike, spDur });
   }
-  if (!blocks.length) return;
+  if (!windows.length) return;
+  // merge windows that overlap/abut (extension can make two uncovered runs share a block)
+  windows.sort((a, b) => a.lo - b.lo);
+  const merged = [windows[0]];
+  for (let w = 1; w < windows.length; w++) {
+    const last = merged[merged.length - 1], cur = windows[w];
+    if (cur.lo <= last.hi + 1) { last.hi = Math.max(last.hi, cur.hi); if (cur.spike > last.spike || (last.spike < 0)) { last.spike = cur.spike; last.spDur = cur.spDur; } }
+    else merged.push(cur);
+  }
 
-  // char offset of unit k within the whole flat timeline (for report c0/c1)
-  const charOff = new Array(n + 1); charOff[0] = 0;
-  for (let k = 0; k < n; k++) charOff[k + 1] = charOff[k] + ((units[k].text || "").length);
+  // ---- Re-align each window (parallel, bounded). Only its own units are rewritten. ----
+  await mapLimit(merged, 4, async (w, wi) => {
+    const { lo, hi } = w;
+    const A = units[lo].start || 0, B = units[hi].end || 0;
+    if (!(B > A + 0.15)) { w.ok = false; return; }
+    let text = ""; for (let x = lo; x <= hi; x++) text += (units[x].text || "");
+    if (visLen(text) < 2 || typeof alignSlice !== "function") { w.ok = false; return; }
+    let reUnits = [];
+    try { reUnits = await alignSlice(A, B, text, `re${wi}`); } catch { reUnits = []; }
+    if (!Array.isArray(reUnits) || !reUnits.length) { w.ok = false; return; }
+    const map = mapUnitsToRef(reUnits, text);
+    const tAt = buildCharToTime(reUnits, map);
+    const t0 = tAt(0), t1 = tAt(text.length);
+    if (!(t1 > t0 && t0 >= A - 0.05 && t1 <= B + 0.05 && (t1 - t0) >= Math.min(0.5, (B - A) * 0.2))) { w.ok = false; return; }
+    w.ok = true; w.tAt = tAt; w.A = A; w.B = B; w.text = text;
+  });
 
+  // ---- Apply: write back real times for successes; heuristic fallback ONLY for windows that
+  // were extended through a spike (a bare uncovered window that fails re-align keeps its interp).
+  const covered = [];                               // fullText char ranges now given REAL times
   const spans = [];
-  let rk = 0;
-  for (const b of blocks) {
-    const { s, sp, T0, T1, runLen, spDur } = b;
-    let blkText = ""; for (let k = s; k <= sp; k++) blkText += (units[k].text || "");
-    const avail = T1 - T0;
-
-    // ---- PASS 2a: TARGETED RE-ALIGN — feed the block's own audio slice + text to the
-    // aligner and take its REAL per-char times. [T0,T1] are committed anchors (run start
-    // & spike end), and the slice is short (≪ collapse horizon), so it aligns cleanly.
-    // We overwrite ONLY units[s..sp]; nothing outside the block is ever touched.
-    let done = false;
-    if (typeof alignSlice === "function" && visLen(blkText) >= 2) {
-      let reUnits = [];
-      try { reUnits = await alignSlice(T0, T1, blkText, `repair${rk++}`); } catch { reUnits = []; }
-      if (Array.isArray(reUnits) && reUnits.length) {
-        const map = mapUnitsToRef(reUnits, blkText);
-        const tAt = buildCharToTime(reUnits, map);
-        // sanity: monotone, inside [T0,T1] (with small tol), spans a real fraction of the window
-        const t0 = tAt(0), t1 = tAt(blkText.length);
-        const ok = t1 > t0 && t0 >= T0 - 0.05 && t1 <= T1 + 0.05 && (t1 - t0) >= Math.min(0.5, avail * 0.2);
-        if (ok) {
-          let off = 0, last = T0;
-          for (let k = s; k <= sp; k++) {
-            const len = (units[k].text || "").length;
-            let st = tAt(off), en = tAt(off + len);
-            st = Math.min(Math.max(st, last), T1); en = Math.min(Math.max(en, st + 0.02), T1);
-            units[k].start = round3(st); units[k].end = round3(en); last = en; off += len;
-          }
-          spans.push({ c0: charOff[s], c1: charOff[sp + 1], tStart: round3(T0), tEnd: round3(T1), text: blkText, runLen, spikeText: units[sp].text, spikeSecs: round3(spDur), method: "realign" });
-          done = true;
-        }
+  for (const w of merged) {
+    const { lo, hi, spike, spDur } = w;
+    const A = units[lo].start || 0, B = units[hi].end || 0;
+    let blkText = ""; for (let x = lo; x <= hi; x++) blkText += (units[x].text || "");
+    if (w.ok) {
+      let off = 0, last = A;
+      for (let x = lo; x <= hi; x++) {
+        const len = (units[x].text || "").length;
+        let st = w.tAt(off), en = w.tAt(off + len);
+        st = Math.min(Math.max(st, last), B); en = Math.min(Math.max(en, st + 0.02), B);
+        units[x].start = round3(st); units[x].end = round3(en); last = en; off += len;
       }
+      covered.push([wci[lo], wcj[hi]]);
+      spans.push({ c0: wci[lo], c1: wcj[hi], tStart: round3(A), tEnd: round3(B), text: blkText, method: "realign", kind: spike >= 0 ? "debt" : "uncovered", spikeText: spike >= 0 ? units[spike].text : "", spikeSecs: spike >= 0 ? round3(spDur) : 0 });
+      continue;
     }
-    if (done) continue;
-
-    // ---- PASS 2b: FALLBACK heuristic (re-align unavailable/failed) — spread at the file's
-    // NORMAL per-char rate; leftover stays as a trailing silence gap; compress only on overflow.
-    const MINSLOT = 0.12;
-    const nat = []; let sum = 0;
-    for (let k = s; k <= sp; k++) { const dd = Math.max(MINSLOT, Math.max(1, visLen(units[k].text)) * secPerChar); nat.push(dd); sum += dd; }
-    const scale = sum > avail ? avail / sum : 1;   // compress only on overflow; never stretch
-    let t = T0;
-    for (let k = s; k <= sp; k++) { const dd = nat[k - s] * scale; const st = t; t += dd; units[k].start = round3(st); units[k].end = round3(Math.max(st + 0.02, t)); }
-    spans.push({ c0: charOff[s], c1: charOff[sp + 1], tStart: round3(T0), tEnd: round3(T1), text: blkText, runLen, spikeText: units[sp].text, spikeSecs: round3(spDur), method: "heuristic", laidSecs: round3(Math.min(sum, avail)), gapSecs: round3(Math.max(0, avail - sum)) });
+    if (spike >= 0) {                               // extended (debt) window → heuristic fallback
+      const avail = B - A, MINSLOT = 0.12;
+      const nat = []; let sum = 0;
+      for (let x = lo; x <= hi; x++) { const dd = Math.max(MINSLOT, Math.max(1, visLen(units[x].text)) * secPerChar); nat.push(dd); sum += dd; }
+      const scale = sum > avail ? avail / sum : 1;
+      let t = A;
+      for (let x = lo; x <= hi; x++) { const dd = nat[x - lo] * scale; const st = t; t += dd; units[x].start = round3(st); units[x].end = round3(Math.max(st + 0.02, t)); }
+      spans.push({ c0: wci[lo], c1: wcj[hi], tStart: round3(A), tEnd: round3(B), text: blkText, method: "heuristic", kind: "debt", spikeText: units[spike].text, spikeSecs: round3(spDur), laidSecs: round3(Math.min(sum, avail)), gapSecs: round3(Math.max(0, avail - sum)) });
+    }
+    // bare uncovered window that failed re-align: leave the existing interpolation untouched.
   }
+
   if (spans.length) {
     diag.repairSpans = spans;
-    // words changed in place → refresh each segment's start/end from its (kept) words
-    for (const s of segsOut) {
-      const ws = s.words || [];
-      if (ws.length) { s.start = ws[0].start; s.end = ws[ws.length - 1].end; }
+    for (const s of segsOut) { const ws = s.words || []; if (ws.length) { s.start = ws[0].start; s.end = ws[ws.length - 1].end; } }
+  }
+  // Drop the now-REAL spans from the uncovered alarm (they got true timestamps).
+  if (covered.length) {
+    diag.uncoveredSpans = uncov.filter((u) => !covered.some(([c0, c1]) => u.c0 >= c0 && u.c1 <= c1));
+    // recount the headline uncovered-chars figure so the report/badge matches
+    if (typeof diag.uncoveredChars === "number") {
+      let uc = 0; for (const u of diag.uncoveredSpans) uc += visLen(u.text || "");
+      diag.uncoveredChars = uc;
     }
   }
 }
@@ -3187,15 +3221,15 @@ async function runJob(id) {
           const words = finalizeWords(sliceToWords(fullText, 0, fullText.length, timeAtChar), 0, rec.durationSec || 0);
           segsOut = [{ start: 0, end: round3(rec.durationSec || 0), speaker: pickSpeaker(0, rec.durationSec || 0), text: fullText, words }];
         }
-        // Speaker smoothing MUST run BEFORE the repair pass: it keys off the crammed (~0s)
-        // state, which redistribution is about to spread back to a normal duration.
+        // Speaker smoothing MUST run BEFORE the re-align pass: it keys off the crammed (~0s)
+        // state, which the re-align is about to spread back to a normal duration.
         smoothSpeakers(segsOut, id);
-        // Repair "parked debt" on the FINAL per-word timeline (CJK flying appears only after
-        // sliceToWords): a flying run whose borrowed time was dumped on a downstream duration
-        // spike. Preferred fix = TARGETED RE-ALIGN each block's own audio slice (real per-char
-        // times); fallback = spread at the file's normal rate. Only units inside the block are
-        // touched. alignDiag is the same obj stashed in dbg.align (drives the purple report).
-        await redistributeParkedDebt(segsOut, alignDiag, alignSlice, id);
+        // Re-align GUESSED spans on the FINAL per-word timeline (CJK flying appears only after
+        // sliceToWords): TRIGGER = uncovered (interpolated) chars; each uncovered run gets its
+        // own audio slice re-aligned for REAL times, extended through a flying-run→spike block
+        // when it overlaps one. Only units inside the chosen window are rewritten. alignDiag is
+        // the same obj stashed in dbg.align (drives the report + uncovered alarm).
+        await realignGuessedSpans(segsOut, fullText, alignDiag, alignSlice, id);
       } catch (e) {
         // A stop must abort, not fall into the fallback path.
         if ((e && e.cancelled) || cancelled.has(id)) throw e;
