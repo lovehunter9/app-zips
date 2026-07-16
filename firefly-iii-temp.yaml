@@ -1,0 +1,195 @@
+# 创建ConfigMap用于存储非敏感环境变量
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fireflyiii-config
+data:
+  APP_ENV: "production"
+  APP_DEBUG: "false"
+  SITE_OWNER: "mail@example.com"
+  DEFAULT_LANGUAGE: "en_US"
+  DEFAULT_LOCALE: "equal"
+  TZ: "Europe/Amsterdam"
+  TRUSTED_PROXIES: "**"
+  LOG_CHANNEL: "stack"
+  APP_LOG_LEVEL: "notice"
+  AUDIT_LOG_LEVEL: "emergency"
+  DB_CONNECTION: "pgsql"
+  DB_HOST: "fireflyiii-db"
+  DB_PORT: "5432"
+  DB_DATABASE: "firefly"
+  DB_USERNAME: "firefly"
+  MAP_DEFAULT_LAT: "51.983333"
+  MAP_DEFAULT_LONG: "5.916667"
+  MAP_DEFAULT_ZOOM: "6"
+  AUTHENTICATION_GUARD: "web"
+  APP_URL: "http://localhost"
+---
+# 创建Secret用于存储敏感信息
+apiVersion: v1
+kind: Secret
+metadata:
+  name: fireflyiii-secrets
+type: Opaque
+data:
+  APP_KEY: "U3VwZXJTZWNyZXRLZXlGb3JGaXJlZmx5IUlU"  # 需替换为实际的32字符密钥
+  DB_PASSWORD: "c2VjcmV0X2ZpcmVmbHlfcGFzc3dvcmQ="  # 需替换为实际密码
+  STATIC_CRON_TOKEN: "U29tZVJhbmRvbVN0cmluZ09mMzJDaGFycyE="  # 需替换为32字符令牌
+---
+# 创建PersistentVolumeClaim用于数据库存储
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: fireflyiii-db-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi  # 根据实际需求调整存储大小
+---
+# 创建PostgreSQL数据库Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fireflyiii-db
+  labels:
+    app: fireflyiii-db
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fireflyiii-db
+  template:
+    metadata:
+      labels:
+        app: fireflyiii-db
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:15-alpine
+          env:
+            - name: POSTGRES_DB
+              valueFrom:
+                configMapKeyRef:
+                  name: fireflyiii-config
+                  key: DB_DATABASE
+            - name: POSTGRES_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: fireflyiii-config
+                  key: DB_USERNAME
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: fireflyiii-secrets
+                  key: DB_PASSWORD
+          ports:
+            - containerPort: 5432
+          volumeMounts:
+            - name: db-storage
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: db-storage
+          persistentVolumeClaim:
+            claimName: fireflyiii-db-pvc
+---
+# 创建PostgreSQL数据库Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: fireflyiii-db
+  labels:
+    app: fireflyiii-db
+spec:
+  selector:
+    app: fireflyiii-db
+  ports:
+    - protocol: TCP
+      port: 5432
+      targetPort: 5432
+---
+# 创建Firefly III应用Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fireflyiii-app
+  labels:
+    app: fireflyiii-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fireflyiii-app
+  template:
+    metadata:
+      labels:
+        app: fireflyiii-app
+    spec:
+      containers:
+        - name: fireflyiii
+          image: fireflyiii/core:latest
+          envFrom:
+            - configMapRef:
+                name: fireflyiii-config
+            - secretRef:
+                name: fireflyiii-secrets
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            - name: upload-storage
+              mountPath: /var/www/html/storage/upload
+      volumes:
+        - name: upload-storage
+          emptyDir: {}  # 实际生产环境应使用PersistentVolumeClaim
+---
+# 创建Firefly III应用Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: fireflyiii-app
+  labels:
+    app: fireflyiii-app
+spec:
+  selector:
+    app: fireflyiii-app
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8080
+---
+# 创建CronJob用于定时任务
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: fireflyiii-cron
+  labels:
+    app: fireflyiii-cron
+spec:
+  schedule: "0 3 * * *"  # 每天凌晨3点执行
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: fireflyiii-cron
+        spec:
+          containers:
+            - name: cron
+              image: alpine
+              command: [
+                "sh",
+                "-c",
+                "wget -qO- http://fireflyiii-app:80/api/v1/cron/$STATIC_CRON_TOKEN"
+              ]
+              env:
+                - name: STATIC_CRON_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: fireflyiii-secrets
+                      key: STATIC_CRON_TOKEN
+          restartPolicy: OnFailure
+
+
+          #"U29tZVJhbmRvbVN0cmluZ09mMzJDaGFyc0V4YWN0bHk="
+          #"UExFQVNFX1JFUExBQ0VfV0lUSF8zMl9DSEFSX0NPREU="

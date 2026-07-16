@@ -17,10 +17,10 @@ data:
       path: /metrics
       bearer_token: ""
     auth:
-      source: k8s_informer
+      # ADR-19: k8s_informer was removed; the binary accepts only lldap|local_header.
+      # local_header trusts the Olares entrance X-BFL-USER header (no LLDAP/NATS wiring).
+      source: local_header
       admin_names: []
-      kubeconfig: ""
-      kube_context: ""
     database:
       host: "{{ .Values.postgres.host }}"
       port: "{{ .Values.postgres.port }}"

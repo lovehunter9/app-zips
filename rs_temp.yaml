@@ -1,0 +1,147 @@
+# rna-sequencing-k8s.yaml
+
+# 1. Deployment: 负责运行 RNA-Sequencing 应用的 Pod
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rna-sequencing-deployment
+  labels:
+    app: rna-sequencing
+spec:
+  replicas: 1 # 根据需要调整副本数
+  selector:
+    matchLabels:
+      app: rna-sequencing
+  template:
+    metadata:
+      labels:
+        app: rna-sequencing
+    spec:
+      # 节点亲和性：确保 Pod 被调度到拥有 NVIDIA GPU 的节点上
+      # 这要求你的节点有类似 'nvidia.com/gpu.present' 的标签
+      # 如果没有，你可以使用 nodeSelector 或其他调度策略
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: nvidia.com/gpu.present
+                    operator: In
+                    values:
+                      - "true"
+      containers:
+        - name: rna-sequencing
+          image: lovehunter9/rna-sequencing:v0.0.1
+          imagePullPolicy: IfNotPresent # 如果镜像已存在则不拉取，可改为 Always
+
+          # 资源请求和限制，特别是 GPU
+          resources:
+            limits:
+              nvidia.com/gpu: 1 # 请求 1 个 GPU。如果需要所有 GPU，可以设置一个很大的数字或使用扩展资源，但通常建议明确指定数量。
+            requests:
+              nvidia.com/gpu: 1 # 请求 1 个 GPU
+
+          # 安全上下文，用于设置 ulimits
+          securityContext:
+            capabilities: {} # 默认 capabilities
+            # 设置 ulimits，对应 docker-compose 中的 ulimits
+            # memlock: -1 (unlimited), stack: 67108864 (64MB)
+            # 注意：在某些 Kubernetes 环境中，设置 ulimits 可能需要集群管理员权限
+            runAsUser: 0 # 以 root 用户运行，以确保有权限设置 ulimits 和访问设备
+            runAsGroup: 0
+
+          # 端口定义，对应 docker-compose 中的 ports
+          ports:
+            - containerPort: 8888 # Jupyter Notebook
+            - containerPort: 8787 # Dask Dashboard
+            - containerPort: 8786 # Dask Scheduler
+            - containerPort: 8501 # Streamlit
+            - containerPort: 8050 # Plotly Dash
+
+          # 环境变量
+          env:
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: "all" # 或者 "0", "1" 等，取决于你想用哪个 GPU
+            - name: PARENT_DIR
+              value: "/home/rapids/notebooks/playbook"
+
+          # 存活和就绪探针 (推荐添加，用于健康检查)
+          livenessProbe:
+            httpGet:
+              path: / # 假设根路径可以访问
+              port: 8888
+            initialDelaySeconds: 60
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: / # 假设根路径可以访问
+              port: 8888
+            initialDelaySeconds: 30
+            periodSeconds: 5
+
+          # 卷挂载
+          volumeMounts:
+            - name: notebook-volume
+              mountPath: /home/rapids/notebooks/playbook
+            - name: dshm-volume # 用于 shm_size
+              mountPath: /dev/shm
+
+      # 定义卷
+      volumes:
+        - name: notebook-volume
+          # 使用 hostPath 卷，精确匹配 docker-compose 的 './' 行为
+          # 警告：这会将 Pod 调度到的节点上的 /path/to/your/local/playbook 目录挂载进去
+          # 请将 /path/to/your/local/playbook 替换为你的实际路径
+          hostPath:
+            path: /path/to/your/local/playbook
+            type: DirectoryOrCreate
+        - name: dshm-volume
+          # 使用 emptyDir 卷来实现 shm_size
+          emptyDir:
+            medium: Memory # 将卷存储在内存中
+            sizeLimit: 1Gi   # 设置大小为 1Gi，对应 shm_size: 1g
+
+---
+# 2. Service: 为 Deployment 创建的 Pod 提供网络访问
+apiVersion: v1
+kind: Service
+metadata:
+  name: rna-sequencing-service
+spec:
+  # 类型可以是 ClusterIP (仅集群内访问), NodePort (通过节点IP+端口访问), 或 LoadBalancer (云服务商提供的负载均衡器)
+  # 这里使用 NodePort 以便从集群外部访问，并明确指定 8888 端口
+  type: NodePort
+  selector:
+    app: rna-sequencing # 必须与 Deployment 中的 Pod 标签匹配
+  ports:
+    # 主入口端口 8888
+    - name: jupyter
+      protocol: TCP
+      port: 8888        # Service 内部的端口
+      targetPort: 8888  # Pod 内容器的端口
+      nodePort: 30088   # 在每个节点上暴露的端口 (范围通常是 30000-32767)，通过 <NodeIP>:30088 访问
+
+    # 其他服务端口
+    - name: dask-dashboard
+      protocol: TCP
+      port: 8787
+      targetPort: 8787
+      # nodePort: 30087 # 如果需要外部访问，可以取消注释并分配端口
+
+    - name: dask-scheduler
+      protocol: TCP
+      port: 8786
+      targetPort: 8786
+      # nodePort: 30086
+
+    - name: streamlit
+      protocol: TCP
+      port: 8501
+      targetPort: 8501
+      # nodePort: 30085
+
+    - name: plotly-dash
+      protocol: TCP
+      port: 8050
+      targetPort: 8050
+      # nodePort: 30080

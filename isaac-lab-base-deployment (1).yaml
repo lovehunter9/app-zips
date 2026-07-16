@@ -1,0 +1,110 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: isaac-lab-base
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: isaac-lab-base
+  template:
+    metadata:
+      labels:
+        app: isaac-lab-base
+    spec:
+      containers:
+      - env:
+        - name: ISAACSIM_PATH
+          value: /isaac-sim/_isaac_sim
+        - name: OMNI_KIT_ALLOW_ROOT
+          value: '1'
+        image: lovehunter9/isaac-lab-base:v2.3.1
+        name: isaac-lab-base
+        resources:
+          limits:
+            nvidia.com/gpu: all
+        securityContext:
+          privileged: true
+        stdin: true
+        tty: true
+        volumeMounts:
+        - mountPath: /isaac-sim/kit/cache
+          name: isaac-cache-kit
+        - mountPath: /root/.cache/ov
+          name: isaac-cache-ov
+        - mountPath: /root/.cache/pip
+          name: isaac-cache-pip
+        - mountPath: /root/.cache/nvidia/GLCache
+          name: isaac-cache-gl
+        - mountPath: /root/.nv/ComputeCache
+          name: isaac-cache-compute
+        - mountPath: /root/.nvidia-omniverse/logs
+          name: isaac-logs
+        - mountPath: /isaac-sim/kit/logs/Kit/Isaac-Sim
+          name: isaac-carb-logs
+        - mountPath: /root/.local/share/ov/data
+          name: isaac-data
+        - mountPath: /root/Documents
+          name: isaac-docs
+        - mountPath: /workspace/isaaclab/source
+          name: source-bind
+        - mountPath: /workspace/isaaclab/scripts
+          name: scripts-bind
+        - mountPath: /workspace/isaaclab/docs
+          name: docs-bind
+        - mountPath: /workspace/isaaclab/tools
+          name: tools-bind
+        - mountPath: /workspace/isaaclab/docs/_build
+          name: isaac-lab-docs
+        - mountPath: /workspace/isaaclab/logs
+          name: isaac-lab-logs
+        - mountPath: /workspace/isaaclab/data_storage
+          name: isaac-lab-data
+        - mountPath: /root/.bash_history
+          name: bash-history
+      hostNetwork: true
+      volumes:
+      - emptyDir: {}
+        name: isaac-cache-kit
+      - emptyDir: {}
+        name: isaac-cache-ov
+      - emptyDir: {}
+        name: isaac-cache-pip
+      - emptyDir: {}
+        name: isaac-cache-gl
+      - emptyDir: {}
+        name: isaac-cache-compute
+      - emptyDir: {}
+        name: isaac-logs
+      - emptyDir: {}
+        name: isaac-carb-logs
+      - emptyDir: {}
+        name: isaac-data
+      - emptyDir: {}
+        name: isaac-docs
+      - hostPath:
+          path: ../source
+          type: Directory
+        name: source-bind
+      - hostPath:
+          path: ../scripts
+          type: Directory
+        name: scripts-bind
+      - hostPath:
+          path: ../docs
+          type: Directory
+        name: docs-bind
+      - hostPath:
+          path: ../tools
+          type: Directory
+        name: tools-bind
+      - emptyDir: {}
+        name: isaac-lab-docs
+      - emptyDir: {}
+        name: isaac-lab-logs
+      - emptyDir: {}
+        name: isaac-lab-data
+      - hostPath:
+          path: .isaac-lab-docker-history
+          type: File
+        name: bash-history

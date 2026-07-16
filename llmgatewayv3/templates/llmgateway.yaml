@@ -20,7 +20,7 @@ spec:
     spec:
       containers:
         - name: llm-gateway-frontend
-          image: docker.io/lovehunter9/llm-gateway-frontend:v2.0.6-test1
+          image: docker.io/lovehunter9/llm-gateway-frontend:v2.0.6-test2
           resources:
             requests:
               cpu: 500m
@@ -61,7 +61,7 @@ spec:
           ports:
             - containerPort: 80
         - name: llm-gateway-backend
-          image: docker.io/lovehunter9/llm-gateway-backend:v2.0.6-test8
+          image: docker.io/lovehunter9/llm-gateway-backend:v2.0.6-test9
           imagePullPolicy: Always
           env:
             - name: PGID

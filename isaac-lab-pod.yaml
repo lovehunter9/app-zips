@@ -1,0 +1,65 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: isaac-lab
+spec:
+  containers:
+    - args:
+        - -it
+      command:
+        - bash
+      env:
+        - name: ACCEPT_EULA
+          value: Y
+        - name: PRIVACY_CONSENT
+          value: Y
+      image: nvcr.io/nvidia/isaac-lab:2.3.0
+      name: isaac-lab
+      resources:
+        limits:
+          nvidia.com/gpu: all
+      volumeMounts:
+        - mountPath: /isaac-sim/kit/cache
+          name: kit-cache
+        - mountPath: /root/.cache/ov
+          name: ov-cache
+        - mountPath: /root/.cache/pip
+          name: pip-cache
+        - mountPath: /root/.cache/nvidia/GLCache
+          name: glcache
+        - mountPath: /root/.nv/ComputeCache
+          name: computecache
+        - mountPath: /root/.nvidia-omniverse/logs
+          name: logs
+        - mountPath: /root/.local/share/ov/data
+          name: data
+        - mountPath: /root/Documents
+          name: documents
+  hostNetwork: true
+  restartPolicy: Never
+  volumes:
+    - hostPath:
+        path: ~/docker/isaac-sim/cache/kit
+      name: kit-cache
+    - hostPath:
+        path: ~/docker/isaac-sim/cache/ov
+      name: ov-cache
+    - hostPath:
+        path: ~/docker/isaac-sim/cache/pip
+      name: pip-cache
+    - hostPath:
+        path: ~/docker/isaac-sim/cache/glcache
+      name: glcache
+    - hostPath:
+        path: ~/docker/isaac-sim/cache/computecache
+      name: computecache
+    - hostPath:
+        path: ~/docker/isaac-sim/logs
+      name: logs
+    - hostPath:
+        path: ~/docker/isaac-sim/data
+      name: data
+    - hostPath:
+        path: ~/docker/isaac-sim/documents
+      name: documents
+

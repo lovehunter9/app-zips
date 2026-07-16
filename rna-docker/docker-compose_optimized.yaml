@@ -1,0 +1,34 @@
+
+version: '3.8'
+
+services:
+  rna-sequencing:
+    image: lovehunter9/rna-sequencing:v0.0.1
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    shm_size: 1g
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      stack:
+        soft: 67108864
+        hard: 67108864
+    ports:
+      - "8888:8888"
+      - "8787:8787"
+      - "8786:8786"
+      - "8501:8501"
+      - "8050:8050"
+    volumes:
+      - ./:/home/rapids/notebooks/playbook
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - PARENT_DIR=/home/rapids/notebooks/playbook
+    tty: true
+    stdin_open: true

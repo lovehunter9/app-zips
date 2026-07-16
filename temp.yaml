@@ -1,0 +1,243 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: data
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: extensions
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 500Mi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: db
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: freshrss
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: freshrss
+  template:
+    metadata:
+      labels:
+        app: freshrss
+    spec:
+      containers:
+        - env:
+            - name: TZ
+              value: Europe/Paris
+            - name: CRON_MIN
+              value: "3,33"
+            - name: TRUSTED_PROXY
+              value: 172.16.0.1/12 192.168.0.1/16
+            - name: ADMIN_EMAIL
+              value: admin@example.net
+            - name: ADMIN_PASSWORD
+              value: freshrss
+            - name: ADMIN_API_PASSWORD
+              value: freshrss
+            - name: BASE_URL
+              value: https://freshrss.example.net
+            - name: SERVER_DNS
+              value: freshrss.example.net
+            - name: DB_HOST
+              value: freshrss-db
+            - name: DB_BASE
+              value: freshrss
+            - name: DB_USER
+              value: freshrss
+            - name: DB_PASSWORD
+              value: freshrss
+          image: freshrss/freshrss:latest
+          livenessProbe:
+            exec:
+              command:
+                - cli/health.php
+            failureThreshold: 3
+            initialDelaySeconds: 60
+            periodSeconds: 75
+            timeoutSeconds: 10
+          name: freshrss
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            - mountPath: /var/www/FreshRSS/data
+              name: data
+            - mountPath: /var/www/FreshRSS/extensions
+              name: extensions
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: data
+        - name: extensions
+          persistentVolumeClaim:
+            claimName: extensions
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: freshrss-db
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: freshrss-db
+  template:
+    metadata:
+      labels:
+        app: freshrss-db
+    spec:
+      containers:
+        - command:
+            - -c
+            - shared_buffers=1GB
+            - -c
+            - work_mem=32MB
+          env:
+            - name: POSTGRES_DB
+              value: freshrss
+            - name: POSTGRES_USER
+              value: freshrss
+            - name: POSTGRES_PASSWORD
+              value: freshrss
+          image: postgres:18
+          name: freshrss-db
+          volumeMounts:
+            - mountPath: /var/lib/postgresql
+              name: db
+      volumes:
+        - name: db
+          persistentVolumeClaim:
+            claimName: db
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: freshrss-service
+spec:
+  ports:
+    - name: http
+      port: 80
+      protocol: TCP
+      targetPort: 80
+  selector:
+    app: freshrss
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: freshrss-db-service
+spec:
+  ports:
+    - name: postgres
+      port: 5432
+      protocol: TCP
+      targetPort: 5432
+  selector:
+    app: freshrss-db
+
+
+    pip install bcrypt
+    PASSWORD_HASH=$(python -c 'import bcrypt; print(bcrypt.hashpw("{{ .Values.olaresEnv.ADMIN_PASSWORD }}".encode(), bcrypt.gensalt()).decode())')
+    API_PASSWORD_HASH=$(python -c 'import bcrypt; print(bcrypt.hashpw("{{ .Values.olaresEnv.ADMIN_API_PASSWORD }}".encode(), bcrypt.gensalt()).decode())')
+    echo $PASSWORD_HASH
+    echo $API_PASSWORD_HASH
+    sed -i \
+    -e "s/'passwordHash' =>.*/'passwordHash' => '$PASSWORD_HASH',/" \
+    -e "s/'apiPasswordHash' =>.*/'apiPasswordHash' => '$API_PASSWORD_HASH',/" \
+    /var/www/FreshRSS/data/users/{{ .Values.olaresEnv.ADMIN_NAME }}/config.php
+    
+    
+    
+    {{/*            - name: freshrss-config*/}}
+    {{/*              mountPath: /var/www/FreshRSS/readonly/config.custom.php*/}}
+    {{/*              subPath: config.custom.php*/}}
+    {{/*            - name: freshrss-config*/}}
+    {{/*              mountPath: /var/www/FreshRSS/readonly/config-user.custom.php*/}}
+    {{/*              subPath: config-user.custom.php*/}}
+    {{/*        - name: pre-config*/}}
+    {{/*          image: docker.io/beclab/freshrss-freshrss:1.28.0 # busybox:1.36*/}}
+    {{/*          command:*/}}
+    {{/*            - sh*/}}
+    {{/*            - -c*/}}
+    {{/*            - |*/}}
+    {{/*              cp /var/www/FreshRSS/readonly/config.custom.php /var/www/FreshRSS/data/config.custom.php*/}}
+    {{/*              cp /var/www/FreshRSS/readonly/config-user.custom.php /var/www/FreshRSS/data/config-user.custom.php*/}}
+    {{/*              chown -R 33:33 /var/www/FreshRSS/data/config.custom.php*/}}
+    {{/*              chown -R 33:33 /var/www/FreshRSS/data/config-user.custom.php*/}}
+    {{/*              chmod -R 660 /var/www/FreshRSS/data/config.custom.php*/}}
+    {{/*              chmod -R 660 /var/www/FreshRSS/data/config-user.custom.php*/}}
+
+    {{/*              cp /var/www/FreshRSS/readonly/config.custom.php /var/www/FreshRSS/data/config.php*/}}
+    {{/*              chown -R 33:33 /var/www/FreshRSS/data/config.php*/}}
+    {{/*              chmod -R 660 /var/www/FreshRSS/data/config.php*/}}
+
+    {{/*              mkdir -p /var/www/FreshRSS/data/users/{{ .Values.olaresEnv.ADMIN_NAME }}*/}}
+    {{/*              cp /var/www/FreshRSS/readonly/config-user.custom.php /var/www/FreshRSS/data/users/{{ .Values.olaresEnv.ADMIN_NAME }}/config.php*/}}
+    {{/*              chown -R 33:33 /var/www/FreshRSS/data/users/{{ .Values.olaresEnv.ADMIN_NAME }}/config.php*/}}
+    {{/*              chmod -R 660 /var/www/FreshRSS/data/users/{{ .Values.olaresEnv.ADMIN_NAME }}/config.php*/}}
+
+    {{/*              php /var/www/FreshRSS/cli/create-user.php --user {{ .Values.olaresEnv.ADMIN_NAME }} --password {{ .Values.olaresEnv.ADMIN_PASSWORD }} --api-password {{ .Values.olaresEnv.ADMIN_API_PASSWORD }} --email {{ .Values.olaresEnv.ADMIN_EMAIL }}*/}}
+    {{/*          volumeMounts:*/}}
+    {{/*            - name: freshrss-data*/}}
+    {{/*              mountPath: /var/www/FreshRSS/data*/}}
+    {{/*              subPath: data*/}}
+    {{/*            - name: freshrss-config*/}}
+    {{/*              mountPath: /var/www/FreshRSS/readonly/config.custom.php*/}}
+    {{/*              subPath: config.custom.php*/}}
+    {{/*            - name: freshrss-config*/}}
+    {{/*              mountPath: /var/www/FreshRSS/readonly/config-user.custom.php*/}}
+    {{/*              subPath: config-user.custom.php*/}}
+    
+    
+    
+    # 创建并授权所有必要目录
+    # 创建并授权所有必要目录（带详细错误检查）
+    for dir in favicons tokens cache users extensions; do
+    mkdir -p /var/www/FreshRSS/data/$dir
+    if [ $? -ne 0 ]; then
+    echo "❌ 创建目录失败: /var/www/FreshRSS/data/$dir"
+    exit 0
+    else
+    echo "✅ 目录创建成功: /var/www/FreshRSS/data/$dir"
+    fi
+    
+    chown -R www-data:www-data /var/www/FreshRSS/data/$dir
+    if [ $? -ne 0 ]; then
+    echo "❌ 目录授权失败: /var/www/FreshRSS/data/$dir"
+    exit 0
+    else
+    echo "✅ 目录授权成功: /var/www/FreshRSS/data/$dir"
+    fi
+    
+    chmod -R 775 /var/www/FreshRSS/data/$dir
+    if [ $? -ne 0 ]; then
+    echo "❌ 权限设置失败: /var/www/FreshRSS/data/$dir"
+    exit 0
+    else
+    echo "✅ 权限设置成功: /var/www/FreshRSS/data/$dir"
+    fi
+    done

@@ -1,0 +1,61 @@
+============================================================
+把下面整段复制,粘贴给 Cursor / Claude Code / Codex 等 AI 编码助手即可。
+它会一步步帮你把 olares-cli + olares-skills 环境搭起来。
+============================================================
+
+你是我的环境搭建助手。请帮我在【本机】把 olares-cli(Olares 官方命令行)和 olares-skills(给 AI agent 用的技能包)安装、连接、验证好。请严格按下面的规则和步骤执行,每完成一步给我简短结果,遇到需要我本人操作的地方就停下来等我。
+
+== 背景(先理解,别搞混) ==
+- olares-cli 是装在【本机】的"遥控器",olares-skills 是给你(AI)看的"说明书"。
+- 真正装应用、跑容器、模型推理/GPU 都在【远端那台 Olares 机器】上,本机只是驾驶座。
+- 因此:安装/编译/装 skills 是一次性的本地准备;之后跑模型不占本机算力。
+
+== 第 0 步:探测环境(只读,先别装) ==
+请运行并汇报:操作系统与架构;是否有 node/npx;是否有 git、go(go version);是否已存在 olares-cli(which olares-cli);home 磁盘剩余空间。
+然后据此判断走哪条安装路线。
+
+== 第 1 步:安装 olares-cli(和我确认走哪条) ==
+路线 A(推荐,跨平台最省事):
+    npx @olares/cli@latest install
+  这会 npm 全局装 olares-cli 并装官方 skills。它【不】安装 Olares OS、【不】自动登录。
+
+路线 B(需要最新版 / 内部要求"本地源码编译"时):
+    git clone https://github.com/beclab/Olares.git ~/beclab/Olares   # 必须整仓,cli 依赖 ../framework/oac,只克隆 cli 子目录编不过
+    cd ~/beclab/Olares/cli
+    go build -o olares-cli ./cmd/main.go     # 本机 Go 版本不够也没关系,GOTOOLCHAIN=auto 会自动下载所需工具链
+  编译要点:① 这步会写 ~/go,如果你在受限沙箱里跑、报 "operation not permitted",请用完整文件写权限重跑;② 编译耗时几分钟、产物约 100MB+ 属正常;③ 编完把它放进 PATH:
+    - macOS(Apple Silicon,/opt/homebrew/bin 已在 PATH 且免 sudo):
+        ln -sf "$(pwd)/olares-cli" /opt/homebrew/bin/olares-cli
+    - 其他系统:软链到任意已在 PATH 的目录,或把 cli 目录加进 PATH。
+  验证:olares-cli --version(源码编译显示 0.0.0-development 是正常的)。
+
+默认建议路线 A;只有我明确说"要源码编译/要最新"才走路线 B。请先问我选哪条。
+
+== 第 2 步:登录(这步【必须我本人】做,你不要替我输密码) ==
+请把下面命令给我,让我自己在终端跑(要输密码,可能还有 2FA):
+    olares-cli profile login --olares-id <我的Olares-ID>
+我跑完后,你再运行这两条只读命令确认登录是否成功并汇报:
+    olares-cli profile whoami
+    olares-cli profile list
+注意:没有 profile current 这个子命令;查状态只用 whoami / list。token 存在系统钥匙串。
+
+== 第 3 步:安装 skills 到你(AI agent) ==
+如果走的是路线 A,skills 已自带,可跳过;否则装本地仓库版:
+    cd ~/beclab/Olares/cli
+    npx skills add "$(pwd)/skills" --skill '*' -a <你的agent: cursor|claude-code|codex|...> -g -y
+规则:① 切忌加 sudo(会产生 root 属主目录,以后重装报 EACCES);② 装到 ~/.agents/skills/olares-*;③ 在 Cursor 里这些 skills 要【新开一个对话】才会自动进你的技能清单——请提醒我;④ 在没自动加载前,你可以直接用 Read 工具读 ~/.agents/skills/olares-*/SKILL.md 来遵循。
+
+== 第 4 步:验证你能驱动那台机器(只读) ==
+运行并汇报:
+    olares-cli cluster context
+    olares-cli market list --mine
+看到集群身份正确、能列出我的 app,就算环境搭好了。
+
+== 收尾 ==
+请给我一个简短总结:olares-cli 装在哪/版本、登录到哪个 Olares ID 与角色、skills 装没装、以及"新开对话后我怎么验证你在用 skill"(答:看你动手前有没有 Read 对应的 SKILL.md)。
+
+== 全程纪律 ==
+- 涉及输密码/2FA/付费/删除等敏感或破坏性操作,一律停下来交给我或先征得我同意(写操作脚本化时才加 --yes)。
+- 每条 olares-cli 命令尽量加 -o json 便于你解析。
+- 出错先看报错原文按提示处理,不要盲目重试循环。
+============================================================

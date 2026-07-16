@@ -1,0 +1,233 @@
+﻿{{/*{{- $solidtimeDomainENV := split  ","  .Values.domain.solidtime -}}*/}}
+{{/*{{- $solidtimeDomain := index $solidtimeDomainENV "_0" -}}*/}}
+
+{{/*---*/}}
+{{/*apiVersion: v1*/}}
+{{/*kind: PersistentVolumeClaim*/}}
+{{/*metadata:*/}}
+{{/*  name: solidtime-keys-pvc*/}}
+{{/*  namespace: {{ .Release.Namespace }}*/}}
+{{/*spec:*/}}
+{{/*  accessModes:*/}}
+{{/*    - ReadWriteOnce*/}}
+{{/*  resources:*/}}
+{{/*    requests:*/}}
+{{/*      storage: 1Mi*/}}
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tensorzero
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: tensorzero
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: tensorzero
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: tensorzero
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+{{/*      initContainers:*/}}
+{{/*        - name: fix-permissions*/}}
+{{/*          image: "docker.io/beclab/aboveos-busybox:1.37.0"*/}}
+{{/*          command:*/}}
+{{/*            - sh*/}}
+{{/*            - '-c'*/}}
+{{/*          args:*/}}
+{{/*            - |*/}}
+{{/*              mkdir -p /var/www/html/storage/logs /var/www/html/storage/app*/}}
+{{/*              chown -R 1000:1000 /var/www/html/storage*/}}
+{{/*              chmod -R 755 /var/www/html/storage*/}}
+{{/*          resources: { }*/}}
+{{/*          volumeMounts:*/}}
+{{/*            - name: solidtime-data*/}}
+{{/*              mountPath: /var/www/html/storage*/}}
+{{/*          terminationMessagePath: /dev/termination-log*/}}
+{{/*          terminationMessagePolicy: File*/}}
+{{/*          imagePullPolicy: IfNotPresent*/}}
+{{/*          securityContext:*/}}
+{{/*            runAsUser: 0*/}}
+      containers:
+        - name: clickhouse
+          image: clickhouse:26.1.3
+          env:
+            - name: CLICKHOUSE_USER
+              value: "chuser"
+            - name: CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT
+              value: "1"
+            - name: CLICKHOUSE_PASSWORD
+              value: "chpassword"
+          ports:
+            - containerPort: 8123
+              name: clickhouse-http
+            - containerPort: 9000
+              name: clickhouse-native
+          volumeMounts:
+            - name: tensorzero-data
+              mountPath: /var/lib/clickhouse
+              subPath: clickhouse
+          resources:
+            limits:
+              nofile: 262144
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - "wget --spider --tries 1 http://chuser:chpassword@localhost:8123/ping"
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 1
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - "wget --spider --tries 1 http://chuser:chpassword@localhost:8123/ping"
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 1
+
+        - name: gateway
+          image: tensorzero/gateway:2026.2.2
+{{/*          volumeMounts:*/}}
+{{/*            - name: gateway-config*/}}
+{{/*              mountPath: /app/config/tensorzero.toml*/}}
+{{/*              subPath: tensorzero.toml*/}}
+          command: [ "gateway" ]
+          args: [ "--default-config" ]
+{{/*          args: [ "--config-file", "/app/config/tensorzero.toml" ]*/}}
+          env:
+            - name: TENSORZERO_CLICKHOUSE_URL
+              value: "http://chuser:chpassword@localhost:8123/tensorzero"
+            - name: TENSORZERO_POSTGRES_URL
+              value: "postgres://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.tensorzerodb }}"
+{{/*            - name: OPENAI_API_KEY*/}}
+{{/*              valueFrom:*/}}
+{{/*                secretKeyRef:*/}}
+{{/*                  name: openai-api-key*/}}
+{{/*                  key: api-key*/}}
+          ports:
+            - containerPort: 3000
+              name: gateway
+          livenessProbe:
+            httpGet:
+              path: /status
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 1
+          readinessProbe:
+            httpGet:
+              path: /status
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 1
+
+        - name: ui
+          image: tensorzero/ui:2026.2.2
+          env:
+            - name: TENSORZERO_POSTGRES_URL
+              value: "postgres://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.tensorzerodb }}"
+            - name: TENSORZERO_GATEWAY_URL
+              value: "http://localhost:3000"
+          ports:
+            - containerPort: 4000
+              name: ui
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 4000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 1
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 4000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 1
+
+      restartPolicy: Always
+      volumes:
+        - name: tensorzero-data
+          hostPath:
+            type: DirectoryOrCreate
+                {{- if .Values.sysVersion }}
+                  {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: '{{ .Values.userspace.appCache }}'
+                  {{- else }}
+            path: '{{ .Values.userspace.appCache }}/tensorzero'
+                  {{- end }}
+                {{- else }}
+            path: '{{ .Values.userspace.appCache }}/tensorzero'
+                {{- end }}
+{{/*        - name: healthcheck-script*/}}
+{{/*          configMap:*/}}
+{{/*            name: solidtime-healthcheck-script*/}}
+{{/*            defaultMode: 0755*/}}
+{{/*        - name: solidtime-keys*/}}
+{{/*          persistentVolumeClaim:*/}}
+{{/*            claimName: solidtime-keys-pvc*/}}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tensorzero
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: tensorzero
+spec:
+  ports:
+    - name: clickhouse-http
+      port: 8123
+      targetPort: 8123
+    - name: clickhouse-native
+      port: 9000
+      targetPort: 9000
+    - name: gateway
+      port: 3000
+      targetPort: 3000
+    - name: ui
+      port: 4000
+      targetPort: 4000
+{{/*    - name: "{{ .Values.port | default 3000 }}"*/}}
+{{/*      port: {{ .Values.port | default 3000 }}*/}}
+{{/*      targetPort: {{ .Values.port | default 3000 }}*/}}
+{{/*      protocol: TCP*/}}
+  selector:
+    io.kompose.service: tensorzero
+status:
+  loadBalancer: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sharedentrances-tensorzero
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: tensorzero
+spec:
+  ports:
+    - name: "4000"
+      port: 80
+      targetPort: 4000
+  selector:
+    io.kompose.service: tensorzero
+status:
+  loadBalancer: {}

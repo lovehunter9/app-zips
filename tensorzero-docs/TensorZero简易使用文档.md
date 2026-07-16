@@ -1,0 +1,1416 @@
+# TensorZero 简易使用文档
+
+> Olares 平台部署版 · 对应 TensorZero Gateway 2026.4.0 / Chart 1.0.6
+
+---
+
+## 0. 阅前提示：TensorZero 的"不一样"
+
+TensorZero 和 Bifrost / OneAPI / LiteLLM-Proxy 这类**纯转发代理**不是同类东西，容易踩坑的地方都源自这个本质差异。在开始之前请牢记三条：
+
+1. **白名单制**：TensorZero 只认你在 `tensorzero.toml` 里**显式声明过**的名字（model 别名、function 名、embedding 模型别名），不接受"上游 provider 的原始模型名"直通。
+2. **客户端调用必须带三段式前缀**：`tensorzero::function_name::xxx` / `tensorzero::model_name::xxx` / `tensorzero::embedding_model_name::xxx`，否则 gateway 会直接 400。
+3. **UI 里没有"配置入口"**：TensorZero 的所有模型/函数/embedding/tool 都在 `tensorzero.toml` 里声明，**官方 UI 不提供配置编辑器**。第三方应用里"自动列出模型"的功能也用不上——所有要用的名字都得你先在 TOML 里定义；它们的 Test 按钮过不过不是关键，**手动填 TensorZero 限定名**才是正道。
+
+读完后面章节时随时回来看这三条，大部分问题都能被这里解释。
+
+---
+
+## 1. TensorZero 是什么
+
+TensorZero 是一个开源的 LLMOps 全栈平台，一次部署同时解决以下五件事：
+
+| 组件 | 作用 |
+| --- | --- |
+| **LLM 网关** | 用一套 API 接所有主流模型提供商（OpenAI / Anthropic / Gemini / DeepSeek / Ollama / vLLM 等），内置负载均衡、失败回退、缓存、限速 |
+| **观测** | 每一次推理和反馈都入库（ClickHouse + Postgres），可在 UI 上按 function / variant / model 维度回看 |
+| **优化** | 基于观测数据自动调优 prompt / variant，支持 GEPA、监督微调、DPO 等工作流 |
+| **评估** | 用启发式规则、LLM 裁判、人工标注对同一 function 的不同版本打分 |
+| **实验** | 内建 A/B 测试、动态路由、fallback、retry 语义 |
+
+和 Olares 里的 Bifrost 相比，TensorZero 功能上是**严格超集**——既能替掉 Bifrost 给 OpenCode / AgentZero / OpenNotebook 等其它应用做统一模型代理，又能把所有调用记录下来供后续分析、评估、调优。但前提是你得容忍它"白名单+必须带前缀"的使用范式。
+
+官方链接：
+
+- GitHub：<https://github.com/tensorzero/tensorzero>
+- 官方文档：<https://www.tensorzero.com/docs>
+- 快速入门：<https://www.tensorzero.com/docs/quickstart>
+- 配置参考：<https://www.tensorzero.com/docs/gateway/configuration-reference>
+- Embedding 指南：<https://www.tensorzero.com/docs/gateway/generate-embeddings>
+
+---
+
+## 2. 容器与入口架构
+
+### 2.1 Pod 组成
+
+TensorZero 在 Olares 下以一个 Pod 同时跑以下容器：
+
+| 容器 | 端口 | 职责 |
+| --- | --- | --- |
+| `gateway` | 3000 | TensorZero 网关，LLM 推理、MCP、观测 API |
+| `ui` | 4000 | Web 管理界面（React Router SSR） |
+| `clickhouse` | 8123 / 9000 | 观测数据存储 |
+| `tensorzeroingress`（独立 Pod） | 8080 | OpenResty 入口，负责分流到 gateway 和 ui |
+
+ClickHouse 跑在 Pod 内本地；Postgres 用 Olares 共享的 Citus 集群。
+
+### 2.2 访问入口
+
+Olares 下 TensorZero 提供一个入口。
+
+形如：`https://<prefix>.<user>.<domain>`，例：`https://ea581361.olarestestXXX.olares.com`
+
+### 2.3 公开的 API 路径
+
+以下路径通过入口对外放行：
+
+| 路径 | 后端 | 场景 |
+| --- | --- | --- |
+| `POST /inference` | gateway | TensorZero 原生推理（流式） |
+| `POST /openai/v1/chat/completions` | gateway | OpenAI 兼容（流式） |
+| `POST /openai/v1/embeddings` | gateway | OpenAI 兼容 embeddings |
+| `POST /batch_inference`, `GET /batch_inference/{id}[/inference/{id}]` | gateway | 批量推理 |
+| `POST /feedback` | gateway | 上报反馈（评分、人工标注等） |
+| `POST /v1/inferences/list_inferences`, `get_inferences` | gateway | 推理历史查询 |
+| `/v1/datasets/...` | gateway | 数据集 CRUD |
+| `/v1/optimization/gepa` | gateway | GEPA 优化 |
+| `/workflow_evaluation_run[/...]` | gateway | 评估运行（长连接） |
+| `/mcp` | gateway | MCP 服务器（Streamable HTTP，长连接） |
+| `/metrics` | gateway | Prometheus 指标 |
+| `/status` | gateway | 健康检查（JSON） |
+| `/`（以及 `/datasets`、`/observability` 等 UI 页面） | ui | Web UI |
+
+> `/internal/*` 是 UI 在 Pod 内部调用 gateway 用的，**不对外开放**。
+
+---
+
+## 3. 配置方式
+
+> **核心原则**：TensorZero 的官方 UI **没有提供配置入口**，所有模型、函数、embedding、tool 都在配置文件里定义。配置文件修改后需要**重启应用**才会生效。
+
+### 3.1 配置文件位置
+
+在 Olares ControlHub 里找到 TensorZero 应用的 `ConfigMap`，名字是 **`gateway-startups`**。里面有三个键：
+
+| 键 | 作用 |
+| --- | --- |
+| `tensorzero.toml` | TensorZero 主配置：models、functions、embedding_models、tools、metrics 等 |
+| `start.sh` | 容器启动脚本（不用改） |
+| `env.sh` | Provider API Key 等环境变量（按需改） |
+
+修改流程：
+
+1. 在 ControlHub 里打开 `gateway-startups` ConfigMap
+2. 编辑 `tensorzero.toml`（或 `env.sh`）
+3. 保存
+4. 重启 TensorZero 应用（ControlHub 里应用详情右上角的重启按钮）
+5. 刷新浏览器访问 TensorZero UI，新配置生效
+
+> **⚠️ 格式警示（踩过的坑）**：TOML 对空行和缩进敏感。每段 `[xxx]` 块之间需要保留一个空行；粘贴别人发给你的片段时**务必保留原样的空行**，删掉就会语法错误、容器启动挂掉。Olares ControlHub 的 ConfigMap 编辑器在渲染时可能把多个段落"挤到一行"显示，不要被误导——保存前确认每个 `[xxx]` 前后都有独立的一行空行。
+
+### 3.2 `tensorzero.toml` 的五大结构
+
+```toml
+# ──────────── 1. MODELS（聊天/补全模型）────────────
+# 定义一个"模型别名"，告诉 TensorZero 这个名字对应哪个 provider、哪个具体模型
+[models.<model_alias>]
+routing = ["<provider_key>"]              # 支持多个，按顺序 fallback
+
+[models.<model_alias>.providers.<provider_key>]
+type = "openai" | "anthropic" | "google_ai_studio_gemini" | "azure" | "vllm" | ...
+model_name = "<provider-side-name>"
+api_base = "<可选，自定义 base_url>"
+api_key_location = "env::ENV_VAR_NAME"    # 或 "none"，或 "dynamic::xxx"
+
+# ──────────── 2. EMBEDDING_MODELS（向量模型，独立！）────────────
+# ⚠️ 不是 [models.xxx]！embedding 有自己的一级段落
+[embedding_models.<embedding_alias>]
+routing = ["<provider_key>"]
+
+[embedding_models.<embedding_alias>.providers.<provider_key>]
+type = "openai" | ...
+model_name = "<provider-side-embedding-model>"
+api_base = "<可选>"
+api_key_location = "env::ENV_VAR_NAME" | "none"
+
+# ──────────── 3. FUNCTIONS（业务函数）────────────
+# 把 prompt 模板、输入 schema、输出 schema 纳管
+[functions.<function_name>]
+type = "chat" | "json"                    # chat=普通对话，json=结构化输出
+
+# 每个 function 下可以定义多个 variant（变体），用于 A/B、fallback、优化
+[functions.<function_name>.variants.<variant_name>]
+type = "chat_completion"
+model = "<model_alias>"                   # 指向上面定义的 model
+# 其它可选：system_template / user_template / weight / temperature / max_tokens ...
+
+# ──────────── 4. TOOLS（给 LLM 调用的工具）────────────
+# 在 function 调用时会被作为可用 tool 传给模型（function calling）
+[tools.<tool_name>]
+description = "..."
+parameters = "/path/to/schema.json"
+# 见 https://www.tensorzero.com/docs/gateway/guides/tool-use
+
+# ──────────── 5. METRICS（评估指标）────────────
+[metrics.<metric_name>]
+type = "boolean" | "float" | "comment"
+optimize = "max" | "min"
+level = "inference" | "episode"
+```
+
+更多字段见 <https://www.tensorzero.com/docs/gateway/configuration-reference>。
+
+### 3.3 shorthand：不配 TOML 也能试的"内置别名"
+
+官方对 OpenAI、Anthropic 这类标准 provider 提供了"内置 shorthand"，只要在 `env.sh` 里配好对应 API Key，就能直接在 `model` 字段里用下面这种三段式，**不用在 TOML 里声明 model**：
+
+| Shorthand 形态 | 说明 |
+| --- | --- |
+| `openai::gpt-4o-mini` | 作为 variant 里的 `model` 字段值（TOML 内部使用） |
+| `tensorzero::model_name::openai::gpt-4o-mini` | 作为 `/openai/v1` 或 `/inference` 的 `model` 字段（客户端调用） |
+| `tensorzero::embedding_model_name::openai::text-embedding-3-small` | 调 embedding 时的 shorthand |
+
+**⚠️ 注意**：shorthand 只对"标准 provider + 标准 API base"有效。**Olares 内部的 Ollama / 本地 vLLM / 自定义 api_base 的场景不能用 shorthand**，必须走 3.2 节的完整 TOML 声明。shorthand 最主要的用途是你临时想验证 TensorZero 是否跑通，懒得写配置。
+
+### 3.4 `env.sh` 的 Provider Key
+
+`env.sh` 默认把所有主流 Provider 的 API Key 行都注释掉了。**用到哪个 Provider 就去掉对应行前面的 `#`，并把 `=` 后填上真实 Key**。
+
+```bash
+# 用 OpenAI 就去掉前面 # 并填 Key
+export OPENAI_API_KEY=sk-xxxx
+
+# 用 Anthropic（Claude）
+export ANTHROPIC_API_KEY=sk-ant-xxxx
+
+# 用 Google AI Studio（Gemini）
+export GOOGLE_AI_STUDIO_API_KEY=AIxxxx
+
+# 用 DeepSeek / Mistral / xAI / Together / Fireworks 等
+export DEEPSEEK_API_KEY=sk-xxxx
+export MISTRAL_API_KEY=xxxx
+export XAI_API_KEY=xai-xxxx
+# ...
+```
+
+Ollama 不需要 API Key，跳过 `env.sh`，只改 `tensorzero.toml` 就行。
+
+---
+
+## 4. 快速开始：接入 Olares Ollama
+
+这是最短链路的跑通示例，不需要任何外部 API Key。
+
+### 4.1 配置 `tensorzero.toml`
+
+把下面这段**原样**（包括空行）粘到 `gateway-startups` 的 `tensorzero.toml` 里：
+
+```toml
+# models
+
+[models.qwen3_5_35b]
+
+routing = ["ollama"]
+
+[models.qwen3_5_35b.providers.ollama]
+
+type = "openai"
+
+api_base = "http://<你的 Ollama 共享入口>/v1"
+
+model_name = "qwen3.5:35b-a3b-ud-q4_K_L"
+
+api_key_location = "none"
+
+# functions
+
+[functions.my_function_name]
+
+type = "chat"
+
+[functions.my_function_name.variants.my_variant_name]
+
+type = "chat_completion"
+
+model = "qwen3_5_35b"
+```
+
+**重要细节**（容易踩坑）：
+
+- `api_base` 填 Olares Ollama 的**共享入口**地址（在 Ollama 应用里查），末尾必须带 `/v1`
+- `type = "openai"` 因为 Ollama 本身提供 OpenAI 兼容端点
+- `api_key_location = "none"` 表示不需要 Key
+- **模型别名必须是"TOML 合法标识符"**：不能含 `.` 和 `:`。所以我们起别名 `qwen3_5_35b`（下划线），而上游 Ollama 真实模型名 `qwen3.5:35b-a3b-ud-q4_K_L`（带 `.`、`:`、`-`）写在下面的 `model_name` 字段里
+- 段落之间的**空行必须保留**
+
+### 4.2 重启应用
+
+ControlHub 里对 TensorZero 点"重启"。容器启动时会：
+
+1. 等 Postgres 就绪
+2. 跑 Postgres 迁移
+3. 跑 ClickHouse 迁移
+4. 加载 `/app/config/tensorzero.toml` 启动 gateway
+
+迁移完成、gateway 上线大概需要 20~40 秒。看不到模型时查 `gateway` 容器日志最后一行是不是 `Starting gateway server...`，如果还在迁移就等等。
+
+### 4.3 验证
+
+刷新 TensorZero UI，会看到：
+
+- **Functions** 页出现 `my_function_name`
+- **Models** 页暂时空（还没跑过推理），跑一次就会出现 `qwen3_5_35b`
+- **Playground** 页可以直接选 `my_function_name` 发消息做一次推理（最简单的验证方式）
+
+也可以在终端里用 `curl`：
+
+```bash
+curl -sS -X POST https://<prefix>.<user>.<domain>/inference \
+  -H 'Content-Type: application/json' \
+  -b '<你的 Olares Cookie>' \
+  -d '{
+    "function_name": "my_function_name",
+    "input": {
+      "messages": [
+        {"role": "user", "content": "What is the capital of Japan?"}
+      ]
+    }
+  }'
+```
+
+调用完成后回到 UI 的 **Observability → Inferences** 页就能看到这条推理记录，Models 页也会出现 `qwen3_5_35b`。
+
+---
+
+## 5. TensorZero UI 详解
+
+UI 地址：`https://<prefix>.<user>.<domain>/`
+
+侧边栏自上而下分为 **Overview / Observability / Evaluations / Optimization / Resources** 五个分组。下面按页面逐一介绍真实可用的功能（**官方文档里提到的 Autopilot、Config Editor、Experimentation 等独立面板，在当前版本的 UI 里并未提供**，所以下面不展开）。
+
+### 5.1 Overview
+
+入口首页，把所有可用的入口归到一张大图上，方便快速跳转：
+
+![TensorZero Overview](assets/ui-01-overview.png)
+
+**布局**：
+
+- **Observability** 区：Inferences、Episodes、Functions、Models 四个卡片，分别是观测的四个维度
+- **Evaluations** 区：Inference Evaluations、Workflow Evaluations 两个评估入口
+- **Optimization** 区：Supervised Fine-Tuning 入口（GEPA 走 API，不在 UI 上）
+- **Resources** 区：Playground、Datasets、API Keys 三个工具入口
+- **页脚**：Docs / GitHub / Slack / Discord / Website / Blog 几个外链
+
+每个卡片上都有**当前的快速指标**，例如 "Inferences 25 inferences"、"Functions 4 functions"、"Models 1 models used"——可以快速判断当前数据规模。
+
+**最常用的入口**：`Playground`（试一次推理）、`Inferences`（看刚刚跑的请求详情）、`Functions`（看你的 function 是否被加载）。
+
+### 5.2 Observability
+
+#### 5.2.1 Inferences
+
+每一次推理调用都会落库，在这里可以列出来、按 ID 跳转、按时间反向排序：
+
+![TensorZero Inferences](assets/ui-02-inferences.png)
+
+**列结构**：
+
+| 列 | 含义 |
+| --- | --- |
+| **Inference ID** | 单次推理的 ID（UUIDv7，可以从内嵌时间复原顺序），点进去看详情 |
+| **Episode ID** | 这次推理所属的 episode（多轮会话/agent 多步流程会聚到同一个 episode） |
+| **Function** | 这次推理走的 function 名（绿色图标，对应 `[functions.xxx]`） |
+| **Variant** | 实际选中的 variant（A/B 测试时这里是分流后的结果） |
+| **Time** | 调用时间 |
+
+**顶部搜索框**：可以直接粘贴一个 inference ID（如 `00000000-0000-0000-0000-000000000000`）按 "Go to Inference" 跳转详情。
+
+**点任意一行进入详情页**，整个页面从上到下分为五大块：
+
+##### ① 顶部元信息 + 操作按钮
+
+![Inference 详情页 — 头部](assets/ui-02a-inference-detail-header.png)
+
+页头大字是当前 inference 的完整 UUID，下面一组键值对：
+
+| 字段 | 含义 |
+| --- | --- |
+| **Function** | 这次推理走的 function（绿色图标 + function 名 · 类型 `chat` / `json`），可点击跳到该 function 详情 |
+| **Variant** | 实际选中的 variant（variant 名 · 类型 `chat_completion` / `experimental` 等） |
+| **Episode** | 所属 episode 的完整 UUID，可点击跳到该 episode 详情 |
+| **Usage** | 三个数：输入 token、输出 token、总耗时（毫秒）—— **没有按 queue / provider / total 分阶段，也没有 $ 成本字段** |
+| **Timestamp** | 这次推理发生的时间 |
+
+紧跟着一行四个操作按钮：
+
+- **Try with variant ▼**：用当前输入换一个 variant 重跑，并排对比结果。**调优时最常用的按钮。**
+- **Add to dataset ▼**：把这条推理（input + output）挑出来存到一个 dataset 里，供后续 Evaluation 或 Fine-Tuning 使用。
+- **Add feedback**：给这条推理打分/打标签（对应 `[metrics.xxx]` 里定义的指标，如布尔点赞、浮点评分、文本评论）。
+- **Copy Messages**：把 `messages` 数组复制成 OpenAI 兼容格式的 JSON，方便贴到别的地方调试。
+
+##### ② Input
+
+按 message role 分卡片展示这次调用的完整输入。常见两类：
+
+- **System**（紫色标签）：system prompt，由 function 的 `system_template` 渲染产生
+- **User**（蓝/灰标签）：用户消息，按 `user_template` 渲染或客户端直接传入
+
+每张卡片左上角显示内容类型（`Text` / `ToolCall` / `ToolResult` / `Image` 等），里面是带行号的源文本，超长会折叠并显示 `Show more ▼`。
+
+##### ③ Output
+
+![Inference 详情页 — Output / Feedback](assets/ui-02b-inference-detail-output.png)
+
+模型实际生成的内容，同样按 role 分卡片（一般是 **Assistant**），里面也是带行号的源文本。如果 function 类型是 `json`，这里通常会是被代码块包起来的结构化 JSON。
+
+##### ④ Feedback
+
+这条推理累计收到的反馈列表，列结构：**ID · Metric · Value · Tags · Time**。没有反馈时显示 `No feedback found`。底部有翻页器（◀ ▶）。
+
+通过上面的 `Add feedback` 按钮，或客户端走 `POST /feedback` 接口（带 `target_type=inference` + `target_id=<这条 inference id>`），都会出现在这里。
+
+##### ⑤ 底层细节（Inference Parameters / Tool Parameters / Tags / Model Inferences）
+
+![Inference 详情页 — 底层细节](assets/ui-02c-inference-detail-extras.png)
+
+页面最下方四块：
+
+- **Inference Parameters**：这次调用真正使用的推理参数（如 `chat_completion` 下的 `temperature` / `max_tokens` / `top_p` 等）。空对象 `{}` 表示走 variant 默认值，没有运行期覆盖。
+- **Tool Parameters**：传给模型的 tool 列表（function calling）。没传则显示 `No tool parameters configured`。
+- **Tags**：客户端通过 `tags` 字段附加的自定义键值（如 `env=prod`、`user_tier=pro`），便于后续筛选。
+- **Model Inferences**：**这才是"真正打到底层 LLM 的那一份调用"**——表格列 ID / Model，每行对应一次 provider 侧请求。点 ID 进去能看到那一次的 raw provider request / response（fallback / retry 场景下会出现多行，分别记录每次尝试）。
+
+#### 5.2.2 Episodes
+
+Episode 是"逻辑上属于同一会话/同一任务"的多次推理的集合。同一个 `episode_id` 下连续多次 `/inference` 调用会被聚合成一个 episode：
+
+![TensorZero Episodes](assets/ui-03-episodes.png)
+
+**列结构**：
+
+| 列 | 含义 |
+| --- | --- |
+| **Episode ID** | 这条 episode 的 ID |
+| **Inference Count** | 这个 episode 里包含的 inference 总数 |
+| **Time** | 这个 episode 第一条 inference 的时间 |
+
+**典型用途**：
+
+- **多轮对话**：同一用户的连续多条消息共享一个 episode_id，看整段对话流
+- **Agent 多步骤工作流**：agent 内部多次调 LLM 完成一个任务，通过同一 episode_id 聚合
+- **打反馈**：可以对一整个 episode 打分（episode-level metric），不只是单次 inference
+
+点 episode ID 进去，能看到这条 episode 下所有 inference 的列表，以及 episode 级的 feedback。
+
+#### 5.2.3 Functions
+
+按 function 维度聚合，列出 TOML 里声明的所有 function：
+
+![TensorZero Functions](assets/ui-04-functions.png)
+
+**列结构**：
+
+| 列 | 含义 |
+| --- | --- |
+| **Name** | function 名（对应 `[functions.xxx]`） |
+| **Variants** | 这个 function 下定义了多少个 variant |
+| **Inferences** | 这个 function 累计被调用了多少次 |
+| **Last Used** | 最近一次调用时间 |
+
+**搜索 / 筛选**：顶部搜索框按名字过滤；右上角 `Show internal functions` 勾选后会显示 TensorZero 内置的"系统 function"（一般你只关心自己定义的，所以默认是关的）。
+
+**点任意 function 进去**，详情页从上到下分为六大块：
+
+##### ① 顶部元信息 + Variants 表
+
+![Function 详情页 — 头部 + Variants](assets/ui-04a-function-detail-header.png)
+
+页头大字是 function 名 + 类型标签（绿色 `chat` / 蓝色 `json`）。下面一组与"工具调用"相关的字段：
+
+| 字段 | 含义 |
+| --- | --- |
+| **Tools** | 这个 function 在 TOML 里声明的可用 tool 列表，没有则显示 `none` |
+| **Tool Choice** | 工具调用策略：`auto`（让模型自己决定要不要调）/ `required`（必须调一个）/ `none`（禁止调） |
+| **Parallel Tool Calls** | 是否允许一次响应里并行返回多个 tool_call |
+
+**Variants** 子卡片是这个 function 下所有 variant 的列表：
+
+- 顶部搜索框 `Search variants...` 按名字过滤
+- 表头：**Variant Name · Type · Count · Last Used**
+  - **Type**：variant 实现类型，常见 `chat_completion`（普通聊天补全）/ `experimental_chat_completion`
+  - **Count**：这个 variant 累计被分到的推理次数
+  - **Last Used**：最近一次被分到的时间
+- 点任一行进入 **Variant 详情页**（结构详见本节末尾）
+
+##### ② Experimentation（采样权重分布）
+
+![Function 详情页 — Experimentation](assets/ui-04b-function-detail-experimentation.png)
+
+子卡片 **Variant Weights** 用饼图展示各 variant 的**采样概率**（来自 TOML 里 `[functions.xxx.variants.yyy]` 的 `weight` 字段归一化后的结果）。只配了一个 variant 时就是单色 100.0%；做 A/B 时多个扇区按权重瓜分。
+
+> 这是判断"流量切了没"的最快入口——改完 weight 重启应用后，扇区比例应该立刻反映新配置。
+
+##### ③ Throughput（调用量趋势）
+
+![Function 详情页 — Throughput + Metrics](assets/ui-04c-function-detail-throughput-metrics.png)
+
+折线图，**只展示推理次数（Inference Count）**，按 variant 分线着色。左上角下拉切换聚合粒度：**Weekly / Daily / Hourly**。
+
+> ⚠️ 这里**没有延迟和成功率**——延迟分布要去 `Models` 详情页（5.2.4 的 Latency Distribution），成功率目前 UI 上没有专门图，需要走 `/metrics` 的 Prometheus 指标看。
+
+##### ④ Metrics
+
+这个 function 上配置的指标（对应 TOML 里 `[metrics.xxx]` 关联到该 function 的）。每个 metric 会显示当前的聚合值（mean / sum / 比率，依 metric 类型而定）。没配指标时显示 `No metrics available.`
+
+##### ⑤ Schemas
+
+![Function 详情页 — Schemas](assets/ui-04d-function-detail-schemas.png)
+
+如果 TOML 里给 function 配了 `system_schema` / `user_schema` / `assistant_schema` / `output_schema`（用来约束模板变量和结构化输出），这里会渲染对应的 JSON Schema。没配则显示 `No schemas defined.`
+
+> Schemas 不是必填项；只在你想让 TensorZero 在调用前就校验输入字段、或者强制 `type = "json"` function 的输出格式时才需要配。
+
+##### ⑥ Inferences
+
+![Function 详情页 — Inferences](assets/ui-04e-function-detail-inferences.png)
+
+这个 function 下所有推理的列表（标题旁的数字 = 总条数），列结构和 5.2.1 的 Inferences 列表一致：**ID · Episode ID · Variant · Time**（这里没有 Function 列，因为已经被 function 维度过滤过了）。点任一行进入推理详情页（结构同 5.2.1 详情页五大块）。底部有翻页器（◀ ▶）。
+
+##### Variant 详情页（从 ① 的 Variants 表点行进入）
+
+Variant 详情页的页面结构和 Function 详情页**不一样**，是独立的、更精简的一组卡片：
+
+**▸ 顶部元信息**
+
+![Variant 详情页 — 头部 + Metrics + Templates](assets/ui-04f-variant-detail-header.png)
+
+面包屑形如 `Functions > <function_name> > Variants`，大字是 variant 名，下面三个字段：
+
+| 字段 | 含义 |
+| --- | --- |
+| **Type** | variant 实现类型，如 `chat_completion` / `experimental_chat_completion` |
+| **Function** | 这个 variant 所属的 function（绿色图标 + 名 · 类型），可点击跳回 Function 详情 |
+| **Model** | 这个 variant 在 TOML 里 `model = "..."` 字段绑定的模型别名，可点击跳到该 Model 详情 |
+
+**▸ Metrics**
+
+仅展示与这个 variant 相关的指标聚合（用来对比"同一 function 下不同 variant 的得分"）。没有指标时显示 `No metrics available.`
+
+**▸ Templates**
+
+如果 TOML 里给 variant 配了 `system_template` / `user_template` / `assistant_template`（用模板渲染 prompt），这里会列出每个模板的内容。没有则显示 `No templates defined.`
+
+> 用于核对"上线的 prompt 到底长什么样"——别用本地编辑器看 TOML，以这里渲染出的实际模板为准。
+
+**▸ Inferences**
+
+![Variant 详情页 — Inferences](assets/ui-04g-variant-detail-inferences.png)
+
+这个 variant 下所有推理的列表（标题旁数字 = 总条数），列结构：**ID · Episode ID · Time**。
+
+> 注意比较：
+> - **Function 详情页**的 Inferences 表有 4 列：ID / Episode ID / **Variant** / Time
+> - **Variant 详情页**的 Inferences 表只有 3 列：ID / Episode ID / Time（已经按 variant 维度过滤，不需要 Variant 列）
+
+点任一行进入推理详情页（结构同 5.2.1 详情页五大块）。底部有翻页器（◀ ▶）。
+
+**判断"配置是否生效"**：如果你刚改了 `tensorzero.toml` 加了一个 function，重启完应用后**Functions 列表页要能列出新 function**，且点进去后**Variants 子卡片**要能列出新声明的 variant，再点 variant 进去**Templates 子卡片**要能渲染出新写的 prompt——任何一处对不上，就是配置没读到，回去查 ConfigMap 和 gateway 日志。
+
+#### 5.2.4 Models
+
+按"实际跑过推理的 model 别名"维度聚合，**只有真正被调用过的 model 才会出现**（在 TOML 里声明但没调用过的 model 不会出现）。
+
+**子模块 1：Model Usage Over Time**
+
+![TensorZero Models - Usage](assets/ui-05a-models-usage.png)
+
+按时间窗口（Weekly / Daily / Hourly）聚合每个 model 的调用次数（柱状图）。右上角有：
+
+- **Weekly / Daily / Hourly** 切换聚合粒度
+- **Inferences / Tokens** 切换 Y 轴口径（推理次数 vs token 数）
+
+每个 model 一根独立颜色的柱子。**典型用途**：判断成本——按 token 切到 Tokens 视图，能直观看出哪个 model 最费钱。
+
+**子模块 2：Model Latency Distribution**
+
+![TensorZero Models - Latency](assets/ui-05b-models-latency.png)
+
+按百分位画的延迟分布折线图（X 轴是 0%~100% 百分位，Y 轴是延迟毫秒数，对数刻度）。右上角有：
+
+- **Last Week / Last Day / Last Hour** 时间窗
+- **Response Time / Time to First Token** 切口径（总响应时间 vs 首 token 时间，后者只对流式有意义）
+
+**怎么读**：曲线在 50% 处的高度 = p50 延迟；95% 处 = p95；99% 处 = p99。曲线在 90% 后陡升 = 长尾严重。
+
+**典型用途**：判断 model 是否稳定——曲线"平直一段后陡升"是不健康的尾部延迟，需要换 provider 或加 fallback。
+
+### 5.3 Evaluations
+
+#### 5.3.1 Inference Evaluations
+
+像跑单元测试一样，对一个 dataset 里的每个输入跑一次 function 的指定 variant，用一个或多个 evaluator 给输出打分：
+
+![TensorZero Inference Evaluations](assets/ui-06-inference-evaluations.png)
+
+**列结构**：
+
+| 列 | 含义 |
+| --- | --- |
+| **Run ID** | 这次评估运行的 ID |
+| **Name** | 你给这次 Run 起的名字（不填则自动生成） |
+| **Dataset** | 用了哪个 dataset |
+| **Function** | 评估的是哪个 function |
+| **Variant** | 评估的是哪个 variant |
+| **Created At** | 启动时间 |
+
+##### 点 `+ New Run` 弹出的 Launch Evaluation 表单
+
+弹窗最顶部有一个 **Mode** 切换，新老两种配置体系**字段不一样、且互不兼容**，先选对 Mode 才能继续填——这是踩坑重灾区：
+
+| Mode | TOML 配置位置 | 状态 | 适用场景 |
+| --- | --- | --- | --- |
+| **Evaluators**（新版） | `[functions.<func>.evaluators.<eval_name>]` 嵌套在 function 下 | 当前主推 | 推荐所有新写的评估都用这种 |
+| **Evaluations (Legacy)** | 顶级 `[evaluations.<eval_name>]` 段 | **官方已标记 deprecated** | 仅用于跑历史遗留的旧配置 |
+
+> 详见官方教程 <https://www.tensorzero.com/docs/evaluations/inference-evaluations/tutorial> 和发布说明里的 deprecation 通告。**新部署不要选 Legacy。**
+
+**▸ Mode = Evaluators（推荐）**
+
+![Launch Evaluation — Evaluators 模式](assets/ui-06a-launch-evaluation-evaluators.png)
+
+| 字段 | 含义 / 怎么填 |
+| --- | --- |
+| **Function** | 选要评估的 function（下拉列出 TOML 里所有声明过 evaluators 的 function） |
+| **Evaluators** | **多选**，列出所选 function 下声明的所有 evaluator。每种 evaluator 类型一行：`exact_match`（与 dataset 的 reference output 严格相等）、`llm_judge`（用 LLM 当裁判，输出 boolean 或 float） |
+| **Dataset** | 选要跑的 dataset。选完下方会显示 `Function: <绑定的 function>` 和 `Datapoints: <条数>` 做提示，**dataset 必须和上面 Function 匹配**，否则跑不起来 |
+| **Variant** | 选这次运行用哪个 variant（**只能单选**，跑完后可以再发起一次新 run 用别的 variant，最后在列表里横向比较） |
+| **Concurrency** | 并发数。默认 5，对应 CLI 的 `--concurrency`。压力测试调高，避免触发上游 provider 限流就调低 |
+| **Max Datapoints** | 最多跑多少条 datapoint，留空 = 跑完整个 dataset。本地快速验证时填个 5/10 先验证管道通不通再放开跑全量，省 token |
+
+**▸ Advanced Parameters → Inference Cache（折叠区，默认收起）**
+
+![Launch Evaluation — Advanced Parameters](assets/ui-06b-launch-evaluation-advanced.png)
+
+四个互斥单选，对应官方文档定义的四档（[Inference Caching](https://www.tensorzero.com/docs/gateway/guides/inference-caching)）：
+
+| 选项 | 官方语义 | 评估场景下的用途 |
+| --- | --- | --- |
+| **On**（评估弹窗的默认值） | 既读又写缓存 | 同一份 dataset 反复跑同一 variant 不会重复花钱；改了 evaluator 但 variant/输入没变也命中缓存 |
+| **Off** | 完全禁用缓存 | 想看真实在线延迟和真实 token 消耗时用 |
+| **Read Only** | 只读、不写 | 怀疑缓存里有脏数据，但又不想 invalidate 全部 |
+| **Write Only** | 只写、不读 | 故意忽略已有缓存，强制重新生成；同时把这次的结果写进缓存供后续读 |
+
+> ⚠️ 网关本身（`/inference`）的 cache 默认是 **off**，但**评估默认是 on**——官方原文："By default, TensorZero Evaluations uses Inference Caching to improve inference speed and cost." 这是为了让你迭代 evaluator 时不重复烧 token。
+
+填完点右下角 **Launch** 提交执行。
+
+**▸ Mode = Evaluations (Legacy)**
+
+![Launch Evaluation — Legacy 模式](assets/ui-06c-launch-evaluation-legacy.png)
+
+字段差异（**注意比上面少了 Function 和 Evaluators，多了 Evaluation**）：
+
+| 字段 | 含义 |
+| --- | --- |
+| **Evaluation** | **单选**，从顶级 `[evaluations.xxx]` 段落里选一个整体配置（一个 evaluation 段里已经把 function、evaluators 集合、output 类型等都配死了，所以这里不再需要单独选 function/evaluators） |
+| **Dataset / Variant / Concurrency / Max Datapoints / Inference Cache** | 同新版 |
+
+> 如果你接手的项目 TOML 里只有 `[evaluations.xxx]` 没有 `[functions.xxx.evaluators.yyy]`，先在这里跑通；后续切到新版做法是：把 evaluator 的定义搬到对应 function 下，删掉旧的 `[evaluations.xxx]`，再用 Evaluators 模式提交。
+
+##### 跑完之后
+
+每条 datapoint 会显示得分；同一 dataset/function 下发起多次 run 后，列表里勾选两条 run 可以**横向并排对比胜负**（哪个 variant、哪个 evaluator 表现更好）。这是 TensorZero 上调 prompt / 选 model 的核心闭环动作。
+
+#### 5.3.2 Workflow Evaluations
+
+Workflow Evaluation 是更高一层的评估单位——不是单次 inference，而是整个 agent / workflow 端到端跑完的得分。例如"Agentic RAG 系统回答了一道题，期间触发了 3 次 LLM 调用"算一次 workflow run：
+
+![TensorZero Workflow Evaluations](assets/ui-07-workflow-evaluations.png)
+
+**两块**：
+
+- **Projects**：Workflow Evaluation 的逻辑分组（一个项目下多次运行做对比）
+- **Evaluation Runs**：每次运行的具体记录
+
+**怎么使用**：在你的 agent 代码里通过 TensorZero SDK 在 workflow 开始前调 `start_workflow_evaluation_run`，结束后调 `finish_workflow_evaluation_run`。然后 UI 上就能按 workflow 维度聚合查询。详见官方 <https://www.tensorzero.com/docs/evaluations/workflow-evaluations/tutorial>。
+
+### 5.4 Optimization
+
+#### 5.4.1 Supervised Fine-Tuning
+
+UI 上引导你完成一次监督微调任务：从历史 inference 里挑数据 → 选指标做筛选 → 选 base model → 提交微调 job → 微调完给出新的 TOML 片段：
+
+![TensorZero Supervised Fine-Tuning](assets/ui-08-supervised-fine-tuning.png)
+
+**字段**：
+
+| 字段 | 含义 |
+| --- | --- |
+| **Function** | 选要微调的 function（必须有历史 inference 才能挑数据） |
+| **Metric** | 选用哪个 metric 来筛选"好的"数据点（比如只用 `user_thumbs_up = true` 的） |
+| **Prompt** | 选 base variant 的 prompt 作为微调起点 |
+| **Model** | 选 base model（GPT-4o / Llama 3 等支持 fine-tuning 的） |
+| **Advanced Parameters** | 训练超参（epoch、learning rate 等） |
+| **Start Fine-tuning Job** | 提交 |
+
+**右上方提示**：
+
+- `Feedbacks: <数字>` —— 你这个 function 上累计有多少条 feedback 可以用做筛选
+- `Curated Inferences: <数字>` —— 经过 metric 筛选后剩下的"高质量"数据点数
+
+**没数据就跑不起来**：如果 function 上没历史 inference 或没 metric，按钮是灰的。需要先做几轮真实调用 + 上报 feedback。
+
+> **GEPA**（自动化 prompt 优化，类似 prompt-engineering 自动跑）走的是 API（`POST /v1/optimization/gepa`），**不在 UI 上**。
+
+### 5.5 Resources
+
+#### 5.5.1 Playground
+
+在 UI 里直接选一个 function 发消息做推理，**最快验证 function 是否工作**的入口：
+
+![TensorZero Playground](assets/ui-09-playground.png)
+
+**操作**：
+
+1. 选 **Function**（下拉列出所有可用 function）
+2. 选 **Dataset**（可选，从 dataset 里挑一条作为输入；不选则手输）
+3. 选 **Variants**（可多选，并排对比同一输入在不同 variant 下的输出）
+4. 输入 message → Run
+5. 右侧实时显示响应、耗时、token 用量、最终选中的 variant
+
+Playground 的调用**也会被写入 Observability**（除非显式标 dryrun）——所以可以放心用它做快速烟雾测试。
+
+#### 5.5.2 Datasets
+
+Dataset 是"(input, 可选 output, 可选 metadata)"的集合，主要用途是**评估**和**优化**：
+
+![TensorZero Datasets](assets/ui-10-datasets.png)
+
+**两个按钮**：
+
+- `+ Build Dataset`：从已有 inference 批量挑数据建 dataset
+- `+ New Datapoint`：手动添加一条 datapoint
+
+**列结构**：
+
+| 列 | 含义 |
+| --- | --- |
+| **Dataset Name** | dataset 名（自定义） |
+| **Datapoint Count** | 包含多少条数据 |
+| **Last Updated** | 最后修改时间 |
+
+**Dataset 三种来源**（建好后在 Inference Evaluations / Fine-Tuning 里都能引用这个名字）：
+
+1. **从 Inferences 挑**：在 Inferences 详情页点 `Add to dataset` → 选目标 dataset
+2. **按条件批量导入**：在 Dataset 详情页点 `Import from inferences`，按 function / variant / 时间范围筛
+3. **手工上传**：直接上传 JSONL 文件，每行一个 datapoint
+
+#### 5.5.3 API Keys
+
+签发 / 撤销 / 查看 TensorZero 自家的 API Key：
+
+![TensorZero API Keys](assets/ui-11-api-keys.png)
+
+**用途**：仅在你给 TensorZero 启用了鉴权时才有意义。Olares 默认部署**没有强制鉴权**（所有走入口的请求都可以不带 Authorization），所以这个页面在默认情况下基本用不上。
+
+如果你的部署需要给不同应用/不同租户独立的 Key，再在 `tensorzero.toml` 里启用 `gateway.auth.enabled = true`，然后在这里 `+ Generate API Key` 创建。
+
+**列结构**：
+
+| 列 | 含义 |
+| --- | --- |
+| **Public ID** | Key 的可见 ID（Key 完整值只在创建时显示一次） |
+| **Description** | 备注 |
+| **Expires** | 过期时间（可选，永不过期） |
+| **Created** | 创建时间 |
+
+详见官方 <https://www.tensorzero.com/docs/operations/set-up-auth-for-tensorzero>。
+
+---
+
+## 6. 在其它应用里接入 TensorZero（用作 LLM 代理）
+
+TensorZero 对外提供两类端点，根据调用方的能力选一类就行。
+
+### 6.1 方式 A：TensorZero 原生 `/inference`（推荐用 TensorZero SDK）
+
+- 路径：`POST /inference`
+- Body 字段用 `function_name`（或 `model_name`）
+- 特点：可以直接拿到 TensorZero 的 variant、episode_id、inference_id 等元数据，观测记录最完整
+- 适合：自己写业务逻辑、需要细粒度观测
+
+示例 Body：
+
+```json
+{
+  "function_name": "my_function_name",
+  "input": {
+    "messages": [
+      {"role": "user", "content": "What is the capital of Japan?"}
+    ]
+  }
+}
+```
+
+流式：在 Body 里加 `"stream": true`，返回 SSE。
+
+### 6.2 方式 B：OpenAI 兼容端点（推荐给现成第三方应用）
+
+- 路径：`POST /openai/v1/chat/completions`、`POST /openai/v1/embeddings`
+- 入参格式和 OpenAI 官方完全一致
+- **关键**：`model` 字段必须用 TensorZero 的"限定名"，见下面这张关键表格
+
+#### ⚠️ 核心表格：model 字段**必须**用下面三种之一
+
+| model 字段形态 | 行为 | 配套 TOML 段 |
+| --- | --- | --- |
+| `tensorzero::function_name::<函数名>` | 走 function 的 variant 路由、prompt 模板、A/B 权重 | `[functions.xxx]` + `[functions.xxx.variants.yyy]` |
+| `tensorzero::model_name::<model 别名>` | 直接调 TOML 里定义的 model，**不走 function 层** | `[models.xxx]` |
+| `tensorzero::embedding_model_name::<embedding 别名>` | 调 embedding（仅用于 `/openai/v1/embeddings` 端点） | `[embedding_models.xxx]` |
+
+**直接写 `gpt-4o` 或者 `qwen3.5:35b-a3b-ud-q4_K_L` 这类上游原始名字，TensorZero 直接 400**，错误信息原文：
+
+```
+Invalid request to OpenAI-compatible endpoint: `model` field must start with
+`tensorzero::function_name::` or `tensorzero::model_name::`. For example,
+`tensorzero::function_name::my_function` for a function `my_function` defined
+in your config, `tensorzero::model_name::my_model` for a model `my_model`
+defined in your config, or default functions like
+`tensorzero::model_name::openai::gpt-4o-mini`.
+```
+
+#### base_url / api_key 填什么
+
+| 字段 | 填什么 |
+| --- | --- |
+| `base_url` | `https://<prefix>.<user>.<domain>/openai/v1` |
+| `api_key` | **任意非空字符串**（除非在 TensorZero 里开了 `gateway.auth.enabled`，否则不校验）；留空会被某些 SDK 拒绝提交，所以**必须填**一个字符串，如 `noop` |
+| `model` | 上面的三种限定名之一 |
+
+### 6.3 具体应用配置
+
+#### 6.3.1 OpenCode
+
+编辑 `~/.config/opencode/opencode.json` 或项目根的 `opencode.json`：
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "tensorzero": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "TensorZero",
+      "options": {
+        "baseURL": "https://<prefix>.<user>.<domain>/openai/v1",
+        "apiKey": "noop"
+      },
+      "models": {
+        "tensorzero::function_name::my_function_name": {
+          "name": "Qwen 3.5 35B (via TensorZero)"
+        }
+      }
+    }
+  }
+}
+```
+
+**⚠️ 踩过的坑**：`models` 下面这个 key（`tensorzero::function_name::my_function_name`）**就是**真正发给 TensorZero 的 `model` 字段，不是随便起的展示名。"name" 才是 OpenCode 界面上的展示名。
+
+保存后在 OpenCode 左侧模型选择里就能看到 "Qwen 3.5 35B (via TensorZero)"。
+
+#### 6.3.2 AgentZero
+
+在 AgentZero 设置里添加 OpenAI-compatible provider：
+
+- **API Base URL**：`https://<prefix>.<user>.<domain>/openai/v1`
+- **API Key**：`sk-noop`（任意非空串）
+- **Model ID**：`tensorzero::function_name::my_function_name`
+
+#### 6.3.3 OpenNotebook
+
+OpenNotebook 在"LLM Providers"设置里添加一个自定义 provider：
+
+- **Provider Type**：**OpenAI Compatible**（不要选 TensorZero 原生，除非你确认 LiteLLM 版本支持，且 base URL 只填到域名根）
+- **Base URL**：`https://<prefix>.<user>.<domain>/openai/v1` ← **必须带 `/openai/v1`**，有人会写成 `/v1`，那会 404
+- **API Key**：**任意非空值**——UI 上那个打点的密码框**不是可选**，留空会报校验错
+- **Model**：`openai/tensorzero::function_name::my_function_name`（LiteLLM 要求前缀 `openai/`，后半段是 TensorZero 三段式限定名）
+
+**⚠️ 踩过的坑：Test 按钮会过不了，是正常的**。OpenNotebook 的 Test 按钮通常打 `GET /openai/v1/models` 列模型 或 用一个探测性 model 名做 smoke test，而 TensorZero 是白名单制 + 强制前缀，两种方式都注定不匹配。**保存就行**，然后回到 OpenNotebook 的 Models 页**手动新增**一条模型：Provider 选刚保存的配置、Model 填 `openai/tensorzero::function_name::my_function_name`、类型选对（Language / Embedding / STT / TTS），保存。在笔记对话里就能选到。
+
+#### 6.3.4 Python / Node.js 自己调
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="https://<prefix>.<user>.<domain>/openai/v1",
+    api_key="noop",
+)
+
+resp = client.chat.completions.create(
+    model="tensorzero::function_name::my_function_name",
+    messages=[{"role": "user", "content": "What is the capital of Japan?"}],
+    stream=True,
+)
+for chunk in resp:
+    print(chunk.choices[0].delta.content or "", end="", flush=True)
+```
+
+---
+
+## 7. Embedding 配置（专门一节，踩坑重灾区）
+
+很多下游应用（OpenNotebook 的 RAG、AgentZero 的 memory recall、向量笔记类应用）需要 embedding 模型。TensorZero 对 embedding 的处理和 chat 模型**完全独立**，非常容易配错。
+
+### 7.1 三条铁律
+
+1. **Embedding 必须走 `[embedding_models.xxx]` 段**，不能塞进 `[models.xxx]`
+2. **`[functions.xxx]` 下的 chat 函数不能当 embedding 用**——即使上游模型支持 embedding，必须为 embedding 专门定义一条 `embedding_models`
+3. **大多数聊天模型不支持 embedding**，比如 Qwen / Llama / Claude / GPT-5 的 chat 版本都没有 `/embeddings` 端点。你需要用专门的 **embedding 模型**：OpenAI 的 `text-embedding-3-small/large`、Ollama 的 `nomic-embed-text` 或 `bge-m3` 等
+
+### 7.2 最短配置示例：用 Olares Ollama 的 nomic-embed-text
+
+**前置条件**：先在 Olares Ollama 应用里 `ollama pull nomic-embed-text`。
+
+在 `tensorzero.toml` 追加：
+
+```toml
+# embedding_models
+
+[embedding_models.nomic_embed]
+
+routing = ["ollama"]
+
+[embedding_models.nomic_embed.providers.ollama]
+
+type = "openai"
+
+api_base = "http://<你的 Ollama 共享入口>/v1"
+
+model_name = "nomic-embed-text"
+
+api_key_location = "none"
+```
+
+### 7.3 调用方式
+
+和 chat 类似，但 `model` 字段前缀是 `tensorzero::embedding_model_name::`，端点是 `/embeddings`：
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="https://<prefix>.<user>.<domain>/openai/v1",
+    api_key="noop",
+)
+
+result = client.embeddings.create(
+    input="Hello, world!",
+    model="tensorzero::embedding_model_name::nomic_embed",
+)
+print(result.data[0].embedding[:5])
+```
+
+### 7.4 在应用里配
+
+- **AgentZero**：Embedding Model 配置处，Provider 选 "OpenAI Compatible"，Base URL 填 `https://<prefix>.<user>.<domain>/openai/v1`，Model 填 `tensorzero::embedding_model_name::nomic_embed`，API Key 随便填
+- **OpenNotebook**：在 Models 页新增一条**类型选 Embedding**，Provider 选之前保存的 TensorZero (Local)，Model 填 `openai/tensorzero::embedding_model_name::nomic_embed`
+- **其它 LangChain / LlamaIndex 应用**：用 `OpenAIEmbeddings` 或 `LiteLLMEmbeddings`，base_url + model 同上
+
+### 7.5 OpenAI 官方 embedding 的 shorthand 写法
+
+如果你直接用 OpenAI 的 embedding（`env.sh` 里设了 `OPENAI_API_KEY`），**连 TOML 都不用写**：
+
+```python
+result = client.embeddings.create(
+    input="Hello, world!",
+    model="tensorzero::embedding_model_name::openai::text-embedding-3-small",
+)
+```
+
+这个 shorthand 仅对标准 OpenAI API base 有效，自定义 api_base（例如 Azure、Olares Ollama 等）**不能**用这个写法，必须老老实实写 `[embedding_models.xxx]`。
+
+---
+
+## 8. MCP 服务器
+
+TensorZero 2026.4.0 自带一个 MCP 服务器，路径 `/mcp`，**开箱即用，无需任何配置开关**。它把 TensorZero 自身的 API（观测查询、推理历史、数据集访问等）包装成 MCP 工具对外暴露，让支持 MCP 的客户端（Claude Desktop / Cursor / AgentZero / OpenCode / VS Code Copilot 等）能通过 MCP 协议反问 TensorZero：
+
+- "帮我查过去 24 小时 `my_function_name` 被调用了多少次、平均延迟多少"
+- "最近一次推理的 input/output 是什么"
+- "某个 variant 在这个数据集上的评估结果"
+
+### 8.1 前提
+
+- 客户端必须支持 **Streamable HTTP transport**（不是老版 SSE，不是 stdio）。Claude Desktop 较新版、Cursor、VS Code Copilot、AgentZero 1.x、OpenCode 都支持
+- URL：`https://<prefix>.<user>.<domain>/mcp`
+- 默认无鉴权；如果在配置里开了 `gateway.auth.enabled = true`，客户端需要加 `Authorization: Bearer <TZ_API_KEY>` header
+
+### 8.2 客户端配置
+
+**Claude Desktop**（`~/Library/Application Support/Claude/claude_desktop_config.json`）：
+
+```json
+{
+  "mcpServers": {
+    "tensorzero": {
+      "type": "http",
+      "url": "https://<prefix>.<user>.<domain>/mcp"
+    }
+  }
+}
+```
+
+**Cursor**（`~/.cursor/mcp.json` 或项目 `.cursor/mcp.json`）：
+
+```json
+{
+  "mcpServers": {
+    "tensorzero": {
+      "url": "https://<prefix>.<user>.<domain>/mcp"
+    }
+  }
+}
+```
+
+**VS Code Copilot MCP**（`.vscode/mcp.json`）：
+
+```json
+{
+  "servers": {
+    "tensorzero": {
+      "type": "http",
+      "url": "https://<prefix>.<user>.<domain>/mcp"
+    }
+  }
+}
+```
+
+**AgentZero**（`~/.agent_zero/config.json` 或 UI 里的 MCP Servers 设置）：
+
+```json
+{
+  "mcpServers": {
+    "tensorzero": {
+      "type": "http",
+      "url": "https://<prefix>.<user>.<domain>/mcp"
+    }
+  }
+}
+```
+
+**OpenCode**（`opencode.json` 的 `mcp` 字段）：
+
+```json
+{
+  "mcp": {
+    "tensorzero": {
+      "type": "remote",
+      "url": "https://<prefix>.<user>.<domain>/mcp",
+      "enabled": true
+    }
+  }
+}
+```
+
+### 8.3 触发 MCP 工具调用
+
+配好之后 agent 不一定会主动调——得你引导。有效的 prompt 示例：
+
+- "列出你当前可用的所有 MCP 工具，告诉我 TensorZero 这个 server 提供了哪些 tool 和它们的用途"
+- "用 TensorZero 的工具查一下过去 24 小时 `my_function_name` 这个 function 有多少次调用、平均延迟多少"
+- "把昨天最慢的三次推理的完整 input 和 output 拉出来给我分析"
+
+"use tensorzero" 这种模糊指令命中率低，LLM 不一定意识到可以调 MCP。
+
+> **注意**：MCP 这条通路和 6.3 节的 LLM 代理配置是**两件独立的事**——前者让 agent 能"查 TensorZero 数据"，后者让 agent 走 TensorZero 调模型。两个都配效果最佳，只配一个也能用。
+
+---
+
+## 9. 常用 Provider 配置模板
+
+以下片段都放在 `tensorzero.toml` 里，按需选用。对应的 API Key 行在 `env.sh` 里取消注释填值。
+
+### 9.1 OpenAI Chat
+
+```toml
+[models."gpt-4o-mini"]
+routing = ["openai"]
+
+[models."gpt-4o-mini".providers.openai]
+type = "openai"
+model_name = "gpt-4o-mini-2024-07-18"
+```
+
+`env.sh`：`export OPENAI_API_KEY=sk-xxx`
+
+### 9.2 OpenAI Embedding
+
+```toml
+[embedding_models."openai_embed"]
+routing = ["openai"]
+
+[embedding_models."openai_embed".providers.openai]
+type = "openai"
+model_name = "text-embedding-3-small"
+```
+
+### 9.3 Anthropic Claude
+
+```toml
+[models."claude-sonnet-4-5"]
+routing = ["anthropic"]
+
+[models."claude-sonnet-4-5".providers.anthropic]
+type = "anthropic"
+model_name = "claude-sonnet-4-5"
+```
+
+`env.sh`：`export ANTHROPIC_API_KEY=sk-ant-xxx`
+
+### 9.4 Google Gemini
+
+```toml
+[models."gemini-2-flash"]
+routing = ["google_ai_studio"]
+
+[models."gemini-2-flash".providers.google_ai_studio]
+type = "google_ai_studio_gemini"
+model_name = "gemini-2.0-flash"
+```
+
+`env.sh`：`export GOOGLE_AI_STUDIO_API_KEY=AIxxx`
+
+### 9.5 DeepSeek
+
+```toml
+[models."deepseek-chat"]
+routing = ["deepseek"]
+
+[models."deepseek-chat".providers.deepseek]
+type = "deepseek"
+model_name = "deepseek-chat"
+```
+
+`env.sh`：`export DEEPSEEK_API_KEY=sk-xxx`
+
+### 9.6 本地 Ollama Chat（Olares 共享入口）
+
+```toml
+[models."qwen3_5_35b"]
+routing = ["ollama"]
+
+[models."qwen3_5_35b".providers.ollama]
+type = "openai"
+api_base = "http://<Ollama 共享入口>/v1"
+model_name = "qwen3.5:35b-a3b-ud-q4_K_L"
+api_key_location = "none"
+```
+
+### 9.7 本地 Ollama Embedding
+
+```toml
+[embedding_models."nomic_embed"]
+routing = ["ollama"]
+
+[embedding_models."nomic_embed".providers.ollama]
+type = "openai"
+api_base = "http://<Ollama 共享入口>/v1"
+model_name = "nomic-embed-text"
+api_key_location = "none"
+```
+
+### 9.8 本地 vLLM
+
+```toml
+[models."llama3-8b"]
+routing = ["vllm"]
+
+[models."llama3-8b".providers.vllm]
+type = "vllm"
+api_base = "http://<vLLM 服务地址>/v1"
+model_name = "meta-llama/Meta-Llama-3-8B-Instruct"
+```
+
+`env.sh`（如果 vLLM 启了鉴权）：`export VLLM_API_KEY=xxx`
+
+### 9.9 多 Provider Fallback（同一模型别名）
+
+```toml
+[models."my-fallback"]
+routing = ["anthropic", "openai"]   # 先 Anthropic，失败回退 OpenAI
+
+[models."my-fallback".providers.anthropic]
+type = "anthropic"
+model_name = "claude-sonnet-4-5"
+
+[models."my-fallback".providers.openai]
+type = "openai"
+model_name = "gpt-4o-mini-2024-07-18"
+```
+
+### 9.10 同 function 多 variant A/B
+
+```toml
+[functions.my_function]
+type = "chat"
+
+# variant A：70% 流量
+[functions.my_function.variants.baseline]
+type = "chat_completion"
+model = "gpt-4o-mini"
+weight = 0.7
+
+# variant B：30% 流量
+[functions.my_function.variants.experiment]
+type = "chat_completion"
+model = "claude-sonnet-4-5"
+weight = 0.3
+```
+
+---
+
+## 10. 常见问题（FAQ，按踩坑频率排序）
+
+### Q1：客户端报 `` `model` field must start with `tensorzero::function_name::`... ``
+
+**这是最高频的错**。含义和原因在第 6.2 节已详细说明。**核心**：你在 OpenCode / AgentZero / OpenNotebook 里填的"模型名"，必须是下面三种形态之一：
+
+- `tensorzero::function_name::<你在 [functions.xxx] 段定义过的名字>`
+- `tensorzero::model_name::<你在 [models.xxx] 段定义过的别名>`
+- `tensorzero::embedding_model_name::<你在 [embedding_models.xxx] 段定义过的别名>`（仅 embedding）
+
+**别把三种名字搞混**：
+
+| 名字出处 | 举例（基于本文档的示例） | 能否作为客户端 `model` 字段直接用 |
+| --- | --- | --- |
+| 上游 provider 原始模型名（TOML `model_name` 字段的值） | `qwen3.5:35b-a3b-ud-q4_K_L` | ❌ 绝对不行 |
+| TOML `[models.xxx]` 的别名 | `qwen3_5_35b` | ✓ 加前缀 `tensorzero::model_name::` |
+| TOML `[functions.xxx]` 的名字 | `my_function_name` | ✓ 加前缀 `tensorzero::function_name::` |
+
+### Q2：改了 `tensorzero.toml`，重启后容器起不来
+
+最常见原因是 TOML 格式错了。看 `gateway` 容器日志（ControlHub → TensorZero → 日志 → 选 gateway 容器）：
+
+- `Failed to parse tensorzero.toml` → 语法问题，检查空行和缩进
+- `unknown field xxx` → 字段名拼错或使用了新版本专属字段
+- `provider ... not found` → `routing` 里的 key 和下面 `providers.<key>` 的 key 对不上
+
+**最常见的坑**：粘贴配置时把空行删掉了。TOML 的 `[section]` 块之间必须保留空行隔开。ControlHub 编辑器渲染时可能看起来"换行都没了"，但实际存储里只要保留空行就行。
+
+### Q3：OpenNotebook / 其它应用里 Test 按钮过不了、自动模型列表是空的
+
+**正常现象，不是 bug**。原因见 0. 章第 3 条：TensorZero 是白名单制，不提供"通用模型列表"。
+
+**解决办法**：忽略 Test，**手动在 Models 页新增一条**，填上 `openai/tensorzero::function_name::xxx`（或 `tensorzero::model_name::xxx`）。
+
+如果确实需要"一连就列出模型"的体验——那说明 TensorZero 不适合在这个应用里当代理主角，**保留 Bifrost 专门做代理**、TensorZero 专注它的观测/优化/MCP 长项即可，两者可以并存。
+
+### Q4：embedding 怎么都跑不通、把 chat 模型当 embedding 用报 404
+
+见第 7 章。核心两条：
+
+1. Embedding 必须用 `[embedding_models.xxx]` 段定义，不能塞进 `[models.xxx]`
+2. 调用前缀是 `tensorzero::embedding_model_name::`，**不是** `tensorzero::model_name::`
+
+Qwen / Llama 等聊天模型**不支持 embedding**，你需要 pull 一个专门的 embedding 模型（`nomic-embed-text` / `bge-m3` / OpenAI 的 `text-embedding-3-small` 等）。
+
+### Q5：AgentZero 在首条消息就抛 `asyncio.TimeoutError`，调用栈里出现 `_50_recall_memories` / `aembed_query`
+
+**这个报错和 TensorZero 本身无关**——是 AgentZero 的记忆召回模块在做 embedding 时超时。AgentZero 每条消息都会先用 **embedding 模型**把 prompt 转向量查"相关记忆"，这一步挂了会导致整个 prepare_prompt 失败。
+
+**定位**：在 AgentZero 设置里看 Embedding Model 配置——
+
+- 如果配的是 TensorZero 但指向 chat function（如 `my_function_name`），它不是 embedding，必定失败 → 按 Q4 建立专门的 `[embedding_models.xxx]`
+- 如果配的是本地 sentence-transformer，可能是 CPU 被抢占
+- 如果配的是外网 provider，检查网络和 Key
+
+**临时绕过**：AgentZero 设置里关闭 memory / 把 embedding 切回内置本地模型。
+
+### Q6：`/mcp` 客户端连上去报 `421 Misdirected Request` 或 `Invalid Host header`
+
+TensorZero 底层 rmcp SDK 默认开启 DNS-rebinding 保护，只放行 `Host: localhost/127.0.0.1/::1`。Olares 的 openresty 入口已加 `proxy_set_header Host 127.0.0.1;` 处理。仍然报错 → 说明 openresty 容器没用最新镜像，重新部署最新版 TensorZero 应用。
+
+### Q7：调用特别慢或被中途切断
+
+- 单次推理超过 5 分钟会被入口层 `proxy_read_timeout` 切掉。大上下文 / reasoning 模型 / 慢的自建 provider 建议**开流式**（`stream: true`），SSE 会持续有字节输出就不会积满 5 分钟超时
+- MCP 的 `/mcp` 配了 1 小时超时
+- 评估运行 `/workflow_evaluation_run` 配了 30 分钟
+
+### Q8：ClickHouse 数据太多想清理
+
+ClickHouse 数据在 Pod 内本地盘。Olares 的应用卸载会清理。手动清：进 clickhouse 容器执行 `clickhouse-client` 清表。**不要随便清**——观测数据是 TensorZero 评估/优化的地基。
+
+### Q9：UI 里看不到我刚配的 function / 改完没生效
+
+1. **硬刷新浏览器**（Ctrl+Shift+R / Cmd+Shift+R）排除缓存
+2. 看 gateway 日志有没有 `Starting gateway server...` 字样；还在迁移就等等
+3. 在 **Functions** 页确认刚加的 function 名字出现了——没出现说明 gateway 没读到新配置（多半是 ConfigMap 改了但应用没重启，或重启失败回滚了）
+
+### Q10：env.sh 改了但没生效
+
+env.sh 的改动和 tensorzero.toml 一样，都需要**重启应用**才会重新 source。改完 ConfigMap **别忘了点重启**。
+
+### Q11：UI 上为什么没有 Autopilot / Config Editor / Experimentation 页面？
+
+官方文档里这几个面板属于 TensorZero 的高级特性，**Olares 默认部署的 UI 版本里并没有暴露这几个独立面板**：
+
+- **Autopilot**：需要单独部署 TensorZero Autopilot 服务（见官方 <https://www.tensorzero.com/docs/deployment/tensorzero-autopilot>），Olares 没集成
+- **Config Editor**：早期版本有过这个只读面板，新版直接通过 Functions / Models 页间接展示
+- **Experimentation 独立面板**：A/B 测试通过 `[functions.xxx.variants.yyy] weight = 0.x` 直接配在 TOML 里，运行结果通过 Inference Evaluations 看
+
+如果你需要这些功能，去 GitHub issue 提工单或自行参考官方部署。
+
+---
+
+## 11. 端点速查表
+
+| 端点 | 方法 | 备注 |
+| --- | --- | --- |
+| `/inference` | POST | TZ 原生推理，支持流式 |
+| `/openai/v1/chat/completions` | POST | OpenAI 兼容，支持流式，需要三段式 model |
+| `/openai/v1/embeddings` | POST | OpenAI 兼容 embeddings，需要 `tensorzero::embedding_model_name::` 前缀 |
+| `/batch_inference` | POST/GET | 批量推理 + 轮询 |
+| `/feedback` | POST | 上报反馈 |
+| `/v1/inferences/list_inferences` | POST | 历史推理查询 |
+| `/v1/datasets/...` | POST/PATCH/DELETE | 数据集 CRUD |
+| `/v1/optimization/gepa` | POST/GET | GEPA 优化 |
+| `/workflow_evaluation_run` | POST | 评估运行 |
+| `/mcp` | POST | MCP 服务器，Streamable HTTP |
+| `/metrics` | GET | Prometheus 格式 |
+| `/status` | GET | 健康检查（JSON） |
+| `/`, `/datasets/*`, `/observability/*`, `/playground`, ... | GET | Web UI |
+
+---
+
+## 附录 A：给代码调用方的最小可运行示例
+
+### curl（TZ 原生）
+
+```bash
+curl -sS -X POST https://<prefix>.<user>.<domain>/inference \
+  -H 'Cookie: <你的 Olares 登录 Cookie>' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "function_name": "my_function_name",
+    "input": {
+      "messages": [
+        {"role": "user", "content": "ping"}
+      ]
+    }
+  }'
+```
+
+### curl（OpenAI 兼容，流式）
+
+```bash
+curl -N -X POST https://<prefix>.<user>.<domain>/openai/v1/chat/completions \
+  -H 'Cookie: <你的 Olares 登录 Cookie>' \
+  -H 'Authorization: Bearer noop' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "tensorzero::function_name::my_function_name",
+    "messages": [{"role": "user", "content": "ping"}],
+    "stream": true
+  }'
+```
+
+### curl（Embedding）
+
+```bash
+curl -sS -X POST https://<prefix>.<user>.<domain>/openai/v1/embeddings \
+  -H 'Cookie: <你的 Olares 登录 Cookie>' \
+  -H 'Authorization: Bearer noop' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "tensorzero::embedding_model_name::nomic_embed",
+    "input": "hello world"
+  }'
+```
+
+### Python（OpenAI SDK，Chat）
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="https://<prefix>.<user>.<domain>/openai/v1",
+    api_key="noop",
+    default_headers={"Cookie": "<你的 Olares 登录 Cookie>"},
+)
+resp = client.chat.completions.create(
+    model="tensorzero::function_name::my_function_name",
+    messages=[{"role": "user", "content": "ping"}],
+)
+print(resp.choices[0].message.content)
+```
+
+### Python（OpenAI SDK，Embedding）
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="https://<prefix>.<user>.<domain>/openai/v1",
+    api_key="noop",
+    default_headers={"Cookie": "<你的 Olares 登录 Cookie>"},
+)
+resp = client.embeddings.create(
+    model="tensorzero::embedding_model_name::nomic_embed",
+    input="hello world",
+)
+print(resp.data[0].embedding[:5])
+```
+
+### Python（TensorZero 原生 SDK）
+
+```python
+from tensorzero import TensorZeroGateway
+
+with TensorZeroGateway.build_http(
+    gateway_url="https://<prefix>.<user>.<domain>",
+) as gw:
+    resp = gw.inference(
+        function_name="my_function_name",
+        input={
+            "messages": [{"role": "user", "content": "ping"}]
+        },
+    )
+    print(resp)
+```
+
+---
+
+## 附录 B：MCP 验证命令（排障专用）
+
+按顺序打，哪一步失败就基本能定位问题。
+
+```bash
+# 1) 容器内直连 gateway
+kubectl exec -n user-space-<user> deploy/tensorzero -c gateway -- \
+  curl -sS -X POST http://127.0.0.1:3000/mcp \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: application/json, text/event-stream' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"0"}}}'
+
+# 2) 经过入口（验证 Host 改写）
+curl -sS -X POST https://<prefix>.<user>.<domain>/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"0"}}}'
+
+# 3) 列工具（需要带上一步返回的 mcp-session-id）
+curl -sS -X POST https://<prefix>.<user>.<domain>/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'mcp-session-id: <上一步返回的 session id>' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+```
+
+**诊断逻辑**：
+
+- 第 1 步不通 → gateway 自身挂了，看 gateway 容器日志
+- 第 2 步不通但第 1 步通 → 入口 Host 改写没生效，重新部署 openresty（tensorzeroingress Pod）
+- 第 3 步不通但前两步通 → 客户端侧问题，检查 mcp-session-id 和 Accept 头

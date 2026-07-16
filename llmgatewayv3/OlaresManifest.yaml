@@ -6,7 +6,7 @@ metadata:
   appid: llmgatewayv3
   description: "LLM Gateway V3 for test"
   icon: https://app.cdn.olares.com/appstore/mtranserver/icon.png
-  version: "1.0.3"
+  version: "1.0.4"
   title: LLM Gateway V3 for test
   categories:
     - Productivity_v112
@@ -15,7 +15,7 @@ permission:
   appData: true
   appCache: true
 spec:
-  versionName: "2.0.3"
+  versionName: "2.0.6"
   featuredImage: https://app.cdn.olares.com/appstore/mtranserver/1.webp
   promoteImage:
     - https://app.cdn.olares.com/appstore/mtranserver/1.webp
