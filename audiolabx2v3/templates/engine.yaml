@@ -287,7 +287,7 @@ spec:
         # polling it would deadlock). Same host path as llm-init RUN_DIR.
         - name: run-state
           hostPath:
-            path: "{{ printf "%s/llm-init-run/%s" .Values.userspace.appCache .Release.Name }}"
+            path: "{{ printf "%s/huggingface/llm-init-run/%s" .Values.userspace.appCommon .Release.Name }}"
             type: DirectoryOrCreate
         # Persistent pip target (a --system-site-packages venv) so a POD RESTART never
         # re-installs deps (no network); only first install / uninstall+reinstall repopulates it.
