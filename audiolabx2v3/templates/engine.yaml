@@ -60,10 +60,12 @@
        on-demand model workable even on the `latest`-only base image and flaky networks.
        vad runs /wrappers/vad.py: soundfile decode + the `silero-vad` pip pkg on the
        image's torch (it bundles its own model). CPU-ok.
-       translate (text->text MT, the boss's "translate" = e.g. NLLB) runs
-       /wrappers/translate.py: CPU ctranslate2 + HF tokenizers (an NLLB CTranslate2 repo
-       carries tokenizer.json, so NO sentencepiece). CPU ctranslate2 works on any image —
-       only GPU ctranslate2 is broken on Blackwell, which is why stt left it for vLLM.
+       translate (text->text MT) runs /wrappers/translate.py, which is SELF-ADAPTIVE across
+       translation models: it picks an adapter FROM MODEL_NAME (m2m100 -> transformers/
+       sentencepiece, ISO codes, the MIT commercial default; nllb -> `tokenizers`, FLORES
+       codes, kept for opt-in CC-BY-NC use). All ride CPU ctranslate2 on THIS one image (GPU
+       ct2 is broken on Blackwell), so a new translation model needs NO engine/image change —
+       just its adapter in translate.py. External API is fixed to FLORES-200 for every model.
        NOTE: whisper's stt mode also natively serves /v1/audio/translations
        (speech->English); this `translate` mode is the dedicated text-MT class.
        diar: the mapped image is the AMD64-only CUDA pyannote_fastapi (mirrored to

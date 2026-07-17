@@ -288,12 +288,22 @@ data:
     if __name__ == "__main__":
         uvicorn.run(app, host="0.0.0.0", port=PORT, log_level=LOG_LEVEL)
   translate.py: |
-    # Text->text machine translation (NLLB) on the shared pyannote/torch image. Uses
-    # CPU ctranslate2 + HF tokenizers (pip-installed on first load if missing, like
-    # embed/enhance; NO sentencepiece: an NLLB CTranslate2 repo ships tokenizer.json the
-    # tokenizers lib reads directly). CPU ct2 works on any image — only GPU ct2 is broken
-    # on Blackwell. Model is the llm-init-downloaded CT2 repo (e.g.
-    # entai2965/nllb-200-distilled-600M-ctranslate2), read from the shared HF cache.
+    # Text->text machine translation on the shared pyannote/torch image, SELF-ADAPTIVE
+    # across model families: the adapter is auto-picked from MODEL_NAME (same idea as stt's
+    # engine auto-select), so ONE base serves many translation models with NO clone-form
+    # change. Runtime is CPU ctranslate2 (GPU ct2 is broken on Blackwell; CPU ct2 runs on any
+    # image); each adapter pip-installs only the deps it needs on first load (like
+    # embed/enhance). Model is the llm-init-downloaded CT2 repo, read from the shared HF cache.
+    # The EXTERNAL API is FIXED to FLORES-200 codes (eng_Latn, zho_Hans) for EVERY model —
+    # each adapter maps FLORES<->its own scheme internally, so gateway/Demo never change.
+    #   ADAPTERS (order = detection priority; picked by MODEL_NAME, file-sniff fallback):
+    #     m2m100: M2M100Tokenizer via transformers+sentencepiece; FLORES->ISO(en/zh/ja/..);
+    #             e.g. entai2965/m2m100-1.2B-ctranslate2  (MIT — the COMMERCIAL default).
+    #     nllb (default/back-compat, BYTE-IDENTICAL to the old wrapper): tokenizer.json via
+    #             `tokenizers` (NO sentencepiece); NLLB's codes ARE FLORES-200 already;
+    #             e.g. entai2965/nllb-200-distilled-600M-ctranslate2 (CC-BY-NC — opt-in only,
+    #             kept runnable for users who explicitly choose it, never offered by default).
+    #   Adding another model/engine later = add one adapter class; nothing else changes.
     # Exposes: GET /healthz, GET /readyz, GET /v1/models,
     # POST /v1/translate {text, target, source?} with FLORES-200 codes.
     import os, re, sys, subprocess, threading, logging
@@ -312,9 +322,12 @@ data:
     PORT = int(os.environ.get("WRAPPER_PORT", "8000"))
     DEVICE = os.environ.get("CT2_DEVICE", "cpu")
     DEFAULT_SRC = os.environ.get("DEFAULT_SOURCE_LANG", "eng_Latn")
+    # Advanced override only (NOT a clone-form field): force an adapter if name-detection
+    # ever guesses wrong. Empty => auto-detect from MODEL_NAME/MODEL_REPO.
+    FORCE_ADAPTER = (os.environ.get("TRANSLATE_ADAPTER", "") or "").strip().lower()
 
-    app = FastAPI(title="audio-translate (NLLB via ctranslate2)")
-    _state = {"ready": False, "error": None, "translator": None, "tok": None, "device": DEVICE}
+    def _pip(*pkgs):
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q", *pkgs], check=False)
 
     def _locate():
         # Resolve the CT2 model dir from the shared HF cache populated by llm-init.
@@ -322,20 +335,137 @@ data:
         return snapshot_download(MODEL_REPO, local_files_only=True,
                                  cache_dir=os.environ.get("HF_HUB_CACHE"))
 
-    def _load():
-        try:
+    # ---- adapters: one per model family. External codes are ALWAYS FLORES-200; each adapter
+    #      owns its tokenization, its ctranslate2 call, and its FLORES<->native code mapping. ----
+
+    class _Adapter:
+        name = "base"
+        @staticmethod
+        def matches(repo, mdir):
+            return False
+        def load(self, mdir):
+            raise NotImplementedError
+        def translate(self, sents, src_flores, tgt_flores, beam_size):
+            raise NotImplementedError
+
+    class NLLBAdapter(_Adapter):
+        # NLLB CT2 repo ships tokenizer.json (read directly by `tokenizers`, NO sentencepiece).
+        # NLLB's native language codes ARE FLORES-200, so there is NO mapping. This path is
+        # byte-identical to the pre-multi-model wrapper (existing NLLB instances unaffected).
+        name = "nllb"
+        @staticmethod
+        def matches(repo, mdir):
+            if "nllb" in repo:
+                return True
+            return (os.path.exists(os.path.join(mdir, "tokenizer.json"))
+                    and not os.path.exists(os.path.join(mdir, "sentencepiece.bpe.model")))
+        def load(self, mdir):
             try:
                 import ctranslate2
                 from tokenizers import Tokenizer
             except Exception:
-                subprocess.run([sys.executable, "-m", "pip", "install", "-q", "ctranslate2", "tokenizers"], check=False)
+                _pip("ctranslate2", "tokenizers")
                 import ctranslate2
                 from tokenizers import Tokenizer
+            self.tok = Tokenizer.from_file(os.path.join(mdir, "tokenizer.json"))
+            self.tr = ctranslate2.Translator(mdir, device=DEVICE)
+        def _decode_hyp(self, hyp, tgt):
+            out = [t for t in hyp if t not in (tgt, "</s>", "<pad>", "<s>")]
+            ids = [self.tok.token_to_id(t) for t in out]
+            ids = [i for i in ids if i is not None]
+            return self.tok.decode(ids).strip()
+        def translate(self, sents, src, tgt, beam_size):
+            # NLLB encoder input per sentence = [src_lang] + subwords + </s>; decoder prefix = [tgt].
+            sources = [[src] + self.tok.encode(s, add_special_tokens=False).tokens + ["</s>"] for s in sents]
+            res = self.tr.translate_batch(sources, target_prefix=[[tgt]] * len(sources),
+                                          beam_size=beam_size, max_input_length=1024,
+                                          max_decoding_length=1024)
+            return [self._decode_hyp(r.hypotheses[0], tgt) for r in res]
+
+    class M2M100Adapter(_Adapter):
+        # m2m100 CT2 repo bundles the M2M100Tokenizer files (sentencepiece); its language codes
+        # are ISO 639-1 (en/zh/ja/..). We map FLORES-200 -> ISO by the code's 3-letter prefix
+        # (script suffix is irrelevant to m2m100; zho_Hans and zho_Hant both -> zh). Per the
+        # CTranslate2 m2m100 recipe: src token seq = tokenizer.convert_ids_to_tokens(encode(text)),
+        # target_prefix = [lang_code_to_token[tgt]], and hypotheses[0][1:] drops the forced tag.
+        name = "m2m100"
+        FLORES2M2M = {
+            "eng": "en", "zho": "zh", "jpn": "ja", "kor": "ko", "fra": "fr", "deu": "de",
+            "spa": "es", "rus": "ru", "ita": "it", "por": "pt", "arb": "ar", "hin": "hi",
+            "vie": "vi", "tha": "th", "ind": "id", "nld": "nl", "pol": "pl", "tur": "tr",
+            "ukr": "uk", "ces": "cs", "ell": "el", "heb": "he", "swe": "sv", "ron": "ro",
+            "hun": "hu", "fin": "fi", "dan": "da", "nob": "no", "nno": "no", "afr": "af",
+            "amh": "am", "ast": "ast", "azj": "az", "azb": "az", "bak": "ba", "bel": "be",
+            "bul": "bg", "ben": "bn", "bos": "bs", "cat": "ca", "ceb": "ceb", "cym": "cy",
+            "pes": "fa", "prs": "fa", "gle": "ga", "gla": "gd", "glg": "gl", "guj": "gu",
+            "hau": "ha", "hrv": "hr", "hat": "ht", "hye": "hy", "ibo": "ig", "ilo": "ilo",
+            "isl": "is", "jav": "jv", "kat": "ka", "kaz": "kk", "khm": "km", "kan": "kn",
+            "ltz": "lb", "lug": "lg", "lin": "ln", "lao": "lo", "lit": "lt", "lvs": "lv",
+            "plt": "mg", "mkd": "mk", "mal": "ml", "khk": "mn", "mar": "mr", "zsm": "ms",
+            "mya": "my", "npi": "ne", "nso": "ns", "oci": "oc", "ory": "or", "pan": "pa",
+            "pbt": "ps", "snd": "sd", "sin": "si", "slk": "sk", "slv": "sl", "som": "so",
+            "als": "sq", "srp": "sr", "ssw": "ss", "sun": "su", "swh": "sw", "tam": "ta",
+            "tgl": "tl", "tsn": "tn", "urd": "ur", "uzn": "uz", "wol": "wo", "xho": "xh",
+            "ydd": "yi", "yor": "yo", "zul": "zu", "est": "et", "fuv": "ff", "bre": "br",
+            "fry": "fy",
+        }
+        @staticmethod
+        def matches(repo, mdir):
+            return any(k in repo for k in ("m2m100", "m2m_100", "m2m-100"))
+        def load(self, mdir):
+            try:
+                import ctranslate2, transformers
+                import sentencepiece  # noqa: F401
+            except Exception:
+                _pip("ctranslate2", "transformers", "sentencepiece")
+                import ctranslate2, transformers
+            self.tok = transformers.AutoTokenizer.from_pretrained(mdir, clean_up_tokenization_spaces=True)
+            self.tr = ctranslate2.Translator(mdir, device=DEVICE)
+        def _iso(self, flores):
+            code = self.FLORES2M2M.get(flores) or self.FLORES2M2M.get(flores.split("_")[0])
+            if not code and flores in self.tok.lang_code_to_token:
+                code = flores  # allow a raw ISO code passed straight through
+            if not code or code not in self.tok.lang_code_to_token:
+                raise HTTPException(status_code=400,
+                                    detail="m2m100 does not support language '%s'" % flores)
+            return code
+        def translate(self, sents, src, tgt, beam_size):
+            src_iso, tgt_iso = self._iso(src), self._iso(tgt)
+            self.tok.src_lang = src_iso
+            sources = [self.tok.convert_ids_to_tokens(self.tok.encode(s)) for s in sents]
+            prefix = [self.tok.lang_code_to_token[tgt_iso]]
+            res = self.tr.translate_batch(sources, target_prefix=[prefix] * len(sources),
+                                          beam_size=beam_size, max_input_length=1024,
+                                          max_decoding_length=1024)
+            out = []
+            for r in res:
+                ids = self.tok.convert_tokens_to_ids(r.hypotheses[0][1:])
+                out.append(self.tok.decode(ids, skip_special_tokens=True).strip())
+            return out
+
+    ADAPTERS = [M2M100Adapter, NLLBAdapter]
+
+    def _pick_adapter(mdir):
+        repo = MODEL_REPO.lower()
+        if FORCE_ADAPTER:
+            for A in ADAPTERS:
+                if A.name == FORCE_ADAPTER:
+                    return A()
+        for A in ADAPTERS:
+            if A.matches(repo, mdir):
+                return A()
+        return NLLBAdapter()  # safe default preserves legacy behaviour
+
+    app = FastAPI(title="audio-translate (multi-model via ctranslate2)")
+    _state = {"ready": False, "error": None, "adapter": None, "device": DEVICE}
+
+    def _load():
+        try:
             d = _locate()
-            tok = Tokenizer.from_file(os.path.join(d, "tokenizer.json"))
-            tr = ctranslate2.Translator(d, device=DEVICE)
-            _state.update(translator=tr, tok=tok, ready=True)
-            log.info("nllb ct2 loaded from %s on %s", d, DEVICE)
+            ad = _pick_adapter(d)
+            ad.load(d)
+            _state.update(adapter=ad, ready=True)
+            log.info("translate ready: adapter=%s model=%s on %s", ad.name, MODEL_REPO, DEVICE)
         except Exception as e:
             _state["error"] = str(e)
             log.exception("load failed: %s", e)
@@ -347,7 +477,8 @@ data:
     @app.get("/healthz")
     def healthz():
         if _state["ready"]:
-            return {"status": "ok", "device": _state["device"]}
+            return {"status": "ok", "device": _state["device"],
+                    "adapter": _state["adapter"].name if _state["adapter"] else None}
         raise HTTPException(status_code=503, detail=_state["error"] or "loading model")
 
     @app.get("/readyz")
@@ -363,11 +494,12 @@ data:
         target: str                 # FLORES-200 code, e.g. zho_Hans
         source: Optional[str] = None  # FLORES-200 code; default DEFAULT_SOURCE_LANG
 
-    # NLLB is a SENTENCE-level model: feeding a whole multi-sentence paragraph in one go makes
-    # it translate only the first sentence(s) and drop the rest (looks "truncated"). So we
-    # split the input into sentences with a NON-AI splitter (punctuation only — no model, no
-    # interface change), translate them as ONE ctranslate2 batch (the idiomatic NLLB usage),
-    # then join. Languages that don't separate words with spaces get a "" joiner.
+    # Every model here is SENTENCE-level: feeding a whole multi-sentence paragraph in one go
+    # makes it translate only the first sentence(s) and drop the rest (looks "truncated"). So
+    # we split the input with a NON-AI splitter (punctuation only — no model, no interface
+    # change), translate the sentences as ONE ctranslate2 batch, then join. Languages that
+    # don't separate words with spaces get a "" joiner. This is adapter-agnostic (keyed on the
+    # external FLORES target), so it works the same for NLLB, m2m100, and any future model.
     _SENT_RE = re.compile(r"[^。！？!?；;…\n]*[。！？!?；;…\n]+|[^。！？!?；;…\n]+")
     _NOSPACE_TGT = ("zho", "jpn", "yue", "tha", "lao", "mya", "khm", "wuu", "bod")
 
@@ -383,12 +515,6 @@ data:
                 sents.extend(s[i:i + max_chars] for i in range(0, len(s), max_chars))
         return sents or [text.strip()]
 
-    def _decode_hyp(tok, hyp, tgt):
-        out = [t for t in hyp if t not in (tgt, "</s>", "<pad>", "<s>")]
-        ids = [tok.token_to_id(t) for t in out]
-        ids = [i for i in ids if i is not None]
-        return tok.decode(ids).strip()
-
     @app.post("/v1/translate")
     def translate(req: Req):
         if not _state["ready"]:
@@ -397,20 +523,17 @@ data:
             return {"model": MODEL_NAME, "mode": "translate", "translation": ""}
         src = req.source or DEFAULT_SRC
         tgt = req.target
-        tok = _state["tok"]; tr = _state["translator"]
-        # NLLB encoder input per sentence = [src_lang] + subwords + </s>; decoder prefix = [tgt].
         sents = _split_sentences(req.text)
-        sources = [[src] + tok.encode(s, add_special_tokens=False).tokens + ["</s>"] for s in sents]
         try:
-            res = tr.translate_batch(sources, target_prefix=[[tgt]] * len(sources), beam_size=4,
-                                     max_input_length=1024, max_decoding_length=1024)
+            hyps = _state["adapter"].translate(sents, src, tgt, 4)
+        except HTTPException:
+            raise
         except Exception as e:
             raise HTTPException(status_code=500, detail="translation failed: %s" % e)
-        hyps = [_decode_hyp(tok, r.hypotheses[0], tgt) for r in res]
         joiner = "" if tgt[:3] in _NOSPACE_TGT else " "
         translation = joiner.join(h for h in hyps if h)
-        return {"model": MODEL_NAME, "mode": "translate", "source": src, "target": tgt,
-                "sentences": len(sents), "translation": translation}
+        return {"model": MODEL_NAME, "mode": "translate", "adapter": _state["adapter"].name,
+                "source": src, "target": tgt, "sentences": len(sents), "translation": translation}
 
     if __name__ == "__main__":
         uvicorn.run(app, host="0.0.0.0", port=PORT, log_level=LOG_LEVEL)

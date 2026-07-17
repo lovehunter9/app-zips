@@ -51,6 +51,42 @@ WS e2e through the llm-init test2 proxy (public entrance, no auth needed):
 Internal engine URL per instance: `http://audio-engine.<app>-shared:8000`. llm-init data
 plane / console: entrance → `download-svc.<app>-shared:8090`.
 
+## Second translation model — m2m100 (commercial default) — code staged 2026-07-16
+
+Only NLLB-200 among all cloned models is non-commercial (CC-BY-NC); the rest are
+MIT/Apache/NVIDIA-Open/CC-BY-4.0. Per the boss's "add, don't replace / self-adaptive /
+keep NLLB opt-in-runnable" mandate, `translate.py` is now an **adapter architecture**
+(commit staged in `audiolabx2v3/templates/wrappers.yaml`):
+
+- External API is FIXED to FLORES-200 for ALL models (gateway/Demo unchanged).
+- Adapter is auto-picked from `MODEL_NAME` (same idea as stt engine auto-select), so NO new
+  clone-form env (RULE-2 intact — still title + 4 env). Advanced `TRANSLATE_ADAPTER` override
+  exists via olaresEnv only, never in the clone form.
+  - `m2m100` (MIT, COMMERCIAL default): `transformers` M2M100Tokenizer + sentencepiece;
+    FLORES→ISO by 3-letter prefix (103 langs mapped); target model
+    `entai2965/m2m100-1.2B-ctranslate2`.
+  - `nllb` (default/back-compat, **byte-identical** to the old wrapper): `tokenizers` +
+    tokenizer.json; NLLB codes ARE FLORES-200. Existing NLLB instance is UNAFFECTED and stays
+    runnable for users who explicitly pick it (never offered by default).
+- No `engine.yaml` change: both ride CPU ctranslate2 on the SAME pyannote image; m2m100
+  pip-installs `transformers`+`sentencepiece` on first load (embed/enhance on-demand pattern).
+- Validated: `helm template` renders clean; all 9 embedded wrappers `py_compile` OK.
+
+**RULE-1 rebuild SHIPPED 2026-07-16.** Repackaged `audiolabx2v3-1.0.0.tgz` (m2m100 adapter
+in `wrappers.yaml`) → uninstall 10 → `market delete` → `market upload` → re-clone 11. **All 10
+originals reproduced their EXACT hashes → public URLs UNCHANGED, no provider re-pointing:**
+0263ef / 93e848 / b0c2ed / 9c4797 / 818606 / dd1ed9 / 53f4c2 (NLLB) / cdcb44 / 0e4d03 / c84c8e.
+
+NEW m2m100 instance (the commercial default translate):
+
+| Cap | Title | App name / NS | MODEL_SOURCE | MODEL_NAME | MODE | GPU | Public URL |
+|---|---|---|---|---|---|---|---|
+| Translate m2m100 | AudioX2 Translate m2m100 | `audiolabx2v354d617` | `hf://entai2965/m2m100-1.2B-ctranslate2` | `m2m100-1.2B` | translate | 0 | ask user |
+
+Adapter auto-detects `m2m100` from MODEL_NAME → transformers/sentencepiece path (pip-installed
+on first load). NLLB instance `53f4c2` uses the byte-identical `nllb` adapter. Verification of
+m2m100 `/v1/translate` pending (engine still downloading model at handoff).
+
 ## WS test recipe (no gateway, no auth on these entrances)
 
 `/tmp/wsx` venv (`websockets soundfile numpy`); client `/tmp/ws_test.py` (MUST pass
