@@ -95,6 +95,8 @@ export interface RecordFull extends RecordSummary {
   result: RecordResult | null;
   timings?: Timings | null;
   clipRanges?: { start: number; end: number }[]; // present on 片段 records
+  summary?: RecordSummaryBlock | null; // 智能摘要 (generated on demand)
+  qa?: QaState | null; // 智能问答 / RAG (index metadata + conversation history)
 }
 
 export interface ModelOpt {
@@ -115,6 +117,63 @@ export interface EnhanceConfig {
   model: string;
 }
 
+// 智能摘要 config: `model` is a chat-mode gateway model id (e.g. Qwen3-4B).
+export interface SummaryConfig {
+  model: string;
+}
+
+// A generated 智能摘要. All time fields are SECONDS into the audio (click-to-seek).
+export interface Summary {
+  oneLine: string;
+  overview: string;
+  chapters: { title: string; start: number; end: number; summary: string }[];
+  keyPoints: { text: string; time: number }[];
+  actionItems: { text: string; owner: string; time: number }[];
+  speakers: { name: string; points: string }[];
+}
+
+export interface RecordSummaryBlock {
+  data: Summary;
+  model: string;
+  at: string;
+}
+
+// 智能问答 / RAG config: `model` is the chat model (falls back to summary.model when
+// empty); `embedModel` is the embedding-mode model id (e.g. Qwen3-Embedding-0.6B).
+export interface QaConfig {
+  model: string;
+  embedModel: string;
+}
+
+// A retrieved chunk cited by an answer. `time`/`end` are SECONDS (click-to-seek).
+export interface QaCitation {
+  n: number;
+  time: number;
+  end: number;
+  speaker: string;
+  text: string;
+  score: number;
+}
+
+// One Q&A exchange in a record's conversation history.
+export interface QaTurn {
+  q: string;
+  a: string;
+  model?: string;
+  citations: QaCitation[];
+  at: string;
+}
+
+// Per-record Q&A state: index metadata + conversation history (vectors live in a
+// separate index file on the server, never sent to the client).
+export interface QaState {
+  indexedAt?: string;
+  embedModel?: string;
+  chunkCount?: number;
+  dim?: number;
+  history?: QaTurn[];
+}
+
 export interface BackgroundConfig {
   enabled: boolean;
   dim: number; // 0..80 darken overlay
@@ -132,6 +191,8 @@ export interface GatewayConfig {
   autoTranscribe: boolean;
   translate: TranslateConfig;
   enhance: EnhanceConfig;
+  summary: SummaryConfig;
+  qa: QaConfig;
   background: BackgroundConfig;
   ready: boolean;
   missing: string[];

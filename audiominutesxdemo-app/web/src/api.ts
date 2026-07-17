@@ -1,4 +1,4 @@
-import type { GatewayConfig, ModelOpt, RecordFull, RecordOptions, RecordSummary, Word } from "./types";
+import type { GatewayConfig, ModelOpt, QaState, QaTurn, RecordFull, RecordOptions, RecordSummary, Word } from "./types";
 
 async function jget<T>(url: string): Promise<T> {
   const r = await fetch(url);
@@ -34,6 +34,22 @@ export const transcribeRecord = (id: string, opts?: Partial<RecordOptions>) =>
   jsend<{ ok: boolean }>(`/api/records/${id}/transcribe`, "POST", opts ?? {});
 export const translateRecord = (id: string) =>
   jsend<{ ok: boolean }>(`/api/records/${id}/translate`, "POST", {});
+
+// 智能摘要: generate (POST, optional model override) or clear (DELETE). Returns the
+// updated record (with `summary` populated / removed).
+export const summarizeRecord = (id: string, model?: string) =>
+  jsend<RecordFull>(`/api/records/${id}/summary`, "POST", model ? { model } : {});
+export const clearSummary = (id: string) =>
+  jsend<RecordFull>(`/api/records/${id}/summary`, "DELETE");
+
+// 智能问答 / RAG: (re)build the vector index, ask a question (retrieval + grounded
+// answer with clickable citations), or clear the index + conversation history.
+export const buildQaIndex = (id: string, embedModel?: string) =>
+  jsend<RecordFull>(`/api/records/${id}/qa/index`, "POST", embedModel ? { embedModel } : {});
+export const askQuestion = (id: string, question: string, opts?: { model?: string; embedModel?: string }) =>
+  jsend<{ turn: QaTurn; qa: QaState }>(`/api/records/${id}/qa`, "POST", { question, ...(opts ?? {}) });
+export const clearQa = (id: string) =>
+  jsend<RecordFull>(`/api/records/${id}/qa`, "DELETE");
 
 // Save manual edits (transcript editor): per-segment text/translation/speaker,
 // speaker display names, and the participant roster. Returns the updated record.

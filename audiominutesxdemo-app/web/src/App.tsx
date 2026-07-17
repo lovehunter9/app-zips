@@ -7,7 +7,7 @@
 //     from what the gateway actually serves). Missing a required model => the app
 //     tells you it cannot transcribe.
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { GatewayConfig, ModelOpt, Notice, RecordFull, RecordSummary, Segment, Timings, Word } from "./types";
+import type { GatewayConfig, ModelOpt, Notice, QaState, QaTurn, RecordFull, RecordSummary, RecordSummaryBlock, Segment, Timings, Word } from "./types";
 import * as api from "./api";
 import { ensureJieba, jiebaCut, jiebaState } from "./jieba";
 
@@ -711,6 +711,9 @@ function SettingsPage({
   const [trTarget, setTrTarget] = useState(config.translate?.targetLang || "auto");
   const [enhEnabled, setEnhEnabled] = useState(config.enhance?.enabled ?? false);
   const [enhModel, setEnhModel] = useState(config.enhance?.model || "");
+  const [sumModel, setSumModel] = useState(config.summary?.model || "");
+  const [qaModel, setQaModel] = useState(config.qa?.model || "");
+  const [qaEmbedModel, setQaEmbedModel] = useState(config.qa?.embedModel || "");
   const [bgEnabled, setBgEnabled] = useState(config.background?.enabled ?? false);
   const [bgDim, setBgDim] = useState(config.background?.dim ?? 40);
   const [bgHasImg, setBgHasImg] = useState(!!config.background?.mime);
@@ -751,6 +754,8 @@ function SettingsPage({
         segmentedStt, language, autoTranscribe,
         translate: { enabled: trEnabled, model: trModel, sourceLang: trSource, targetLang: trTarget },
         enhance: { enabled: enhEnabled, model: enhModel },
+        summary: { model: sumModel },
+        qa: { model: qaModel, embedModel: qaEmbedModel },
         background: { enabled: bgEnabled, dim: bgDim },
       });
       onSaved(saved);
@@ -868,20 +873,6 @@ function SettingsPage({
             <ModelSelect label="转写 STT" mode="stt" value={stt} set={setStt} />
             <ModelSelect label="强制对齐 Align" mode="align" value={align} set={setAlign} />
             <ModelSelect label="说话人分离 Diarize" mode="diar" value={diar} set={setDiar} />
-            <label className="block text-sm">
-              <span className="mb-0.5 block text-xs text-neutral-400">语言(对齐 + Whisper 转写)</span>
-              <select className="input !py-1.5" value={language} onChange={(e) => setLanguage(e.target.value)}>
-                <option value="auto">自动识别(按转写文本判定)</option>
-                <option value="zh">中文 zh</option>
-                <option value="en">English en</option>
-                <option value="ja">日本語 ja</option>
-                <option value="ko">한국어 ko</option>
-                <option value="yue">粤语 yue</option>
-              </select>
-              <span className="mt-0.5 block text-[11px] leading-tight text-neutral-500">
-                自动识别:仅用于对齐(按转写文本判定)。选具体语言时,Whisper 会据此解码(更准);Whisper 中文无标点会自动改用「停顿/说话人/长度」分句。
-              </span>
-            </label>
           </div>
 
           {/* 转写默认(新文件) */}
@@ -901,6 +892,20 @@ function SettingsPage({
               <span>
                 <span className="block text-neutral-200">上传后自动转写</span>
                 <span className="block text-[11px] leading-tight text-neutral-500">开(默认)=上传即转写;关=仅入库「待转录」,可先选选项再手动转写。</span>
+              </span>
+            </label>
+            <label className="block text-sm">
+              <span className="mb-0.5 block text-xs text-neutral-400">语言(对齐 + Whisper 转写)</span>
+              <select className="input !py-1.5" value={language} onChange={(e) => setLanguage(e.target.value)}>
+                <option value="auto">自动识别(按转写文本判定)</option>
+                <option value="zh">中文 zh</option>
+                <option value="en">English en</option>
+                <option value="ja">日本語 ja</option>
+                <option value="ko">한국어 ko</option>
+                <option value="yue">粤语 yue</option>
+              </select>
+              <span className="mt-0.5 block text-[11px] leading-tight text-neutral-500">
+                自动识别:仅用于对齐(按转写文本判定)。选具体语言时,Whisper 会据此解码(更准);Whisper 中文无标点会自动改用「停顿/说话人/长度」分句。
               </span>
             </label>
           </div>
@@ -946,6 +951,31 @@ function SettingsPage({
               </span>
             </label>
             <ModelSelect label="增强模型" mode="enhance" value={enhModel} set={setEnhModel} />
+          </div>
+
+          {/* 智能摘要 Summary */}
+          <div className="space-y-1.5 rounded-lg border border-neutral-800 bg-neutral-900/50 p-2.5">
+            <div className="text-sm font-medium text-neutral-200">
+              智能摘要 Summary <span className="text-[11px] font-normal text-neutral-500">· 详情页按需生成</span>
+            </div>
+            <span className="block text-[11px] leading-tight text-neutral-500">
+              选一个 chat 文本模型(如 Qwen3-4B)。详情页点「生成摘要」时,用它把转写文本总结成
+              概要 / 章节 / 要点 / 待办 / 发言人小结,时间戳可点击跳转。
+            </span>
+            <ModelSelect label="摘要模型" mode="chat" value={sumModel} set={setSumModel} />
+          </div>
+
+          {/* 智能问答 Q&A (RAG) */}
+          <div className="space-y-1.5 rounded-lg border border-neutral-800 bg-neutral-900/50 p-2.5">
+            <div className="text-sm font-medium text-neutral-200">
+              智能问答 Q&amp;A <span className="text-[11px] font-normal text-neutral-500">· 详情页按需提问 · RAG</span>
+            </div>
+            <span className="block text-[11px] leading-tight text-neutral-500">
+              基于本篇转写的检索增强问答:嵌入模型(如 Qwen3-Embedding)把内容切块建索引,提问时检索最相关
+              片段,再由对话模型作答并给出可点击的引用时间戳。对话模型留空则复用「摘要模型」。
+            </span>
+            <ModelSelect label="对话模型" mode="chat" value={qaModel} set={setQaModel} />
+            <ModelSelect label="嵌入模型" mode="embedding" value={qaEmbedModel} set={setQaEmbedModel} />
           </div>
 
           {/* 界面 · 背景图 */}
@@ -1604,6 +1634,59 @@ function RecordDetail({
     syncToTime(m.currentTime);
   }
   const [coverOpen, setCoverOpen] = useState(false);
+  // Right-pane view switch: 文字记录 / 智能摘要 / 智能问答.
+  const [rightView, setRightView] = useState<"transcript" | "summary" | "qa">("transcript");
+  const showSummary = rightView === "summary";
+  const showQa = rightView === "qa";
+  const [summarizing, setSummarizing] = useState(false);
+  const summaryModel = config?.summary?.model || "";
+  async function doSummarize() {
+    if (summarizing) return;
+    setErr(""); setSummarizing(true);
+    try {
+      const updated = await api.summarizeRecord(id, summaryModel || undefined);
+      setRec(updated);
+      onChanged();
+    } catch (e: any) {
+      setErr("生成摘要失败：" + String(e?.message || e));
+    } finally {
+      setSummarizing(false);
+    }
+  }
+  async function doClearSummary() {
+    try { setRec(await api.clearSummary(id)); onChanged(); }
+    catch (e: any) { setErr(String(e?.message || e)); }
+  }
+
+  // 智能问答 / RAG: conversation input + in-flight state. History lives on rec.qa.
+  const qaChatModel = config?.qa?.model || config?.summary?.model || "";
+  const qaEmbedModel = config?.qa?.embedModel || "";
+  const [qaInput, setQaInput] = useState("");
+  const [qaAsking, setQaAsking] = useState(false);
+  const [qaPending, setQaPending] = useState(""); // optimistically-shown in-flight question
+  async function doAsk() {
+    const question = qaInput.trim();
+    if (!question || qaAsking) return;
+    if (!qaEmbedModel) { setErr("请先在「设置 · 智能问答」中选择嵌入模型"); return; }
+    // Show the question immediately (clear the box) so it doesn't feel like a freeze.
+    setErr(""); setQaAsking(true); setQaPending(question); setQaInput("");
+    try {
+      const { qa } = await api.askQuestion(id, question, { model: qaChatModel || undefined, embedModel: qaEmbedModel });
+      setRec((r) => (r ? { ...r, qa } : r));
+      onChanged();
+    } catch (e: any) {
+      setErr("提问失败：" + String(e?.message || e));
+      setQaInput(question); // restore so the user can retry without retyping
+    } finally {
+      setQaAsking(false);
+      setQaPending("");
+    }
+  }
+  async function doClearQa() {
+    if (!confirm("清除本篇的问答索引与对话记录？")) return;
+    try { setRec(await api.clearQa(id)); onChanged(); }
+    catch (e: any) { setErr(String(e?.message || e)); }
+  }
 
   async function doTranscribe() {
     try {
@@ -1698,6 +1781,45 @@ function RecordDetail({
       <input type="checkbox" className="h-3.5 w-3.5" checked={wantTrans} onChange={(e) => toggleTrans(e.target.checked)} />
       显示译文
     </label>
+  ) : null;
+
+  // 文字记录 / 智能摘要 / 智能问答 segmented control for the right pane. Only shown
+  // once the record is transcribed; hidden while editing (edit only applies to 文字记录).
+  const summaryToggle = (rec?.status === "done" && !editing) ? (
+    <div className="flex shrink-0 overflow-hidden rounded-md border border-neutral-700 text-xs" title="在文字记录 / AI 智能摘要 / 智能问答 之间切换">
+      <button
+        className={`px-2 py-1 ${rightView === "transcript" ? "bg-neutral-700 text-neutral-100" : "text-neutral-400 hover:text-neutral-200"}`}
+        onClick={() => setRightView("transcript")}
+      >
+        文字记录
+      </button>
+      <button
+        className={`px-2 py-1 ${rightView === "summary" ? "bg-emerald-600/80 text-white" : "text-neutral-400 hover:text-neutral-200"}`}
+        onClick={() => setRightView("summary")}
+      >
+        ✨ 智能摘要
+      </button>
+      <button
+        className={`px-2 py-1 ${rightView === "qa" ? "bg-sky-600/80 text-white" : "text-neutral-400 hover:text-neutral-200"}`}
+        onClick={() => setRightView("qa")}
+      >
+        💬 智能问答
+      </button>
+    </div>
+  ) : null;
+
+  // Right-side header controls for 智能摘要 / 智能问答 — live in the SAME header row
+  // as the transcript's search/edit tools (not inside the panel body).
+  const summaryHeaderTools = (rightView === "summary" && rec?.status === "done" && rec.summary) ? (
+    <div className="ml-auto flex items-center gap-2">
+      <button className="btn-ghost !py-1" onClick={doSummarize} disabled={!summaryModel || summarizing} title={summaryModel ? "" : "请先在设置中选择摘要模型"}>重新生成</button>
+      <button className="btn-ghost !py-1" onClick={doClearSummary}>清除</button>
+    </div>
+  ) : null;
+  const qaHeaderTools = (rightView === "qa" && (rec?.qa?.history?.length ?? 0) > 0) ? (
+    <div className="ml-auto flex items-center gap-2">
+      <button className="btn-ghost !py-1" onClick={doClearQa}>清除对话/索引</button>
+    </div>
   ) : null;
 
   // Render one line of clickable, per-unit spans (original OR translation). CJK
@@ -1912,6 +2034,32 @@ function RecordDetail({
     </>
   );
 
+  const summaryBody = (
+    <SummaryPanel
+      summary={rec.summary || null}
+      model={summaryModel}
+      generating={summarizing}
+      onGenerate={doSummarize}
+      seekTo={(t) => { seekTo(t); }}
+    />
+  );
+
+  const qaBody = (
+    <QaPanel
+      qa={rec.qa || null}
+      chatModel={qaChatModel}
+      embedModel={qaEmbedModel}
+      input={qaInput}
+      setInput={setQaInput}
+      asking={qaAsking}
+      pending={qaPending}
+      onAsk={doAsk}
+      seekTo={(t) => { seekTo(t); }}
+    />
+  );
+  // Which body to show in the right pane, driven by the segmented control.
+  const rightBody = showSummary ? summaryBody : showQa ? qaBody : (editing ? editorList : transcriptList);
+
   const isClip = !!rec.clipOf;
   // Clips generated FROM this record (shown as an "关联片段" strip). Derived from the
   // library list (App polls it while a clip is generating, so 生成中→已完成 updates live).
@@ -2092,19 +2240,25 @@ function RecordDetail({
             }
             right={
               <div className="flex h-full flex-col overflow-hidden pl-3">
-                <div className="mb-2 flex items-center gap-2">
-                  <span className="text-sm font-medium text-neutral-200">文字记录</span>
+                <div className="mb-2 flex h-[38px] shrink-0 items-center gap-2">
                   {editing ? editToolbar : (
-                    <div className="ml-auto flex items-center gap-2">
-                      {transToggle}
-                      {granularityToggle}
-                      <div className="w-44 sm:w-56">{searchBox}</div>
-                      <button className="btn-ghost !py-1" onClick={enterEdit} title="编辑转录文字 / 译文">编辑</button>
-                    </div>
+                    <>
+                      {summaryToggle}
+                      {rightView === "transcript" && (
+                        <div className="ml-auto flex items-center gap-2">
+                          {transToggle}
+                          {granularityToggle}
+                          <div className="w-44 sm:w-56">{searchBox}</div>
+                          <button className="btn-ghost !py-1" onClick={enterEdit} title="编辑转录文字 / 译文">编辑</button>
+                        </div>
+                      )}
+                      {summaryHeaderTools}
+                      {qaHeaderTools}
+                    </>
                   )}
                 </div>
                 <div ref={scrollRef} className="flex-1 overflow-y-auto pr-1">
-                  {editing ? editorList : transcriptList}
+                  {rightBody}
                 </div>
               </div>
             }
@@ -2126,19 +2280,25 @@ function RecordDetail({
             }
             right={
               <div className="flex h-full min-w-0 flex-col">
-                <div className="flex items-center gap-3 border-b border-neutral-800 px-4 py-2">
-                  <span className="text-sm font-medium text-neutral-200">文字记录</span>
+                <div className="flex h-[54px] shrink-0 items-center gap-3 border-b border-neutral-800 px-4">
                   {editing ? editToolbar : (
-                    <div className="ml-auto flex items-center gap-2">
-                      {transToggle}
-                      {granularityToggle}
-                      <div className="w-48 sm:w-64">{searchBox}</div>
-                      <button className="btn-ghost !py-1" onClick={enterEdit} title="编辑转录文字 / 译文">编辑</button>
-                    </div>
+                    <>
+                      {summaryToggle}
+                      {rightView === "transcript" && (
+                        <div className="ml-auto flex items-center gap-2">
+                          {transToggle}
+                          {granularityToggle}
+                          <div className="w-48 sm:w-64">{searchBox}</div>
+                          <button className="btn-ghost !py-1" onClick={enterEdit} title="编辑转录文字 / 译文">编辑</button>
+                        </div>
+                      )}
+                      {summaryHeaderTools}
+                      {qaHeaderTools}
+                    </>
                   )}
                 </div>
-                <div ref={scrollRef} className="flex-1 overflow-y-auto px-6 py-3">
-                  <div className="mx-auto w-full max-w-5xl">{editing ? editorList : transcriptList}</div>
+                <div ref={scrollRef} className={`min-h-0 flex-1 px-6 ${showQa ? "py-2" : "overflow-y-auto py-3"}`}>
+                  <div className={`mx-auto w-full max-w-5xl ${showQa ? "h-full" : ""}`}>{rightBody}</div>
                 </div>
               </div>
             }
@@ -3057,6 +3217,291 @@ function FileInfoRows({ rec }: { rec: RecordFull }) {
 // Feishu-style tabbed metadata panel (说话人 / 文件信息 / 处理记录) used in both the
 // audio sidebar and the video left column, so only the transcript needs to scroll —
 // the panel itself is compact and its active tab scrolls internally if needed.
+// 智能摘要 panel — renders a generated Summary (or an empty/generating state) with
+// click-to-seek time chips. All time fields are SECONDS into the audio.
+function SummaryPanel({ summary, model, generating, onGenerate, seekTo }: {
+  summary: RecordSummaryBlock | null;
+  model: string;
+  generating: boolean;
+  onGenerate: () => void;
+  seekTo: (t: number) => void;
+}) {
+  const fmtSec = (sec: number) => {
+    const s = Math.max(0, Math.floor(Number(sec) || 0));
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return h > 0 ? `${h}:${pad(m)}:${pad(r)}` : `${pad(m)}:${pad(r)}`;
+  };
+  const TimeChip = ({ t }: { t: number }) => (
+    <button
+      onClick={() => seekTo(t)}
+      className="shrink-0 rounded bg-emerald-900/40 px-1.5 py-0.5 font-mono text-[11px] tabular-nums text-emerald-300 hover:bg-emerald-800/60 hover:text-emerald-100"
+      title="跳转到该时间点"
+    >
+      {fmtSec(t)}
+    </button>
+  );
+
+  if (generating) {
+    return (
+      <div className="flex flex-col items-center justify-center gap-3 py-16 text-center text-neutral-300">
+        <div className="text-3xl animate-pulse">✨</div>
+        <div className="text-sm">正在生成智能摘要…</div>
+        <div className="text-xs text-neutral-500">模型正在阅读全文并归纳，通常需要几十秒</div>
+      </div>
+    );
+  }
+
+  if (!summary) {
+    return (
+      <div className="flex flex-col items-center justify-center gap-3 py-16 text-center">
+        <div className="text-3xl">✨</div>
+        <div className="text-sm text-neutral-300">还没有智能摘要</div>
+        <div className="max-w-sm text-xs text-neutral-500">
+          用 chat 文本模型把整篇转写归纳成概要、章节、要点、待办与发言人小结，时间戳可点击跳转。
+        </div>
+        <button className="btn-primary mt-1" onClick={onGenerate} disabled={!model} title={model ? "" : "请先在设置中选择摘要模型"}>
+          生成摘要
+        </button>
+        {!model && <div className="text-xs text-amber-400">请先在「设置 · 智能摘要」中选择 chat 模型</div>}
+      </div>
+    );
+  }
+
+  const d = summary.data;
+  const Section = ({ title, children }: { title: string; children: ReactNode }) => (
+    <div className="space-y-1.5">
+      <div className="text-xs font-semibold uppercase tracking-wide text-neutral-500">{title}</div>
+      {children}
+    </div>
+  );
+
+  return (
+    <div className="space-y-5 pb-8">
+      <div className="flex items-center gap-2 text-xs text-neutral-500">
+        <span>模型 {summary.model}</span>
+        <span>·</span>
+        <span>{new Date(summary.at).toLocaleString()}</span>
+      </div>
+
+      {d.oneLine && (
+        <div className="rounded-lg border-l-4 border-emerald-500 bg-emerald-950/30 px-3 py-2 text-[15px] font-medium leading-snug text-emerald-100">
+          {d.oneLine}
+        </div>
+      )}
+
+      {d.overview && (
+        <Section title="全文概要">
+          <p className="whitespace-pre-wrap break-words text-[14px] leading-relaxed text-neutral-200">{d.overview}</p>
+        </Section>
+      )}
+
+      {d.chapters?.length > 0 && (
+        <Section title="章节速览">
+          <div className="space-y-2">
+            {d.chapters.map((c, i) => (
+              <div key={i} className="rounded-md bg-neutral-800/40 px-2.5 py-1.5">
+                <div className="mb-0.5 flex items-center gap-2">
+                  <TimeChip t={c.start} />
+                  <span className="min-w-0 flex-1 truncate text-[14px] font-medium text-neutral-100">{c.title}</span>
+                </div>
+                {c.summary && <p className="break-words text-[13px] leading-snug text-neutral-400">{c.summary}</p>}
+              </div>
+            ))}
+          </div>
+        </Section>
+      )}
+
+      {d.keyPoints?.length > 0 && (
+        <Section title="关键要点">
+          <ul className="space-y-1.5">
+            {d.keyPoints.map((k, i) => (
+              <li key={i} className="flex items-start gap-2">
+                <TimeChip t={k.time} />
+                <span className="min-w-0 flex-1 break-words text-[14px] leading-snug text-neutral-200">{k.text}</span>
+              </li>
+            ))}
+          </ul>
+        </Section>
+      )}
+
+      {d.actionItems?.length > 0 && (
+        <Section title="待办事项">
+          <ul className="space-y-1.5">
+            {d.actionItems.map((a, i) => (
+              <li key={i} className="flex items-start gap-2">
+                <span className="mt-0.5 select-none text-neutral-500">☐</span>
+                <span className="min-w-0 flex-1 break-words text-[14px] leading-snug text-neutral-200">
+                  {a.text}
+                  {a.owner && <span className="ml-1.5 rounded bg-sky-900/50 px-1.5 py-0.5 text-[11px] text-sky-300">@{a.owner}</span>}
+                </span>
+                {a.time > 0 && <TimeChip t={a.time} />}
+              </li>
+            ))}
+          </ul>
+        </Section>
+      )}
+
+      {d.speakers?.length > 0 && (
+        <Section title="发言人小结">
+          <div className="space-y-1.5">
+            {d.speakers.map((s, i) => (
+              <div key={i} className="rounded-md bg-neutral-800/40 px-2.5 py-1.5">
+                <div className="text-[13px] font-medium text-neutral-100">{s.name}</div>
+                {s.points && <p className="break-words text-[13px] leading-snug text-neutral-400">{s.points}</p>}
+              </div>
+            ))}
+          </div>
+        </Section>
+      )}
+    </div>
+  );
+}
+
+// 智能问答 / RAG panel — a conversation over the transcript. Each answer cites the
+// retrieved chunks; the [n] markers and citation chips click-to-seek (SECONDS).
+function QaPanel({ qa, chatModel, embedModel, input, setInput, asking, pending, onAsk, seekTo }: {
+  qa: QaState | null;
+  chatModel: string;
+  embedModel: string;
+  input: string;
+  setInput: (v: string) => void;
+  asking: boolean;
+  pending: string;
+  onAsk: () => void;
+  seekTo: (t: number) => void;
+}) {
+  const fmtSec = (sec: number) => {
+    const s = Math.max(0, Math.floor(Number(sec) || 0));
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return h > 0 ? `${h}:${pad(m)}:${pad(r)}` : `${pad(m)}:${pad(r)}`;
+  };
+  const history = qa?.history || [];
+  const ready = !!embedModel;
+
+  // Auto-scroll the conversation to the newest message when a question is sent
+  // (pending/asking) or an answer arrives (history grows).
+  const scrollBoxRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = scrollBoxRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [history.length, pending, asking]);
+
+  // Render an answer, turning inline [n] references into click-to-seek chips that
+  // jump to the n-th citation's timestamp.
+  const renderAnswer = (turn: QaTurn) => {
+    const parts = turn.a.split(/(\[\d+\])/g);
+    return parts.map((p, i) => {
+      const m = p.match(/^\[(\d+)\]$/);
+      if (m) {
+        const cite = turn.citations.find((c) => c.n === Number(m[1]));
+        if (cite) {
+          return (
+            <button
+              key={i}
+              onClick={() => seekTo(cite.time)}
+              className="mx-0.5 rounded bg-sky-900/50 px-1 py-0.5 align-baseline font-mono text-[11px] text-sky-300 hover:bg-sky-800/70 hover:text-sky-100"
+              title={`跳转到 ${fmtSec(cite.time)} · ${cite.speaker}`}
+            >
+              {p}
+            </button>
+          );
+        }
+      }
+      return <span key={i}>{p}</span>;
+    });
+  };
+
+  return (
+    <div className="flex h-full flex-col pb-2">
+      <div className="mb-2 flex items-center gap-2 text-xs text-neutral-500">
+        <span className="text-neutral-400">💬 基于本篇转写的检索增强问答（RAG）</span>
+        {qa?.indexedAt && <span className="rounded bg-neutral-800/60 px-1.5 py-0.5">已索引 {qa.chunkCount ?? 0} 段</span>}
+      </div>
+
+      <div ref={scrollBoxRef} className="flex-1 space-y-4 overflow-y-auto pr-1">
+        {history.length === 0 && !pending && (
+          <div className="flex flex-col items-center justify-center gap-3 py-12 text-center">
+            <div className="text-3xl">💬</div>
+            <div className="text-sm text-neutral-300">还没有提问</div>
+            <div className="max-w-sm text-xs text-neutral-500">
+              就本篇会议内容随便问，例如「有哪些待办？」「张三对预算怎么说的？」。
+              系统会检索最相关的片段作答，并给出可点击的引用时间戳。
+            </div>
+            {!ready && <div className="text-xs text-amber-400">请先在「设置 · 智能问答」中选择嵌入模型</div>}
+          </div>
+        )}
+        {history.map((turn, ti) => (
+          <div key={ti} className="space-y-2">
+            <div className="flex justify-end">
+              <div className="max-w-[85%] rounded-2xl rounded-br-sm bg-sky-600/80 px-3 py-1.5 text-[14px] leading-snug text-white">
+                {turn.q}
+              </div>
+            </div>
+            <div className="flex justify-start">
+              <div className="max-w-[92%] space-y-2 rounded-2xl rounded-bl-sm bg-neutral-800/60 px-3 py-2">
+                <p className="whitespace-pre-wrap break-words text-[14px] leading-relaxed text-neutral-100">
+                  {renderAnswer(turn)}
+                </p>
+                {turn.citations?.length > 0 && (
+                  <div className="space-y-1 border-t border-neutral-700/60 pt-1.5">
+                    <div className="text-[11px] font-semibold uppercase tracking-wide text-neutral-500">引用片段</div>
+                    {turn.citations.map((c) => (
+                      <button
+                        key={c.n}
+                        onClick={() => seekTo(c.time)}
+                        className="flex w-full items-start gap-1.5 rounded px-1 py-0.5 text-left hover:bg-neutral-700/40"
+                        title="跳转到该片段"
+                      >
+                        <span className="shrink-0 rounded bg-sky-900/50 px-1 font-mono text-[11px] text-sky-300">[{c.n}]</span>
+                        <span className="shrink-0 font-mono text-[11px] tabular-nums text-emerald-400">{fmtSec(c.time)}</span>
+                        <span className="shrink-0 text-[11px] text-neutral-400">{c.speaker}:</span>
+                        <span className="min-w-0 flex-1 truncate text-[12px] text-neutral-400">{c.text}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        ))}
+        {pending && (
+          <div className="space-y-2">
+            <div className="flex justify-end">
+              <div className="max-w-[85%] rounded-2xl rounded-br-sm bg-sky-600/80 px-3 py-1.5 text-[14px] leading-snug text-white">
+                {pending}
+              </div>
+            </div>
+            {asking && (
+              <div className="flex justify-start">
+                <div className="rounded-2xl rounded-bl-sm bg-neutral-800/60 px-3 py-2 text-sm text-neutral-400">
+                  <span className="animate-pulse">正在检索并作答…</span>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="mt-2 flex items-end gap-2 border-t border-neutral-800 pt-2">
+        <textarea
+          className="input min-h-[38px] flex-1 resize-none py-2"
+          rows={1}
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); onAsk(); } }}
+          placeholder={ready ? "就本篇内容提问，Enter 发送 / Shift+Enter 换行" : "请先在设置中选择嵌入模型"}
+          disabled={!ready || asking}
+        />
+        <button className="btn-primary shrink-0" onClick={onAsk} disabled={!ready || asking || !input.trim()}>
+          提问
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function MetaTabs({ rec, defaultTab = "info", onReload, clips, onOpen, onCreateClip }: { rec: RecordFull; defaultTab?: "spk" | "info" | "log" | "clip"; onReload?: () => void; clips?: RecordSummary[]; onOpen?: (id: string) => void; onCreateClip?: () => void }) {
   const [tab, setTab] = useState<"spk" | "info" | "log" | "clip">(defaultTab);
   const spkN = rec.result?.speakers?.length ?? 0;

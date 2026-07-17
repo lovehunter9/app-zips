@@ -44,11 +44,13 @@ const LIBRARY_DIR = path.join(DATA_DIR, "library");
 const CONFIG_PATH = path.join(DATA_DIR, "config.json");
 const BACKGROUND_PATH = path.join(DATA_DIR, "background.bin");
 const COVERS_DIR = path.join(DATA_DIR, "covers");
+const QAINDEX_DIR = path.join(DATA_DIR, "qaindex");
 const STATIC_DIR = path.join(__dirname, "web", "dist");
 
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 fs.mkdirSync(LIBRARY_DIR, { recursive: true });
 fs.mkdirSync(COVERS_DIR, { recursive: true });
+fs.mkdirSync(QAINDEX_DIR, { recursive: true });
 
 const app = express();
 app.disable("x-powered-by");
@@ -117,6 +119,12 @@ const DEFAULT_CONFIG = {
   // enhance-mode model is chosen, the clip is denoised BEFORE diar/STT/align. The
   // denoiser strips non-speech, so it hurts music-heavy clips (see UI hint).
   enhance: { enabled: false, model: "" },
+  // 智能摘要 (on-demand, per record). `model` is a chat-mode gateway model id
+  // (e.g. Qwen3-4B). No enabled flag — it's triggered by a button, not the pipeline.
+  summary: { model: "" },
+  // 智能问答 / RAG (on-demand, per record). `model` = chat model (falls back to
+  // summary.model when empty); `embedModel` = embedding-mode model (e.g. Qwen3-Embedding).
+  qa: { model: "", embedModel: "" },
   // Cosmetic background image (uploaded separately to /api/background). `enabled`
   // shows it behind the UI; `dim` (0..80) darkens it for text legibility; `mime`
   // is remembered so GET /api/background can serve it with the right type.
@@ -132,6 +140,8 @@ function loadConfig() {
       models: { ...DEFAULT_CONFIG.models, ...(raw.models || {}) },
       translate: { ...DEFAULT_CONFIG.translate, ...(raw.translate || {}) },
       enhance: { ...DEFAULT_CONFIG.enhance, ...(raw.enhance || {}) },
+      summary: { ...DEFAULT_CONFIG.summary, ...(raw.summary || {}) },
+      qa: { ...DEFAULT_CONFIG.qa, ...(raw.qa || {}) },
       background: { ...DEFAULT_CONFIG.background, ...(raw.background || {}) },
     };
   } catch {
@@ -560,6 +570,212 @@ async function gwAudioEnhance(cfg, wavPath, model, outPath) {
   return outPath;
 }
 
+// Text chat completion via the gateway's OpenAI /v1/chat/completions (mode=chat).
+// Backs 智能摘要. Returns the assistant message string with Qwen3 <think> blocks
+// stripped (we ask for /no_think but strip defensively so JSON parsing is clean).
+async function gwChat(cfg, model, messages, { temperature = 0.3, maxTokens = 3000, signal, req } = {}) {
+  const r = await fetch(gwUrl(cfg, "/v1/chat/completions"), {
+    method: "POST",
+    headers: { ...gwHeaders(cfg, { req }), "content-type": "application/json" },
+    body: JSON.stringify({ model, messages, temperature, max_tokens: maxTokens, stream: false }),
+    signal: signal ?? cfg._signal,
+  });
+  const t = await r.text();
+  let j;
+  try { j = JSON.parse(t); } catch { j = t; }
+  if (!r.ok) throw new Error(`chat ${r.status}: ${String(t).slice(0, 300)}`);
+  let content = j?.choices?.[0]?.message?.content ?? "";
+  if (Array.isArray(content)) content = content.map((c) => (c?.text || "")).join("");
+  return String(content).replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+}
+
+// Text embeddings via the gateway's OpenAI /v1/embeddings (mode=embedding). Backs
+// 智能问答 RAG. Returns one number[] vector per input (batched by the caller).
+async function gwEmbed(cfg, model, inputs, { req, signal } = {}) {
+  const r = await fetch(gwUrl(cfg, "/v1/embeddings"), {
+    method: "POST",
+    headers: { ...gwHeaders(cfg, { req }), "content-type": "application/json" },
+    body: JSON.stringify({ model, input: inputs }),
+    signal: signal ?? cfg._signal,
+  });
+  const t = await r.text();
+  let j;
+  try { j = JSON.parse(t); } catch { j = t; }
+  if (!r.ok) throw new Error(`embeddings ${r.status}: ${String(t).slice(0, 300)}`);
+  const data = j?.data || [];
+  return data.map((d) => d.embedding || d.vector || []);
+}
+
+// ---------------------------------------------------------------------------
+// 智能摘要 (Smart Summary) — prompt building + robust JSON extraction
+// ---------------------------------------------------------------------------
+function clockLabel(sec) {
+  const s = Math.max(0, Math.floor(Number(sec) || 0));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
+  const mm = String(h > 0 ? m : m).padStart(2, "0"), rr = String(r).padStart(2, "0");
+  return h > 0 ? `${h}:${mm}:${rr}` : `${mm}:${rr}`;
+}
+
+// Render the transcript as timestamped, speaker-labelled lines for the LLM.
+// Speaker names use the user's custom names when set. Very long transcripts are
+// truncated by a character budget (keeps head+tail) so we stay within context.
+function buildSummaryInput(rec) {
+  const result = rec.result || {};
+  const segs = Array.isArray(result.segments) ? result.segments : [];
+  const names = result.speakerNames || {};
+  const nameOf = (spk) => (names[spk] || spk || "说话人").toString();
+  const lines = segs.map((s) => `[${clockLabel(s.start)}] ${nameOf(s.speaker)}: ${(s.text || "").trim()}`);
+  let transcript = lines.join("\n");
+  const BUDGET = 24000; // ~ chars; keeps us within a ~32k-token context (4B model)
+  if (transcript.length > BUDGET) {
+    const head = transcript.slice(0, Math.floor(BUDGET * 0.7));
+    const tail = transcript.slice(-Math.floor(BUDGET * 0.25));
+    transcript = `${head}\n…（中间省略 ${transcript.length - head.length - tail.length} 字）…\n${tail}`;
+  }
+  const dur = segs.length ? Number(segs[segs.length - 1].end) || 0 : 0;
+  const speakers = Array.from(new Set(segs.map((s) => nameOf(s.speaker))));
+  return { transcript, dur, speakers };
+}
+
+function summaryMessages(rec) {
+  const { transcript, dur, speakers } = buildSummaryInput(rec);
+  // Schema is FIXED (all 6 sections the user picked). Times are SECONDS (float) into
+  // the audio so the UI can click-to-seek. The model must reply with ONLY the JSON.
+  const schema = `{
+  "oneLine": "一句话总结（不超过40字）",
+  "overview": "全文概要，2-4 句连贯文字",
+  "chapters": [{"title":"话题标题","start":<秒,数字>,"end":<秒,数字>,"summary":"本节小结一句话"}],
+  "keyPoints": [{"text":"关键要点","time":<秒,数字>}],
+  "actionItems": [{"text":"待办事项","owner":"负责人名或空字符串","time":<秒,数字>}],
+  "speakers": [{"name":"发言人名","points":"该发言人的观点/要点总结"}]
+}`;
+  const sys = [
+    "你是会议纪要助手。基于带时间戳的转写文本，生成结构化的智能摘要。",
+    "严格只输出一个 JSON 对象，不要任何解释、不要 markdown 代码块围栏、不要 <think>。",
+    "所有时间字段一律用“秒”为单位的数字（可带小数），取自行首 [时:分:秒] 标签换算的秒数，用于点击跳转。",
+    "语言与转写文本保持一致（中文转写→中文摘要）。若某板块无内容，用空数组或空字符串。",
+    "chapters 覆盖全程、不重叠；keyPoints/actionItems 精炼不重复；speakers 覆盖主要发言人。",
+    "/no_think",
+  ].join("\n");
+  const user = [
+    `会议时长约 ${clockLabel(dur)}（${Math.round(dur)} 秒）。发言人：${speakers.join("、") || "未知"}。`,
+    "请严格按如下 JSON 结构输出（字段名不可改）：",
+    schema,
+    "",
+    "转写文本（每行格式 [时:分:秒] 发言人: 内容）：",
+    transcript,
+  ].join("\n");
+  return [ { role: "system", content: sys }, { role: "user", content: user } ];
+}
+
+// Pull the first balanced {...} JSON object out of a model reply (tolerates stray
+// prose, ```json fences, and trailing text). Throws if none parses.
+function extractSummaryJson(raw) {
+  let s = String(raw || "").trim();
+  s = s.replace(/```(?:json)?/gi, "").trim();
+  const start = s.indexOf("{");
+  if (start < 0) throw new Error("模型未返回 JSON");
+  let depth = 0, inStr = false, esc = false;
+  for (let i = start; i < s.length; i++) {
+    const c = s[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === "\\") esc = true;
+      else if (c === '"') inStr = false;
+    } else if (c === '"') inStr = true;
+    else if (c === "{") depth++;
+    else if (c === "}") { depth--; if (depth === 0) { const cand = s.slice(start, i + 1); return JSON.parse(cand); } }
+  }
+  throw new Error("模型返回的 JSON 不完整");
+}
+
+// Normalise the parsed summary into the fixed shape the UI expects (defensive
+// against a model that omits/renames fields or returns strings where we want arrays).
+function normalizeSummary(d) {
+  const num = (x) => { const n = Number(x); return Number.isFinite(n) ? n : 0; };
+  const str = (x) => (x == null ? "" : String(x));
+  const arr = (x) => (Array.isArray(x) ? x : []);
+  return {
+    oneLine: str(d.oneLine),
+    overview: str(d.overview),
+    chapters: arr(d.chapters).map((c) => ({ title: str(c.title), start: num(c.start), end: num(c.end), summary: str(c.summary) })),
+    keyPoints: arr(d.keyPoints).map((k) => ({ text: str(k.text), time: num(k.time) })),
+    actionItems: arr(d.actionItems).map((a) => ({ text: str(a.text), owner: str(a.owner), time: num(a.time) })),
+    speakers: arr(d.speakers).map((s) => ({ name: str(s.name), points: str(s.points) })),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 智能问答 / RAG — chunking, cosine retrieval, prompt building, index persistence
+// ---------------------------------------------------------------------------
+
+// Merge adjacent same-speaker segments into retrieval chunks (~maxChars each),
+// keeping each chunk's start/end/speaker so citations can click-to-seek.
+function buildQaChunks(rec, maxChars = 500) {
+  const result = rec.result || {};
+  const segs = Array.isArray(result.segments) ? result.segments : [];
+  const names = result.speakerNames || {};
+  const nameOf = (spk) => (names[spk] || spk || "说话人").toString();
+  const chunks = [];
+  let cur = null;
+  for (const s of segs) {
+    const spk = nameOf(s.speaker);
+    const txt = (s.text || "").trim();
+    if (!txt) continue;
+    if (cur && cur.speaker === spk && cur.text.length + txt.length <= maxChars) {
+      cur.text += (/[\u4e00-\u9fff]$/.test(cur.text) ? "" : " ") + txt;
+      cur.end = Number(s.end) || cur.end;
+    } else {
+      if (cur) chunks.push(cur);
+      cur = { text: txt, start: Number(s.start) || 0, end: Number(s.end) || 0, speaker: spk };
+    }
+    if (cur && cur.text.length >= maxChars) { chunks.push(cur); cur = null; }
+  }
+  if (cur) chunks.push(cur);
+  return chunks;
+}
+
+function cosine(a, b) {
+  let dot = 0, na = 0, nb = 0;
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
+  if (!na || !nb) return 0;
+  return dot / (Math.sqrt(na) * Math.sqrt(nb));
+}
+
+function qaIndexPath(id) { return path.join(QAINDEX_DIR, `${id}.json`); }
+function readQaIndex(id) { try { return JSON.parse(fs.readFileSync(qaIndexPath(id), "utf8")); } catch { return null; } }
+function writeQaIndex(id, idx) { fs.writeFileSync(qaIndexPath(id), JSON.stringify(idx)); }
+
+// Embed all chunks (batched) and persist the vector index next to the record.
+async function buildQaIndex(cfg, rec, embedModel, req) {
+  const chunks = buildQaChunks(rec);
+  if (!chunks.length) throw new Error("无可索引的转写内容");
+  const vecs = [];
+  const B = 32;
+  for (let i = 0; i < chunks.length; i += B) {
+    const batch = chunks.slice(i, i + B).map((c) => c.text);
+    const vs = await gwEmbed(cfg, embedModel, batch, { req });
+    vecs.push(...vs);
+  }
+  const dim = vecs[0]?.length || 0;
+  const idx = { embedModel, dim, at: nowIso(), chunks: chunks.map((c, i) => ({ ...c, vec: vecs[i] || [] })) };
+  writeQaIndex(rec.id, idx);
+  return idx;
+}
+
+function qaMessages(question, ctx) {
+  const sys = [
+    "你是会议问答助手。只依据下面给出的『会议片段』回答用户问题，不要编造。",
+    "每条关键结论后用方括号标注引用的片段号，如 [1]、[2]（可多个）。",
+    "若片段中找不到答案，明确说明「根据记录未提及」，不要臆测。",
+    "用与记录一致的语言（中文记录→中文作答），简洁清晰。",
+    "/no_think",
+  ].join("\n");
+  const user = `会议片段：\n${ctx}\n\n问题：${question}\n\n请依据片段作答，并用 [片段号] 标注引用来源。`;
+  return [{ role: "system", content: sys }, { role: "user", content: user }];
+}
+
 // ---------------------------------------------------------------------------
 // GET /api/models — discover gateway models grouped by mode + readiness
 // ---------------------------------------------------------------------------
@@ -631,6 +847,13 @@ app.put("/api/config", (req, res) => {
     enhance: {
       enabled: Boolean(b.enhance?.enabled ?? cur.enhance?.enabled ?? false),
       model: (b.enhance?.model ?? cur.enhance?.model ?? "").toString(),
+    },
+    summary: {
+      model: (b.summary?.model ?? cur.summary?.model ?? "").toString(),
+    },
+    qa: {
+      model: (b.qa?.model ?? cur.qa?.model ?? "").toString(),
+      embedModel: (b.qa?.embedModel ?? cur.qa?.embedModel ?? "").toString(),
     },
     background: {
       enabled: Boolean(b.background?.enabled ?? cur.background?.enabled ?? false),
@@ -784,6 +1007,118 @@ app.get("/api/records/:id", (req, res) => {
   if (!rec) return res.status(404).json({ error: "not found" });
   // Expose the same cover flags the summary carries so the detail view knows a
   // cover exists (raw record only has the internal `cover` object).
+  res.json({ ...rec, hasCover: !!rec.cover, coverVer: rec.cover?.at || "" });
+});
+
+// POST /api/records/:id/summary — generate 智能摘要 from the transcript using a
+// chat-mode gateway model. Synchronous (4B is fast); result persisted on the record.
+app.post("/api/records/:id/summary", async (req, res) => {
+  const cfg = loadConfig();
+  const rec = readRecord(req.params.id);
+  if (!rec) return res.status(404).json({ error: "not found" });
+  if (rec.status !== "done" || !rec.result?.segments?.length) {
+    return res.status(400).json({ error: "记录尚未完成转写，无法生成摘要" });
+  }
+  const model = (req.body?.model || cfg.summary?.model || "").toString();
+  if (!model) return res.status(400).json({ error: "未选择智能摘要模型（请在设置中选择 chat 模型）" });
+  if (!cfg.base) return res.status(400).json({ error: "尚未配置网关地址" });
+  try {
+    const raw = await gwChat(cfg, model, summaryMessages(rec), { req, maxTokens: 4000 });
+    const data = normalizeSummary(extractSummaryJson(raw));
+    rec.summary = { data, model, at: nowIso() };
+    writeRecord(rec);
+    res.json({ ...rec, hasCover: !!rec.cover, coverVer: rec.cover?.at || "" });
+  } catch (e) {
+    res.status(502).json({ error: String(e.message || e) });
+  }
+});
+
+// DELETE /api/records/:id/summary — clear a generated summary.
+app.delete("/api/records/:id/summary", (req, res) => {
+  const rec = readRecord(req.params.id);
+  if (!rec) return res.status(404).json({ error: "not found" });
+  delete rec.summary;
+  writeRecord(rec);
+  res.json({ ...rec, hasCover: !!rec.cover, coverVer: rec.cover?.at || "" });
+});
+
+// POST /api/records/:id/qa/index — (re)build the RAG vector index for a record
+// using the configured embedding model. Idempotent; overwrites any prior index.
+app.post("/api/records/:id/qa/index", async (req, res) => {
+  const cfg = loadConfig();
+  const rec = readRecord(req.params.id);
+  if (!rec) return res.status(404).json({ error: "not found" });
+  if (rec.status !== "done" || !rec.result?.segments?.length) {
+    return res.status(400).json({ error: "记录尚未完成转写，无法建立问答索引" });
+  }
+  const embedModel = (req.body?.embedModel || cfg.qa?.embedModel || "").toString();
+  if (!embedModel) return res.status(400).json({ error: "未选择嵌入模型（请在设置中选择 embedding 模型）" });
+  if (!cfg.base) return res.status(400).json({ error: "尚未配置网关地址" });
+  try {
+    const idx = await buildQaIndex(cfg, rec, embedModel, req);
+    rec.qa = { ...(rec.qa || {}), indexedAt: idx.at, embedModel, chunkCount: idx.chunks.length, dim: idx.dim };
+    if (!Array.isArray(rec.qa.history)) rec.qa.history = [];
+    writeRecord(rec);
+    res.json({ ...rec, hasCover: !!rec.cover, coverVer: rec.cover?.at || "" });
+  } catch (e) {
+    res.status(502).json({ error: String(e.message || e) });
+  }
+});
+
+// POST /api/records/:id/qa — ask a question. Retrieves top-k chunks by cosine
+// similarity, grounds a chat model on them, returns the answer + clickable citations.
+// Auto-(re)builds the index when missing or built with a different embed model.
+app.post("/api/records/:id/qa", async (req, res) => {
+  const cfg = loadConfig();
+  const rec = readRecord(req.params.id);
+  if (!rec) return res.status(404).json({ error: "not found" });
+  if (rec.status !== "done" || !rec.result?.segments?.length) {
+    return res.status(400).json({ error: "记录尚未完成转写，无法问答" });
+  }
+  const question = (req.body?.question || "").toString().trim();
+  if (!question) return res.status(400).json({ error: "问题为空" });
+  const chatModel = (req.body?.model || cfg.qa?.model || cfg.summary?.model || "").toString();
+  const embedModel = (req.body?.embedModel || cfg.qa?.embedModel || "").toString();
+  if (!chatModel) return res.status(400).json({ error: "未选择问答对话模型（请在设置中选择 chat 模型）" });
+  if (!embedModel) return res.status(400).json({ error: "未选择嵌入模型（请在设置中选择 embedding 模型）" });
+  if (!cfg.base) return res.status(400).json({ error: "尚未配置网关地址" });
+  try {
+    let idx = readQaIndex(rec.id);
+    if (!idx || idx.embedModel !== embedModel || !idx.chunks?.length) {
+      idx = await buildQaIndex(cfg, rec, embedModel, req);
+      rec.qa = { ...(rec.qa || {}), indexedAt: idx.at, embedModel, chunkCount: idx.chunks.length, dim: idx.dim };
+    }
+    const [qv] = await gwEmbed(cfg, embedModel, [question], { req });
+    if (!qv?.length) throw new Error("嵌入模型未返回向量");
+    const scored = idx.chunks
+      .map((c, i) => ({ i, c, s: cosine(qv, c.vec) }))
+      .sort((a, b) => b.s - a.s)
+      .slice(0, Math.min(6, idx.chunks.length));
+    const ctx = scored.map((t, n) => `[${n + 1}] (${clockLabel(t.c.start)}) ${t.c.speaker}: ${t.c.text}`).join("\n");
+    const answer = await gwChat(cfg, chatModel, qaMessages(question, ctx), { req, maxTokens: 1500 });
+    const citations = scored.map((t, n) => ({
+      n: n + 1, time: t.c.start, end: t.c.end, speaker: t.c.speaker,
+      text: t.c.text.slice(0, 160), score: Number(t.s.toFixed(3)),
+    }));
+    const turn = { q: question, a: answer, model: chatModel, citations, at: nowIso() };
+    rec.qa = rec.qa || {};
+    if (!Array.isArray(rec.qa.history)) rec.qa.history = [];
+    rec.qa.history.push(turn);
+    if (rec.qa.history.length > 50) rec.qa.history = rec.qa.history.slice(-50);
+    writeRecord(rec);
+    res.json({ turn, qa: rec.qa });
+  } catch (e) {
+    res.status(502).json({ error: String(e.message || e) });
+  }
+});
+
+// DELETE /api/records/:id/qa — clear the Q&A index + conversation history.
+app.delete("/api/records/:id/qa", (req, res) => {
+  const rec = readRecord(req.params.id);
+  if (!rec) return res.status(404).json({ error: "not found" });
+  fs.rm(qaIndexPath(rec.id), { force: true }, () => {});
+  delete rec.qa;
+  writeRecord(rec);
   res.json({ ...rec, hasCover: !!rec.cover, coverVer: rec.cover?.at || "" });
 });
 
