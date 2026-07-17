@@ -7,9 +7,22 @@ openresty sidecar. RULE 0/1/2 are identical to audiolabxv3 — see
 `.cursor/skills/audiolabxv3-instances/SKILL.md` (clone form = title + exactly 4 env; never
 pass any other env).
 
-## Current image / code (2026-07-16)
+## Current image / code (2026-07-17)
 
-- llm-init image: `docker.io/lovehunter9/llm-init:v1.3.2-test2` (linux/amd64).
+- llm-init image: `docker.io/lovehunter9/llm-init:v1.3.2-test3` (linux/amd64,
+  manifest `sha256:80bb109783cf3baaf7be2cf166e342ae857bd0ed21df311773a67fa29a2b8ef6`).
+  - **NEW in test3 — audio-aware endpoint catalog (`controlplane/endpoints.go`).** The
+    dashboard "支持的端点 / API 格式" panel used to list the generic LLM surface
+    (`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/responses`,
+    OpenAI+Anthropic) for EVERY audio instance — wrong (audio-proxy never serves those).
+    Now `ENGINE_KIND=audio` emits a per-`MODEL_MODE` **`data-plane-audio`** category and
+    drops the LLM rows; dashboard.js gained an `Audio` format bucket (`data-plane-audio`).
+    Mapping: stt→`/v1/audio/transcriptions`+`/translations`; stt_stream→WS `/v1/audio/stream`;
+    diar→`/v1/audio/diarization`; diar_stream→WS `/v1/audio/diarize/stream`;
+    vad→`/v1/audio/vad`; translate→`/v1/translate`; embed→`/v1/audio/embeddings`;
+    enhance→`/v1/audio/enhance`; align→`/v1/audio/align`(+`/v1/align`); tts→`/v1/audio/speech`;
+    all modes always keep GET `/v1/models`. Data plane / proxy behaviour UNCHANGED.
+- llm-init image (prev): `docker.io/lovehunter9/llm-init:v1.3.2-test2` (linux/amd64).
 - Branch `feat/stt-relative`:
   - `cb2c97e` feat: ENGINE_KIND=audio proxy adapter (synthesizes `/v1/models` at the edge,
     health probes `/healthz`→`/health`, ResponseHeaderTimeout 3600s for long transcriptions,
@@ -86,6 +99,55 @@ NEW m2m100 instance (the commercial default translate):
 Adapter auto-detects `m2m100` from MODEL_NAME → transformers/sentencepiece path (pip-installed
 on first load). NLLB instance `53f4c2` uses the byte-identical `nllb` adapter. Verification of
 m2m100 `/v1/translate` pending (engine still downloading model at handoff).
+
+## RULE-1 rebuild for test3 (audio endpoint catalog) — SHIPPED 2026-07-17
+
+Bumped chart image test2→test3, repackaged `audiolabx2v3-1.0.0.tgz`, ran the full cycle
+(uninstall 11 → `market delete` → `market upload` → re-clone 11). **All 11 hashes reproduced
+EXACTLY → public URLs UNCHANGED, no provider re-pointing:** 0263ef / 93e848 / b0c2ed / 9c4797
+/ 818606 / dd1ed9 / 53f4c2 / cdcb44 / 0e4d03 / c84c8e / 54d617. All 11 `running` within ~1min
+(models + engine images already cached). Clone form = title + 4 env only (RULE-2 intact).
+
+**Verified the fix on the 3 instances with known public URLs** (`GET /api/endpoints`, no auth):
+- STT Stream `b0c2ed` (`2b852a1f`): `engine_kind=audio`, audio rows = WS `/v1/audio/stream` +
+  GET `/v1/models`; **no data-plane-openai / anthropic rows**. Correct.
+- Diar Stream `9c4797` (`8121ae10`): WS `/v1/audio/diarize/stream` + `/v1/models`; no LLM leak.
+- Enhance `0e4d03` (`46c47e67`): POST `/v1/audio/enhance` + `/v1/models`; no LLM leak.
+
+Other 8 instances' per-mode rows are covered by `TestEndpoints_AudioModeRoutes`
+(stt_stream/diar_stream/vad/diar/translate/embed/enhance/align) in llm-init.
+
+## RULE-1 rebuild for engine "安装中→暂停" fix — SHIPPED 2026-07-17 (evening)
+
+Root cause: `engine.yaml` had a blocking `wait-models` initContainer + a readinessProbe, so
+the engine Pod stayed `Init:0/1` for the WHOLE model download → app never `running` → progress
+page unreachable → market install watcher timed out to 暂停. Fix (mirrors llamacpp): moved the
+sentinel wait INTO the engine container command (`$waitSentinel`, reads
+`/run/llm-init/model_download_finish`), dropped the initContainer AND the readinessProbe, mounted
+`run-state` (ro) in the main container. Pod is Ready instantly → app `running` in seconds while the
+model downloads; engine-not-ready still 503-gated by llm-init's NotReadyGuard.
+
+**RULE-1 executed correctly this time** (chart source = `upload`, so `clone` needs `-s upload`;
+`uninstall` is ASYNC — must wait for all rows to disappear before `market delete`). Full cycle:
+uninstall 11 → wait → `market delete` → `market upload audiolabx2v3-1.0.0.tgz` → re-clone 11 `-s upload`
++ 1 NEW validation model. **All 11 original hashes reproduced EXACTLY → public URLs UNCHANGED, no
+provider re-pointing:** 0263ef / 93e848 / b0c2ed / 9c4797 / 818606 / dd1ed9 / 53f4c2 / cdcb44 /
+0e4d03 / c84c8e / 54d617.
+
+NEW validation instance (a model we'd never used, so its weights actually download):
+
+| Cap | Title | App name / NS | MODEL_SOURCE | MODEL_NAME | MODE | GPU | Public URL |
+|---|---|---|---|---|---|---|---|
+| STT Whisper (OpenAI/vLLM) | AudioX2 STT WhisperOpenAI | `audiolabx2v3f90455` | `hf://openai/whisper-large-v3` | `openai/whisper-large-v3` | stt | 8Gi | ask user |
+
+**Fix VERIFIED:** `f90455` reached `state=running` within ~1min while the ~3GB model was still
+downloading (engine image cached from Qwen3-ASR's vLLM). i.e. app is `running` + llm-init progress
+page reachable DURING download — the exact behaviour that used to hang 安装中→暂停. All 12 `running`.
+
+> **`olares-cli market clone` gotcha:** default source is `market.olares`; our chart lives in
+> `upload`, so clone MUST pass `-s upload` or it fails `app '<x>' not found in source 'market.olares'`.
+> `market uninstall` is async ("uninstall requested"); poll `market list --mine` until the rows are
+> gone before `market delete`, else delete fails "still installing/running".
 
 ## WS test recipe (no gateway, no auth on these entrances)
 

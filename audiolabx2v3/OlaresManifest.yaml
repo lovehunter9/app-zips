@@ -111,7 +111,7 @@ spec:
 
   upgradeDescription: |
     v1.0.0: initial audio-proxy base (fork of audiolabxv3). llm-init runs
-    ENGINE_KIND=audio (image lovehunter9/llm-init:v1.3.2-test1): it downloads the
+    ENGINE_KIND=audio (image lovehunter9/llm-init:v1.3.2-test3): it downloads the
     model AND reverse-proxies the engine's OpenAI /v1/* directly, so the nginx/
     openresty ingress is removed and the entrance points at download-svc:8090. The
     engine gates on the llm-init download sentinel instead of /readyz. Model/mode

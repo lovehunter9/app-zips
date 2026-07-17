@@ -6,7 +6,7 @@
 # kompose scaffold; the runtime shape is the Helm templates.
 services:
   llm-init:
-    image: docker.io/lovehunter9/llm-init:v1.3.2-test1
+    image: docker.io/lovehunter9/llm-init:v1.3.2-test3
     ports:
       - "8090:8090"
     environment:

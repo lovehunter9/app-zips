@@ -196,6 +196,18 @@
        fastapi/uvicorn set). Healthy images (cu129/pyannote/nemo) keep the venv exactly as
        before. This also REPAIRS an already-broken /pydeps/venv on restart (ensurepip). */ -}}
 {{- $pydepsPrelude := "mkdir -p /pydeps; VENV=/pydeps/venv; if [ ! -x $VENV/bin/python ]; then echo '[pydeps] creating persistent venv (first run)'; python3 -m venv --system-site-packages $VENV || echo '[pydeps] WARN: venv unavailable, using ephemeral system installs'; fi; if [ -x $VENV/bin/python ]; then $VENV/bin/python -m pip --version >/dev/null 2>&1 || { echo '[pydeps] venv has no pip; bootstrapping via ensurepip'; $VENV/bin/python -m ensurepip --upgrade >/dev/null 2>&1 || true; }; if $VENV/bin/python -m pip --version >/dev/null 2>&1; then export PATH=$VENV/bin:$PATH; export PYTHONPATH=$(ls -d $VENV/lib/python*/site-packages 2>/dev/null | head -n1):${PYTHONPATH:-}; else echo '[pydeps] venv pip unavailable (ensurepip missing in image); using system python'; fi; fi;" -}}
+{{- /* WAIT-FOR-MODEL, moved from a blocking initContainer INTO the engine container
+       (mirrors llamacppllmbasev3's llamacpp.sh). Why: an initContainer keeps the
+       engine pod in Init:0/1 for the WHOLE download, so the pod never turns Ready →
+       the app never reaches "running" → the entrance (llm-init's progress dashboard)
+       is unreachable and the market install times out to "暂停". By waiting inside the
+       main container instead — and dropping the readinessProbe (llamacpp has none) —
+       the pod is Ready the instant it starts, so the app is "running" in seconds and
+       users can watch the download progress on the llm-init dashboard, exactly like
+       llamacpp. The engine process only execs after the sentinel appears; llm-init
+       still gates /v1/* with its own NotReadyGuard (503) until the engine is alive.
+       No double quotes (kept inline-JSON-safe like $pydepsPrelude; path has no spaces). */ -}}
+{{- $waitSentinel := "SENTINEL=/run/llm-init/model_download_finish; echo '[wait] waiting for llm-init model-download sentinel' $SENTINEL; until [ -f $SENTINEL ]; do echo '[wait] model not downloaded yet...'; sleep 10; done; echo '[wait] model downloaded; starting engine.';" -}}
 {{- $engineArgs := $oe.ENGINE_ARGS | default "" -}}
 {{- $hfEndpoint := $oe.HF_ENDPOINT | default "" -}}
 {{- $hfToken := $oe.HF_TOKEN | default "" -}}
@@ -299,30 +311,10 @@ spec:
         - name: wrappers
           configMap:
             name: audio-wrappers
-      initContainers:
-        # Block until llm-init has finished downloading the model. In audio-proxy
-        # mode llm-init /readyz depends on THIS engine being alive, so polling it
-        # would deadlock (engine waits for llm-init, llm-init waits for engine).
-        # Instead we wait for the download-complete sentinel llm-init writes to the
-        # shared run-state hostPath (RUN_DIR/model_download_finish) — which fires
-        # right after the download, before llm-init probes the engine.
-        - name: wait-models
-          image: docker.io/beclab/aboveos-busybox:1.37.0
-          command:
-            - /bin/sh
-            - -c
-            - |
-              SENTINEL="/run/llm-init/model_download_finish"
-              echo "[wait] waiting for llm-init download sentinel ($SENTINEL)..."
-              until [ -f "$SENTINEL" ]; do
-                echo "[wait] model not downloaded yet..."
-                sleep 10
-              done
-              echo "[wait] model downloaded; starting engine."
-          volumeMounts:
-            - name: run-state
-              mountPath: /run/llm-init
-              readOnly: true
+      # NOTE: no wait-models initContainer. The download-sentinel wait now runs INSIDE
+      # the engine container ($waitSentinel, prepended to the command) so the pod turns
+      # Ready immediately and the app reaches "running" while the model downloads —
+      # letting users watch progress on the llm-init dashboard (mirrors llamacpp).
       containers:
         # Name embeds capability+model so the Containers panel shows both at a glance
         # (e.g. audio-stt-openai-whisper-large-v3). exec uses: -c {{ $cname }}.
@@ -331,8 +323,9 @@ spec:
           imagePullPolicy: IfNotPresent
 {{- if $engineCmd }}
           # Capability reuses this image but runs an injected wrapper instead of the
-          # image's native entrypoint (see templates/wrappers.yaml).
-          command: ["/bin/sh", "-c", "{{ $pydepsPrelude }} {{ $engineCmd }}"]
+          # image's native entrypoint (see templates/wrappers.yaml). $waitSentinel first
+          # blocks (inside this container) until llm-init finishes the model download.
+          command: ["/bin/sh", "-c", "{{ $waitSentinel }} {{ $pydepsPrelude }} {{ $engineCmd }}"]
 {{- end }}
 {{- if $engineArgs }}
           args:
@@ -398,14 +391,11 @@ spec:
           ports:
             - name: http
               containerPort: {{ $enginePort }}
-          readinessProbe:
-            httpGet:
-              path: "{{ $healthPath }}"
-              port: {{ $enginePort }}
-            initialDelaySeconds: 10
-            periodSeconds: 10
-            timeoutSeconds: 5
-            failureThreshold: 6
+          # NO readinessProbe (mirrors llamacpp): the pod must count as Ready as soon
+          # as the container starts so the app reaches "running" while the model
+          # downloads. Engine-not-ready is handled upstream by llm-init's NotReadyGuard
+          # (503 on /v1/* until the engine is alive), so a probe here would only re-
+          # introduce the "app stuck 安装中 → 暂停 during download" bug.
           volumeMounts:
             - name: hf-cache
               mountPath: /cache/hf/hub
@@ -413,6 +403,10 @@ spec:
               mountPath: /tmp
             - name: pydeps
               mountPath: /pydeps
+            # Read-only: $waitSentinel polls the llm-init download-complete sentinel here.
+            - name: run-state
+              mountPath: /run/llm-init
+              readOnly: true
             - name: wrappers
               mountPath: /wrappers
               readOnly: true
