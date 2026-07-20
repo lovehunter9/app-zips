@@ -149,6 +149,45 @@ page reachable DURING download — the exact behaviour that used to hang 安装�
 > `market uninstall` is async ("uninstall requested"); poll `market list --mine` until the rows are
 > gone before `market delete`, else delete fails "still installing/running".
 
+## RULE-1 rebuild for BATCH translate wrapper — SHIPPED 2026-07-17 (night)
+
+`translate.py` (`wrappers.yaml`) now accepts `text: Union[str, List[str]]`: a list is split
+into sentences, translated in ONE `ctranslate2 translate_batch`, regrouped → `translations:
+list[str]`; a bare string still returns `translation: str` (back-compat). audiominutes' new
+"批量处理" toggle drives batch calls. Repackaged `audiolabx2v3-1.0.0.tgz` (batch wrapper;
+all embedded wrappers `py_compile` OK). Full cycle: uninstall 12 → wait (all gone) →
+`market delete` → `market upload` → re-clone 12 (`-s upload`, title + 4 env). **All 12 hashes
+reproduced EXACTLY → public URLs UNCHANGED, no provider re-pointing:** 0263ef / 93e848 /
+b0c2ed / 9c4797 / 818606 / dd1ed9 / 53f4c2 / cdcb44 / 0e4d03 / c84c8e / 54d617 / 8e1b2f.
+All 12 `running` within ~1min (models + engine images cached).
+
+Batch wrapper VERIFIED live on translate `53f4c2` (NLLB-600M): engine log shows
+`/wrappers/translate.py:183: DeprecationWarning` (line 183 only exists in the 263-line batch
+version; old wrapper was 139 lines) + `translate ready: adapter=nllb ... on cpu` + `/healthz` 200.
+Live HTTP batch e2e is user-side (needs public URL, RULE 0) via the demo's 批量处理 toggle.
+
+Instance-ledger delta: the old validation clone `f90455` (whisper-large-v3) is gone; a NEW
+third translate instance is now permanent:
+
+| Cap | Title | App name | MODEL_SOURCE | MODEL_NAME | MODE | GPU |
+|---|---|---|---|---|---|---|
+| Translate NLLB-1.3B | AudioX2 Translate NLLB13B | `audiolabx2v38e1b2f` | `hf://entai2965/nllb-200-distilled-1.3B-ctranslate2` | `nllb-200-distilled-1.3B` | translate | 0 |
+
+## RULE-1 rebuild for BATCH align + STT wrappers — SHIPPED 2026-07-17 (late night)
+
+Extended batching from translate to align + STT (audiominutes 批量处理 3-commit set).
+Wrappers now accept the SAME "已分好段" batch shape the gateway forwards verbatim (only
+reads `model`), so NO gateway/llm-init change:
+- `align.py`: repeated `files`+`texts` (per-item `languages`) → `results:[{units},...]`;
+  single `file`+`text` still returns `units` (back-compat).
+- `stt_fw.py` (faster-whisper only): repeated `files` → `texts:[...]`; single `file` keeps
+  the OpenAI contract. vLLM-served STT (whisper/qwen3-asr) has no batch → client falls back.
+Repackaged `audiolabx2v3-1.0.0.tgz`; full RULE-1 cycle (uninstall 12 → wait → delete → upload
+→ re-clone 12, `-s upload`, title+4env). **All 12 hashes reproduced EXACTLY → URLs unchanged:**
+0263ef / 93e848 / b0c2ed / 9c4797 / 818606 / dd1ed9 / 53f4c2 / cdcb44 / 0e4d03 / c84c8e /
+54d617 / 8e1b2f. All 12 `running`. Batch engages on the 分段转写 path (runWindows) when
+批量处理 is on: batch STT hits faster-whisper `0263ef`, batch align hits `c84c8e`.
+
 ## WS test recipe (no gateway, no auth on these entrances)
 
 `/tmp/wsx` venv (`websockets soundfile numpy`); client `/tmp/ws_test.py` (MUST pass
