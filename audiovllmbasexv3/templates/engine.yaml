@@ -38,7 +38,7 @@
 {{- if $hasSttStream -}}
 {{- $primaryCap = "stt_stream" -}}
 {{- $healthPath = "/healthz" -}}
-{{- $engineCmd = "export HF_HUB_OFFLINE=1; export PYTHONUNBUFFERED=1; [ -f /pydeps/.stt_stream.ok ] || { echo '[stream] first-run: installing qwen-asr + audio/ws deps into /pydeps (reusing image vLLM, NO [vllm] extra)'; python3 -m pip install -q --root-user-action=ignore --ignore-installed blinker || true; python3 -m pip install --root-user-action=ignore qwen-asr soundfile librosa av websockets && touch /pydeps/.stt_stream.ok; }; echo '[stream] launching stream.py'; exec $(command -v python3 || command -v python) /wrappers/stream.py" -}}
+{{- $engineCmd = "export HF_HUB_OFFLINE=1; export PYTHONUNBUFFERED=1; [ -f /pydeps/.stt_stream_dual.ok ] || { echo '[stream] first-run: installing qwen-asr + audio/ws deps into /pydeps (reusing image vLLM, NO [vllm] extra)'; python3 -m pip install -q --root-user-action=ignore --ignore-installed blinker || true; python3 -m pip install --root-user-action=ignore qwen-asr soundfile librosa av websockets python-multipart && touch /pydeps/.stt_stream_dual.ok; }; echo '[stream] launching stream.py'; exec $(command -v python3 || command -v python) /wrappers/stream.py" -}}
 {{- else if $hasStt -}}
 {{- $primaryCap = "stt" -}}
 {{- $healthPath = "/health" -}}

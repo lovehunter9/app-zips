@@ -1244,7 +1244,8 @@ data:
     # the gateway model registry. NOTE: Qwen streaming returns NO timestamps (by design), so
     # this mode is a rolling-caption surface, not a timeline one.
     import os, sys, json, asyncio, logging, subprocess
-    from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+    from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, File, UploadFile, Form
+    from fastapi.responses import Response
     import uvicorn
 
     LOG_LEVEL = os.environ.get("LOG_LEVEL", "info").lower()
@@ -1342,6 +1343,58 @@ data:
     def models():
         return {"object": "list",
                 "data": [{"id": MODEL_NAME, "object": "model", "mode": "stt_stream"}]}
+
+    # ---- Offline STT (mode=stt) on the SAME loaded model ----------------------
+    # When MODEL_SUPPORTS includes BOTH stt and stt_stream, this ONE instance also
+    # serves offline /v1/audio/transcriptions, reusing the streaming primitives over
+    # the whole clip. The qwen model is loaded ONCE (no double GPU footprint) — that
+    # is the whole point of the single-instance dual-capability dispatcher.
+    def _decode_to_16k_mono(raw, filename):
+        import numpy as np, tempfile
+        import librosa
+        suffix = os.path.splitext(filename or "")[1] or ".wav"
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tf:
+            tf.write(raw)
+            path = tf.name
+        try:
+            y, _sr = librosa.load(path, sr=16000, mono=True)
+        finally:
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+        return y.astype("float32")
+
+    async def _offline_transcribe(audio):
+        asr = _state["asr"]
+        st = asr.init_streaming_state(
+            unfixed_chunk_num=UNFIXED_CHUNK_NUM,
+            unfixed_token_num=UNFIXED_TOKEN_NUM,
+            chunk_size_sec=CHUNK_SIZE_SEC,
+        )
+        step = max(1, int(CHUNK_SIZE_SEC * 16000))
+        async with _infer_lock:
+            i, n = 0, int(audio.shape[0])
+            while i < n:
+                cur = audio[i:i + step]
+                i += step
+                await asyncio.to_thread(asr.streaming_transcribe, cur, st)
+            await asyncio.to_thread(asr.finish_streaming_transcribe, st)
+        return getattr(st, "text", "") or ""
+
+    @app.post("/v1/audio/transcriptions")
+    async def transcriptions(file: UploadFile = File(...),
+                             model: str = Form(None),
+                             language: str = Form(None),
+                             response_format: str = Form("json")):
+        if not _state["ready"]:
+            raise HTTPException(status_code=503, detail=_state["error"] or "model not ready")
+        raw = await file.read()
+        audio = await asyncio.to_thread(_decode_to_16k_mono, raw, file.filename)
+        text = await _offline_transcribe(audio)
+        if response_format in ("text", "srt", "vtt"):
+            return Response(content=text, media_type="text/plain")
+        return {"text": text}
 
     def _pcm16_to_f32(buf):
         import numpy as np
