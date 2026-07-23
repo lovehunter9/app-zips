@@ -1045,13 +1045,66 @@ data:
     # (same family as vad/diar/embed/enhance), so /v1/audio/align is the path
     # the LLM Gateway hits.
     @app.post("/v1/audio/align")
-    async def align(file: UploadFile = File(...), text: str = Form(...),
-                    language: str = Form(default=None)):
+    async def align(file: UploadFile = File(...), text: str = Form(default=None),
+                    language: str = Form(default=None), segments: str = Form(default=None)):
         if not _state["ready"]:
             raise HTTPException(status_code=503, detail=_state["error"] or "model not ready")
+        data = await file.read()
+        # BATCH mode (opt-in): `segments` = JSON [{start,end,text,[language]}]. Decode the
+        # WHOLE clip ONCE, slice each [start,end], align each against its own text, and
+        # return one result per segment (unit times are slice-relative — the caller offsets
+        # by `start`). Per-item try/except so one bad segment can't fail the whole batch.
+        # No `segments` => the original single-clip behaviour below, byte-for-byte.
+        if segments:
+            import json as _json, io as _io, soundfile as _sf
+            try:
+                _segs = _json.loads(segments)
+            except Exception as e:
+                raise HTTPException(status_code=400, detail="invalid `segments` json: %s" % e)
+            if not isinstance(_segs, list):
+                raise HTTPException(status_code=400, detail="`segments` must be a JSON array")
+            try:
+                _arr, _sr = _sf.read(_io.BytesIO(data), dtype="float32", always_2d=True)
+                _arr = _arr.mean(axis=1)  # -> mono
+            except Exception as e:
+                raise HTTPException(status_code=400, detail="could not decode audio: %s" % e)
+            _out = []
+            for _seg in _segs:
+                try:
+                    _st = (str(_seg.get("text") or "")).strip()
+                    if not _st:
+                        _out.append({"units": [], "language": None}); continue
+                    _a = float(_seg.get("start") or 0); _b = float(_seg.get("end") or 0)
+                    _lo = max(0, int(_a * _sr)); _hi = min(len(_arr), int(_b * _sr))
+                    if _hi <= _lo:
+                        _out.append({"error": "empty segment"}); continue
+                    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as _f:
+                        _sf.write(_f.name, _arr[_lo:_hi], _sr, format="WAV", subtype="PCM_16")
+                        _sp = _f.name
+                    _lg = (str(_seg.get("language") or language or "")).strip() or None
+                    _kw = {"language": _lg} if _lg else {}
+                    def _do_seg(_p=_sp, _t=_st, _k=_kw):
+                        try:
+                            return _state["model"].align(audio=_p, text=_t, **_k)
+                        except TypeError:
+                            return _state["model"].align(_p, _t)
+                    async with _align_lock:
+                        _res = await asyncio.to_thread(_do_seg)
+                    try:
+                        os.unlink(_sp)
+                    except Exception:
+                        pass
+                    _ur = _res[0] if _res else []
+                    _out.append({"language": _lg, "units": [
+                        {"text": _field(u, "text", "word", "token"),
+                         "start": _field(u, "start_time", "start"),
+                         "end": _field(u, "end_time", "end")} for u in _ur]})
+                except Exception as e:
+                    _out.append({"error": "align failed: %s" % e})
+            return {"model": MODEL_NAME, "mode": "align", "batch": True, "results": _out}
+        # ---- SINGLE mode (unchanged) ----
         if not (text or "").strip():
             raise HTTPException(status_code=400, detail="`text` is required for forced alignment")
-        data = await file.read()
         suffix = os.path.splitext(file.filename or "a.wav")[1] or ".wav"
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
             f.write(data)
@@ -1521,11 +1574,38 @@ data:
     async def transcriptions(file: UploadFile = File(...),
                              model: str = Form(None),
                              language: str = Form(None),
-                             response_format: str = Form("json")):
+                             response_format: str = Form("json"),
+                             segments: str = Form(None)):
         if not _state["ready"]:
             raise HTTPException(status_code=503, detail=_state["error"] or "model not ready")
         raw = await file.read()
+        # Decode the uploaded clip ONCE (the caller sends one batch's worth of audio,
+        # kept small by its byte-budget) into a 16k mono array.
         audio = await asyncio.to_thread(_decode_to_16k_mono, raw, file.filename)
+        # BATCH mode (opt-in): `segments` = JSON [{start,end}]. Slice the decoded array per
+        # segment and transcribe each, one result per segment. Per-item try/except so one
+        # bad segment can't fail the batch. No `segments` => the original single-clip path.
+        if segments:
+            import json as _json
+            try:
+                _segs = _json.loads(segments)
+            except Exception as e:
+                raise HTTPException(status_code=400, detail="invalid `segments` json: %s" % e)
+            if not isinstance(_segs, list):
+                raise HTTPException(status_code=400, detail="`segments` must be a JSON array")
+            _out = []
+            for _seg in _segs:
+                try:
+                    _a = float(_seg.get("start") or 0); _b = float(_seg.get("end") or 0)
+                    _lo = max(0, int(_a * 16000)); _hi = min(len(audio), int(_b * 16000))
+                    if _hi <= _lo:
+                        _out.append({"text": ""}); continue
+                    _t = await _offline_transcribe(audio[_lo:_hi])
+                    _out.append({"text": _t})
+                except Exception as e:
+                    _out.append({"error": "stt failed: %s" % e})
+            return {"model": MODEL_NAME, "mode": "stt", "batch": True, "results": _out}
+        # ---- SINGLE mode (unchanged) ----
         text = await _offline_transcribe(audio)
         if response_format in ("text", "srt", "vtt"):
             return Response(content=text, media_type="text/plain")

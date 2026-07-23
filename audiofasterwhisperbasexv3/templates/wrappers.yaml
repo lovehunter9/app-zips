@@ -1278,13 +1278,65 @@ data:
                     "text": full, "segments": out_segs}
         return {"text": full}
 
+    def _ffmpeg_slice_wav(src, start, dur):
+        # Cut [start, start+dur] out of `src` to 16k mono WAV bytes via ffmpeg stdout
+        # (no soundfile in this image; ffmpeg is present for the av/ct2 decode path).
+        r = subprocess.run(
+            ["ffmpeg", "-y", "-nostdin", "-ss", "%.3f" % start, "-i", src,
+             "-t", "%.3f" % dur, "-ac", "1", "-ar", "16000", "-f", "wav", "pipe:1"],
+            capture_output=True)
+        if r.returncode != 0:
+            raise RuntimeError("ffmpeg slice rc=%d: %s" % (r.returncode, (r.stderr or b"")[-300:]))
+        return r.stdout
+
+    def _stt_batch(data, fn, segs, language, temperature, prompt):
+        # Write the (one batch's worth of) clip once, ffmpeg-slice each segment, transcribe
+        # each via _run, one {text}|{error} per segment. Per-item try/except so one bad
+        # segment can't fail the whole batch.
+        suffix = os.path.splitext(fn or "a.wav")[1] or ".wav"
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as wf:
+            wf.write(data)
+            whole = wf.name
+        out = []
+        try:
+            for seg in segs:
+                try:
+                    a = float(seg.get("start") or 0)
+                    b = float(seg.get("end") or 0)
+                    if b <= a:
+                        out.append({"text": ""}); continue
+                    sb = _ffmpeg_slice_wav(whole, a, b - a)
+                    res = _run("transcribe", sb, "seg.wav", language, "json",
+                               temperature, prompt, False, False)
+                    out.append({"text": res.get("text", "") if isinstance(res, dict) else ""})
+                except Exception as e:
+                    out.append({"error": "stt failed: %s" % e})
+        finally:
+            try:
+                os.unlink(whole)
+            except Exception:
+                pass
+        return out
+
     @app.post("/v1/audio/transcriptions")
     async def transcriptions(file: UploadFile = File(...), model: str = Form(default=None),
                              language: str = Form(default=None), response_format: str = Form(default="json"),
                              temperature: str = Form(default=None), prompt: str = Form(default=None),
-                             vad_filter: str = Form(default=None), word_timestamps: str = Form(default=None)):
+                             vad_filter: str = Form(default=None), word_timestamps: str = Form(default=None),
+                             segments: str = Form(default=None)):
         data = await file.read()
         fn = file.filename
+        # BATCH mode (opt-in): `segments` = JSON [{start,end}] -> one {text}|{error} each.
+        if segments:
+            import json as _json
+            try:
+                _segs = _json.loads(segments)
+            except Exception as e:
+                raise HTTPException(status_code=400, detail="invalid `segments` json: %s" % e)
+            if not isinstance(_segs, list):
+                raise HTTPException(status_code=400, detail="`segments` must be a JSON array")
+            results = await asyncio.to_thread(_stt_batch, data, fn, _segs, language, temperature, prompt)
+            return {"model": MODEL_NAME, "mode": "stt", "batch": True, "results": results}
         return await asyncio.to_thread(
             _run, "transcribe", data, fn, language, response_format, temperature, prompt,
             str(vad_filter).lower() in ("1", "true", "yes"),
