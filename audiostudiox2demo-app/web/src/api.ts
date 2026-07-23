@@ -208,7 +208,7 @@ async function dataCall(
 // Uncompressed WAV blows past the Olares edge's request-body limit (a 1h 16k mono
 // clip ≈ 115 MB → 413 from envoy). Round large clips through the app server's ffmpeg
 // to 16k mono MP3 before sending. Small slices (STT 30s windows ≈ 1 MB) pass untouched.
-const EDGE_SAFE_BYTES = 8 * 1024 * 1024;
+const EDGE_SAFE_BYTES = Math.floor(31.8 * 1024 * 1024); // ~200KB under the gateway nginx 32M body cap
 
 export async function transcodeToMp3(blob: Blob): Promise<Blob> {
   const r = await fetch("/api/transcode", {
@@ -221,8 +221,10 @@ export async function transcodeToMp3(blob: Blob): Promise<Blob> {
 }
 
 async function edgeSafe(file: Blob): Promise<Blob> {
-  if (/mpeg|mp3|ogg|opus|m4a|aac/i.test(file.type)) return file; // already compressed
-  if (file.size <= EDGE_SAFE_BYTES) return file; // small enough for the edge
+  if (file.size <= EDGE_SAFE_BYTES) return file; // under the 32M edge cap — 能不压就不压
+  // Over the cap: shrink even if the source is ALREADY compressed — a multi-hour mp3
+  // (e.g. a 3h22m clip ≈ 194 MB) still 413s, so re-encode to a duration-fit bitrate
+  // (the app server derives kbps from the clip length) instead of passing it through.
   try {
     return await transcodeToMp3(file);
   } catch {

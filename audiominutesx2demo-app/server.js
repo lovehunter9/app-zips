@@ -567,18 +567,59 @@ function gwHeaders(cfg, { req, extra } = {}) {
   return h;
 }
 
+// --- Upload size guard --------------------------------------------------
+// The gateway's frontend nginx caps request bodies at 32M (client_max_body_size
+// 32M). A whole-clip diar/STT upload of a long meeting (a 2h clip is hundreds of
+// MB as wav, ~100MB+ as mp3) trips a 413 at the edge BEFORE it reaches the engine.
+// So: ONLY when a file would exceed the cap, transcode it to a compact mono-16k
+// mp3 whose bitrate is derived from the clip duration, landing safely under the
+// cap. Files already under the cap (e.g. per-window slices) are sent untouched
+// — 能不压就不压.
+const UPLOAD_MAX_BYTES = Math.floor(31.8 * 1024 * 1024); // 33,344,716 — ~200KB under the 32M cap
+const COMPRESS_TARGET_BYTES = 30 * 1024 * 1024;          // aim comfortably below the cap
+
+function transcodeToFit(input, output, durationSec) {
+  const dur = durationSec && durationSec > 0 ? durationSec : (probeDuration(input) || 0);
+  // bitrate to hit the target size for this duration; clamp to a speech-sane range.
+  let kbps = dur > 0 ? Math.floor((COMPRESS_TARGET_BYTES * 8) / dur / 1000) : 32;
+  kbps = Math.max(16, Math.min(64, kbps));
+  return new Promise((resolve, reject) => {
+    const ff = spawn("ffmpeg", ["-y", "-i", input, "-vn", "-ac", "1", "-ar", "16000", "-b:a", `${kbps}k`, output]);
+    let err = "";
+    ff.stderr.on("data", (d) => (err += d.toString()));
+    ff.on("close", (code) => (code === 0 ? resolve(output) : reject(new Error("ffmpeg fit failed: " + err.slice(-1500)))));
+    ff.on("error", reject);
+  });
+}
+
+// Return a path safe to upload: the original if already under the cap, else a
+// compressed temp mp3 that fits. `mp3` tells the caller the multipart name/type.
+async function prepUpload(file) {
+  let sz = 0;
+  try { sz = fs.statSync(file).size; } catch { return { path: file, mp3: /\.mp3$/i.test(file) }; }
+  if (sz <= UPLOAD_MAX_BYTES) return { path: file, mp3: /\.mp3$/i.test(file) };
+  const out = file.replace(/\.[^.]*$/, "") + `-fit-${Date.now()}.mp3`;
+  await transcodeToFit(file, out, probeDuration(file));
+  return { path: out, mp3: true };
+}
+
 async function gwAudioOp(cfg, op, wavPath, model, extra = {}) {
-  const buf = fs.readFileSync(wavPath);
-  const fd = new FormData();
-  fd.append("file", new Blob([buf], { type: "audio/wav" }), "audio.wav");
-  fd.append("model", model);
-  for (const [k, v] of Object.entries(extra)) fd.append(k, String(v));
-  const r = await fetch(gwUrl(cfg, `/v1/audio/${op}`), { method: "POST", headers: gwHeaders(cfg), body: fd, signal: cfg._signal });
-  const text = await r.text();
-  let j;
-  try { j = JSON.parse(text); } catch { j = text; }
-  if (!r.ok) throw new Error(`${op} ${r.status}: ${String(text).slice(0, 300)}`);
-  return j;
+  const { path: upPath, mp3 } = await prepUpload(wavPath);
+  try {
+    const buf = fs.readFileSync(upPath);
+    const fd = new FormData();
+    fd.append("file", new Blob([buf], { type: mp3 ? "audio/mpeg" : "audio/wav" }), mp3 ? "audio.mp3" : "audio.wav");
+    fd.append("model", model);
+    for (const [k, v] of Object.entries(extra)) fd.append(k, String(v));
+    const r = await fetch(gwUrl(cfg, `/v1/audio/${op}`), { method: "POST", headers: gwHeaders(cfg), body: fd, signal: cfg._signal });
+    const text = await r.text();
+    let j;
+    try { j = JSON.parse(text); } catch { j = text; }
+    if (!r.ok) throw new Error(`${op} ${r.status}: ${String(text).slice(0, 300)}`);
+    return j;
+  } finally {
+    if (upPath !== wavPath) { try { fs.unlinkSync(upPath); } catch { /* ignore */ } }
+  }
 }
 
 // Speech enhancement: POST the whole clip to /v1/audio/enhance and write the
@@ -586,18 +627,23 @@ async function gwAudioOp(cfg, op, wavPath, model, extra = {}) {
 // before diar/STT/align. Throws on non-2xx so the caller can fall back to the
 // original audio.
 async function gwAudioEnhance(cfg, wavPath, model, outPath) {
-  const buf = fs.readFileSync(wavPath);
-  const fd = new FormData();
-  fd.append("file", new Blob([buf], { type: "audio/wav" }), "audio.wav");
-  fd.append("model", model);
-  const r = await fetch(gwUrl(cfg, "/v1/audio/enhance"), { method: "POST", headers: gwHeaders(cfg), body: fd, signal: cfg._signal });
-  if (!r.ok) {
-    const t = await r.text().catch(() => "");
-    throw new Error(`enhance ${r.status}: ${String(t).slice(0, 300)}`);
+  const { path: upPath, mp3 } = await prepUpload(wavPath);
+  try {
+    const buf = fs.readFileSync(upPath);
+    const fd = new FormData();
+    fd.append("file", new Blob([buf], { type: mp3 ? "audio/mpeg" : "audio/wav" }), mp3 ? "audio.mp3" : "audio.wav");
+    fd.append("model", model);
+    const r = await fetch(gwUrl(cfg, "/v1/audio/enhance"), { method: "POST", headers: gwHeaders(cfg), body: fd, signal: cfg._signal });
+    if (!r.ok) {
+      const t = await r.text().catch(() => "");
+      throw new Error(`enhance ${r.status}: ${String(t).slice(0, 300)}`);
+    }
+    const ab = await r.arrayBuffer();
+    fs.writeFileSync(outPath, Buffer.from(ab));
+    return outPath;
+  } finally {
+    if (upPath !== wavPath) { try { fs.unlinkSync(upPath); } catch { /* ignore */ } }
   }
-  const ab = await r.arrayBuffer();
-  fs.writeFileSync(outPath, Buffer.from(ab));
-  return outPath;
 }
 
 // Text chat completion via the gateway's OpenAI /v1/chat/completions (mode=chat).

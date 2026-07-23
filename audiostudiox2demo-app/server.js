@@ -72,12 +72,18 @@ function toWav16kMono(input, output) {
   });
 }
 
-// ffmpeg: compress to 16k mono MP3. Uncompressed WAV blows past the Olares edge's
-// request-body limit (a 1h clip ≈ 115 MB → 413). The audio engines downsample to
-// 16k mono anyway, so 64 kbps MP3 is the working resolution at a fraction of the size.
+// ffmpeg: compress to a compact 16k mono MP3 that fits UNDER the gateway's 32M
+// upload cap. Uncompressed WAV (a 1h clip ≈ 115 MB) — and even a FIXED 64k mp3 of a
+// multi-hour meeting (3h22m ≈ 97 MB) — trips a 413. So derive the bitrate from the
+// clip duration so the output always lands safely under the cap. The engines
+// downsample to 16k mono anyway, so this is the working resolution regardless.
+const COMPRESS_TARGET_BYTES = 30 * 1024 * 1024; // aim comfortably below the 32M edge cap
 function toMp3_16kMono(input, output) {
+  const dur = probeDuration(input) || 0;
+  let kbps = dur > 0 ? Math.floor((COMPRESS_TARGET_BYTES * 8) / dur / 1000) : 64;
+  kbps = Math.max(16, Math.min(64, kbps)); // clamp to a speech-sane range
   return new Promise((resolve, reject) => {
-    const ff = spawn("ffmpeg", ["-y", "-i", input, "-vn", "-ac", "1", "-ar", "16000", "-b:a", "64k", "-f", "mp3", output]);
+    const ff = spawn("ffmpeg", ["-y", "-i", input, "-vn", "-ac", "1", "-ar", "16000", "-b:a", `${kbps}k`, "-f", "mp3", output]);
     let err = "";
     ff.stderr.on("data", (d) => (err += d.toString()));
     ff.on("close", (code) => (code === 0 ? resolve(output) : reject(new Error("ffmpeg failed: " + err.slice(-2000)))));
