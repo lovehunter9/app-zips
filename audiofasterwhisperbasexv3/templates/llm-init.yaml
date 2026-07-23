@@ -10,7 +10,7 @@
        (adds ENGINE_KIND=audio). The engine (engine.yaml) no longer polls /readyz;
        it blocks on the download sentinel llm-init writes to the shared run-state
        hostPath (RUN_DIR), which breaks the proxy<->engine readiness deadlock. */ -}}
-{{- $clientDomainENV := split "," .Values.domain.audiovllmbasexv3 -}}
+{{- $clientDomainENV := split "," .Values.domain.audiofasterwhisperbasexv3 -}}
 {{- $clientDomain := index $clientDomainENV "_0" -}}
 {{- $oe := .Values.olaresEnv | default dict -}}
 {{- $modelSource := $oe.MODEL_SOURCE | default "" -}}

@@ -1,0 +1,8 @@
+# Per-workload replica counts (keys match workloadReplicas in OlaresManifest).
+#   audiofasterwhisperbasexv3 — engine Deployment (== Release.Name)
+#   llminit          — llm-init audio-proxy Deployment (ENGINE_KIND=audio)
+workloads:
+  audiofasterwhisperbasexv3:
+    replicaCount: 1
+  llminit:
+    replicaCount: 1

@@ -1,0 +1,6 @@
+apiVersion: v2
+appVersion: "1.0.9"
+description: Audio Studio X2 Demo — a browser app that runs the M1 audio capabilities (STT, translate, VAD, diarization, enhance, speaker embedding) plus real-time streaming captions (stt_stream + diar_stream, with optional timecoded subtitles) through the LLM Gateway.
+name: audiostudiox2demo
+type: application
+version: 1.0.9

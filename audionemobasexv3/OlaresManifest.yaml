@@ -2,11 +2,11 @@ olaresManifest.version: "0.12.0"
 olaresManifest.type: app
 apiVersion: 'v3'
 metadata:
-  name: audiovllmbasexv3
+  name: audionemobasexv3
   icon: https://app.cdn.olares.com/appstore/whisperwebui/icon.png
   description: Audio model base (vLLM engine, llm-init audio-proxy). One instance = one model; capabilities via MODEL_SUPPORTS (stt / stt_stream / align). llm-init downloads the model AND fronts the engine's OpenAI /v1/* directly (ENGINE_KIND=audio, no nginx).
-  appid: audiovllmbasexv3
-  title: Audio vLLM Base X V3
+  appid: audionemobasexv3
+  title: Audio NeMo Base X V3
   version: '1.0.0'
   categories:
     - AI
@@ -17,10 +17,10 @@ metadata:
 # ~17s first-byte timeout that RST's queued/long requests. invisible + authLevel
 # internal: no public URL, not shown on the desktop.
 sharedEntrances:
-  - name: audiovllmbasexv3api
+  - name: audionemobasexv3api
     host: sharedentrances-api
     port: 0
-    title: Audio vLLM Base X V3 API
+    title: Audio NeMo Base X V3 API
     invisible: true
     authLevel: internal
     icon: https://app.cdn.olares.com/appstore/whisperwebui/icon.png
@@ -29,20 +29,20 @@ sharedEntrances:
 # "/", reverse-proxies "/v1/*" to the sibling audio engine, and synthesizes
 # /v1/models at the edge. No openresty/nginx sidecar (removed vs audiolabxv3).
 entrances:
-  - name: audiovllmbasexv3
+  - name: audionemobasexv3
     port: 8090
     host: download-svc
-    title: Audio vLLM Base X V3
+    title: Audio NeMo Base X V3
     icon: https://app.cdn.olares.com/appstore/whisperwebui/icon.png
     openMethod: window
     authLevel: public
 workloadReplicas:
-  audiovllmbasexv3: 1
+  audionemobasexv3: 1
   llminit: 1
 spec:
   versionName: '1.0.0'
   fullDescription: |
-    **Audio model base — vLLM engine (`audiovllmbasexv3`, llm-init audio-proxy)**
+    **Audio model base — vLLM engine (`audionemobasexv3`, llm-init audio-proxy)**
     A generic *base* for audio models that run on the vLLM engine. One installed
     instance = one model. Which capabilities the instance exposes is chosen at
     install time via `MODEL_SUPPORTS` (multi-select): `stt` / `stt_stream` / `align`.
@@ -152,8 +152,8 @@ envs:
     editable: true
     applyOnChange: true
   # MODEL_SUPPORTS: multi-select of the capabilities THIS instance exposes. On the
-  # vLLM base the valid values are stt / stt_stream / align (each maps to /v1/audio/*
-  # endpoints in llm-init). Pick what the chosen model actually supports.
+  # NeMo base the only valid value is diar_stream (maps to WS /v1/audio/diarize/stream
+  # in llm-init). Pick what the chosen model actually supports.
   - envName: MODEL_SUPPORTS
     required: true
     default: ""
@@ -163,12 +163,8 @@ envs:
     multiSelect: true
     splitter: ","
     options:
-    - title: STT (offline transcription)
-      value: stt
-    - title: STT Stream (streaming ASR, WebSocket)
-      value: stt_stream
-    - title: Align (forced alignment)
-      value: align
+    - title: Diarization Stream (streaming speaker diarization, WebSocket)
+      value: diar_stream
   - envName: MODEL_MAX_AUDIO_MB
     required: false
     type: string

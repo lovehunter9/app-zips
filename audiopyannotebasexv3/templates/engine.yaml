@@ -1,69 +1,63 @@
-{{- /* vLLM audio engine base (audiovllmbasexv3).
-       ONE engine image only: vLLM cu129. This base serves the audio capabilities
-       that ride vLLM: stt (native `vllm serve`), stt_stream (/wrappers/stream.py,
-       WebSocket), align (/wrappers/align.py). No cross-engine auto-select — every
-       other engine family (pyannote/torch, NeMo, faster-whisper) is its own base.
+{{- /* pyannote/torch audio engine base (audiopyannotebasexv3).
+       ONE engine image only: the CUDA pyannote_fastapi image. This base serves the
+       audio capabilities that ride pyannote/torch via injected wrappers:
+       vad (/wrappers/vad.py, silero-vad), diar (/wrappers/diar.py, pyannote),
+       speaker_embed (/wrappers/embed.py, pyannote x-vector), enhance
+       (/wrappers/enhance.py, speechbrain). No cross-engine auto-select — every
+       other engine family (vLLM, NeMo, faster-whisper) is its own base.
 
-       Capability selection is driven by MODEL_SUPPORTS (CSV, e.g. "stt" or
-       "stt,stt_stream"), NOT by a single MODEL_MODE. The gateway-facing coarse mode
-       is fixed to `audio` (set on the llm-init container, see llm-init.yaml). The
-       llm-init front decides which /v1/audio/* endpoints to expose from MODEL_SUPPORTS.
-
-       FIRST CUT: single-capability runtimes reuse the exact tested commands. The
-       stt+stt_stream single-model-load unified wrapper (one loaded qwen-asr serving
-       BOTH offline transcription and streaming WS) is NOT yet built — that path needs
-       a GPU to validate. Until then, selecting stt_stream runs stream.py (streaming);
-       combining it with stt on one instance is the pending unified wrapper. */ -}}
+       Capability selection is driven by MODEL_SUPPORTS (CSV). The gateway-facing
+       coarse mode is fixed to `audio` (set on the llm-init container, see
+       llm-init.yaml). Each wrapper serves ONE capability endpoint; if several
+       supports are selected the primaryCap (precedence below) decides which wrapper
+       runs — pyannote capabilities are distinct models, so a single instance is
+       normally one capability (unlike the vLLM base's single-model stt+stt_stream). */ -}}
 {{- $oe := .Values.olaresEnv | default dict -}}
 {{- $modelName := $oe.MODEL_NAME | default "" -}}
 {{- $modelSource := $oe.MODEL_SOURCE | default "" -}}
-{{- /* MODEL_SUPPORTS: multi-select CSV of the capabilities this instance exposes.
-       On the vLLM base the valid values are stt / stt_stream / align. */ -}}
-{{- $supportsRaw := $oe.MODEL_SUPPORTS | default "stt" -}}
+{{- /* MODEL_SUPPORTS: multi-select CSV. On the pyannote base the valid values are
+       vad / diar / speaker_embed / enhance. */ -}}
+{{- $supportsRaw := $oe.MODEL_SUPPORTS | default "diar" -}}
 {{- $supports := list -}}
 {{- range $tok := splitList "," $supportsRaw -}}
 {{- $t := trim $tok -}}
 {{- if $t -}}{{- $supports = append $supports $t -}}{{- end -}}
 {{- end -}}
-{{- $hasStt := has "stt" $supports -}}
-{{- $hasSttStream := has "stt_stream" $supports -}}
-{{- $hasAlign := has "align" $supports -}}
-{{- $isQwen := contains "qwen" (lower $modelName) -}}
-{{- /* Pick the primary runtime (precedence: stt_stream > stt > align). primaryCap
-       also becomes the engine container's MODEL_MODE for tested-wrapper compat. */ -}}
-{{- $primaryCap := "stt" -}}
-{{- $healthPath := "/health" -}}
+{{- $hasVad := has "vad" $supports -}}
+{{- $hasDiar := has "diar" $supports -}}
+{{- $hasEmbed := has "speaker_embed" $supports -}}
+{{- $hasEnhance := has "enhance" $supports -}}
+{{- /* Pick the primary runtime (precedence: diar > speaker_embed > vad > enhance).
+       primaryCap also names the engine container. */ -}}
+{{- $primaryCap := "diar" -}}
+{{- $healthPath := "/healthz" -}}
 {{- $engineCmd := "" -}}
-{{- $vllmImage := "docker.io/beclab/vllm-vllm-openai:v0.23.0-cu129" -}}
-{{- if $hasSttStream -}}
-{{- $primaryCap = "stt_stream" -}}
-{{- $healthPath = "/healthz" -}}
-{{- $engineCmd = "export HF_HUB_OFFLINE=1; export PYTHONUNBUFFERED=1; [ -f /pydeps/.stt_stream_dual.ok ] || { echo '[stream] first-run: installing qwen-asr + audio/ws deps into /pydeps (reusing image vLLM, NO [vllm] extra)'; python3 -m pip install -q --root-user-action=ignore --ignore-installed blinker || true; python3 -m pip install --root-user-action=ignore qwen-asr soundfile librosa av websockets python-multipart && touch /pydeps/.stt_stream_dual.ok; }; echo '[stream] launching stream.py'; exec $(command -v python3 || command -v python) /wrappers/stream.py" -}}
-{{- else if $hasStt -}}
-{{- $primaryCap = "stt" -}}
-{{- $healthPath = "/health" -}}
-{{- if $isQwen -}}
-{{- $engineCmd = "export HF_HUB_OFFLINE=1; [ -f /pydeps/.stt.ok ] || { python3 -m pip install -q librosa soundfile av && touch /pydeps/.stt.ok; }; exec vllm serve $MODEL_NAME --host 0.0.0.0 --port $WRAPPER_PORT --gpu-memory-utilization ${VLLM_GPU_UTIL:-0.45} --max-model-len ${VLLM_MAX_LEN:-32768} --mm-processor-cache-gb ${VLLM_MM_CACHE_GB:-1}" -}}
-{{- else -}}
-{{- $engineCmd = "export HF_HUB_OFFLINE=1; [ -f /pydeps/.stt.ok ] || { python3 -m pip install -q librosa soundfile av && touch /pydeps/.stt.ok; }; exec vllm serve $MODEL_NAME --host 0.0.0.0 --port $WRAPPER_PORT --gpu-memory-utilization ${VLLM_GPU_UTIL:-0.45} --mm-processor-cache-gb ${VLLM_MM_CACHE_GB:-1}" -}}
+{{- $baseImage := "docker.io/beclab/maximsachs-pyannote_fastapi:4.0.4" -}}
+{{- if $hasDiar -}}
+{{- $primaryCap = "diar" -}}
+{{- $engineCmd = "exec $(command -v python3 || command -v python) /wrappers/diar.py" -}}
+{{- else if $hasEmbed -}}
+{{- $primaryCap = "speaker_embed" -}}
+{{- $engineCmd = "exec $(command -v python3 || command -v python) /wrappers/embed.py" -}}
+{{- else if $hasVad -}}
+{{- $primaryCap = "vad" -}}
+{{- $engineCmd = "exec $(command -v python3 || command -v python) /wrappers/vad.py" -}}
+{{- else if $hasEnhance -}}
+{{- $primaryCap = "enhance" -}}
+{{- $engineCmd = "exec $(command -v python3 || command -v python) /wrappers/enhance.py" -}}
 {{- end -}}
-{{- else if $hasAlign -}}
-{{- $primaryCap = "align" -}}
-{{- $healthPath = "/healthz" -}}
-{{- $engineCmd = "export HF_HUB_OFFLINE=1; [ -f /pydeps/.align.ok ] || { python3 -m pip install -q --ignore-installed blinker || true; python3 -m pip install -q qwen-asr librosa soundfile av && touch /pydeps/.align.ok; }; exec $(command -v python3 || command -v python) /wrappers/align.py" -}}
-{{- end -}}
-{{- /* Container name = audio-<primaryCap>-<model> (DNS-safe, <=63 chars) so the
-       Containers panel shows capability+model at a glance. */ -}}
+{{- /* Container name = audio-<primaryCap>-<model> (DNS-safe, <=63 chars). */ -}}
 {{- $modelSan := regexReplaceAll "[^a-z0-9]+" (lower $modelName) "-" | trimAll "-" -}}
 {{- $cname := printf "audio-%s-%s" ($primaryCap | replace "_" "-") $modelSan | trunc 63 | trimSuffix "-" -}}
-{{- $engineImage := $oe.ENGINE_IMAGE | default $vllmImage -}}
+{{- $engineImage := $oe.ENGINE_IMAGE | default $baseImage -}}
 {{- $enginePort := int ($oe.ENGINE_PORT | default "8000") -}}
 {{- $healthPath = $oe.ENGINE_HEALTH_PATH | default $healthPath -}}
 {{- $cpuRequest := trim ($oe.AUDIO_CPU_REQUEST | default "500m") -}}
 {{- $memRequest := trim ($oe.AUDIO_MEMORY_REQUEST | default "2Gi") -}}
 {{- $cpuLimit := trim ($oe.AUDIO_CPU_LIMIT | default "6") -}}
 {{- $memLimit := trim ($oe.AUDIO_MEMORY_LIMIT | default "24Gi") -}}
-{{- /* GPU is OPTIONAL (AUDIO_REQUIRED_GPU_MEMORY = "" or "0" => CPU-only). */ -}}
+{{- /* GPU is OPTIONAL (AUDIO_REQUIRED_GPU_MEMORY = "" or "0" => CPU-only; vad/embed run
+       fine on CPU, diar/enhance benefit from GPU). */ -}}
 {{- $gpuRaw := trim ($oe.AUDIO_REQUIRED_GPU_MEMORY | default "") -}}
 {{- $wantGpu := and (ne $gpuRaw "") (ne $gpuRaw "0") -}}
 {{- $gpuMiB := "" -}}
@@ -79,33 +73,6 @@
 {{- $memLimit = printf "%sMi" $gpuMiB -}}
 {{- end -}}
 {{- end -}}
-{{- /* vLLM --gpu-memory-utilization scaled to the HAMi gpumem quota (see original base). */ -}}
-{{- $vllmUtil := $oe.MODEL_GPU_MEM_UTIL | default "" -}}
-{{- if and (not $vllmUtil) $wantGpu -}}
-{{- $totalMiB := float64 (int ($oe.AUDIO_GPU_TOTAL_MIB | default "24454")) -}}
-{{- $u := divf (mulf (float64 (int $gpuMiB)) 0.85) $totalMiB -}}
-{{- if gt $u 0.9 -}}{{- $u = 0.9 -}}{{- end -}}
-{{- if lt $u 0.1 -}}{{- $u = 0.1 -}}{{- end -}}
-{{- $vllmUtil = printf "%.2f" $u -}}
-{{- end -}}
-{{- if not $vllmUtil -}}{{- $vllmUtil = "0.45" -}}{{- end -}}
-{{- /* stt_stream max_model_len is DERIVED from the allocated GPU quota, not hardcoded:
-       give the instance more gpumem and it automatically holds a longer context (offline
-       whole-clip capacity + streaming window both scale with it). This is the qwen-asr
-       DEFAULT (65536) when there is enough VRAM, matched to the package's own 1200s
-       silence-chunker; smaller quotas step down so the engine still boots instead of
-       OOM-crashing. Override explicitly via STREAM_MAX_LEN if ever needed. Roughly:
-       KV(65536)~7GiB, KV scales ~linearly, weights+streaming-overhead+activations~8GiB. */ -}}
-{{- $streamMaxLen := trim ($oe.STREAM_MAX_LEN | default "") -}}
-{{- if and (eq $streamMaxLen "") $wantGpu -}}
-{{- $g := int $gpuMiB -}}
-{{- if ge $g 18000 -}}{{- $streamMaxLen = "65536" -}}
-{{- else if ge $g 15000 -}}{{- $streamMaxLen = "49152" -}}
-{{- else if ge $g 13000 -}}{{- $streamMaxLen = "32768" -}}
-{{- else if ge $g 11000 -}}{{- $streamMaxLen = "16384" -}}
-{{- else -}}{{- $streamMaxLen = "8192" -}}{{- end -}}
-{{- end -}}
-{{- if eq $streamMaxLen "" -}}{{- $streamMaxLen = "16384" -}}{{- end -}}
 {{- $pydepsPrelude := "mkdir -p /pydeps; VENV=/pydeps/venv; if [ ! -x $VENV/bin/python ]; then echo '[pydeps] creating persistent venv (first run)'; python3 -m venv --system-site-packages $VENV || echo '[pydeps] WARN: venv unavailable, using ephemeral system installs'; fi; if [ -x $VENV/bin/python ]; then $VENV/bin/python -m pip --version >/dev/null 2>&1 || { echo '[pydeps] venv has no pip; bootstrapping via ensurepip'; $VENV/bin/python -m ensurepip --upgrade >/dev/null 2>&1 || true; }; if $VENV/bin/python -m pip --version >/dev/null 2>&1; then export PATH=$VENV/bin:$PATH; export PYTHONPATH=$(ls -d $VENV/lib/python*/site-packages 2>/dev/null | head -n1):${PYTHONPATH:-}; else echo '[pydeps] venv pip unavailable; using system python'; fi; fi;" -}}
 {{- $waitSentinel := "SENTINEL=/run/llm-init/model_download_finish; echo '[wait] waiting for llm-init model-download sentinel' $SENTINEL; until [ -f $SENTINEL ]; do echo '[wait] model not downloaded yet...'; sleep 10; done; echo '[wait] model downloaded; starting engine.';" -}}
 {{- $hfEndpoint := $oe.HF_ENDPOINT | default "" -}}
@@ -126,7 +93,7 @@ metadata:
     applications.app.bytetrade.io/gpu-inject: "{{ $cname }}"
 {{- end }}
 spec:
-  replicas: {{ .Values.workloads.audiovllmbasexv3.replicaCount }}
+  replicas: {{ .Values.workloads.audiopyannotebasexv3.replicaCount }}
   selector:
     matchLabels:
       io.kompose.service: audio-engine
@@ -170,25 +137,12 @@ spec:
               value: "{{ $modelName }}"
             - name: MODEL_SOURCE
               value: "{{ $modelSource }}"
-            # Engine-container MODEL_MODE = primary capability (kept for tested-wrapper
-            # compatibility). The gateway-facing coarse mode `audio` + MODEL_SUPPORTS
-            # live on the llm-init container (llm-init.yaml).
             - name: MODEL_MODE
               value: "{{ $primaryCap }}"
             - name: MODEL_SUPPORTS
               value: "{{ $supportsRaw }}"
             - name: WRAPPER_PORT
               value: "{{ $enginePort }}"
-            - name: VLLM_GPU_UTIL
-              value: "{{ $vllmUtil }}"
-            - name: VLLM_MAX_LEN
-              value: "{{ $oe.MODEL_MAX_LEN | default "32768" }}"
-            # stt_stream (stream.py) max_model_len, DERIVED from the GPU quota above
-            # (bigger GPU => longer offline/streaming context). Not a clone --env.
-            - name: STREAM_MAX_LEN
-              value: "{{ $streamMaxLen }}"
-            - name: VLLM_MAX_AUDIO_CLIP_FILESIZE_MB
-              value: "{{ $oe.MODEL_MAX_AUDIO_MB | default "1024" }}"
             - name: LOG_LEVEL
               value: "{{ $oe.LOG_LEVEL | default "info" }}"
             - name: HF_HOME
@@ -218,9 +172,6 @@ spec:
           ports:
             - name: http
               containerPort: {{ $enginePort }}
-          # NO readinessProbe (mirrors llamacpp): pod Ready as soon as it starts so the
-          # app reaches "running" while the model downloads; llm-init NotReadyGuard 503-gates
-          # /v1/* until the engine is alive.
           volumeMounts:
             - name: hf-cache
               mountPath: /cache/hf/hub

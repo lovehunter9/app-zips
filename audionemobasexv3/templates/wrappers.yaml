@@ -944,7 +944,7 @@ data:
     # The llm-init-downloaded model (e.g. Qwen/Qwen3-ForcedAligner-0.6B) is read from the
     # shared HF cache (HF_HUB_OFFLINE=1). Exposes: GET /health, GET /healthz, GET /readyz,
     # GET /v1/models, POST /v1/align (multipart audio file + text [+ language]).
-    import os, tempfile, threading, logging, asyncio
+    import os, tempfile, threading, logging
     from fastapi import FastAPI, UploadFile, File, Form, HTTPException
     import uvicorn
 
@@ -965,13 +965,6 @@ data:
     except Exception as _e:
         log.warning("gpu /metrics unavailable: %s", _e)
     _state = {"ready": False, "error": None, "model": None, "device": "cpu"}
-    # Serialise .align() across connections AND run it off the event loop (asyncio.to_thread).
-    # The aligner's .align() is a blocking vLLM inference; calling it directly in the async
-    # handler froze the whole uvicorn event loop for the whole align (30~110s under vGPU
-    # time-slicing), so a CONCURRENT request never got read -> its idle socket was RST by the
-    # entrance at ~47s (ECONNRESET). With to_thread the loop stays free (concurrent requests
-    # are read + held like a normal long request), and the lock keeps GPU use one-at-a-time.
-    _align_lock = asyncio.Lock()
 
     def _load():
         try:
@@ -1061,15 +1054,10 @@ data:
         try:
             lang = (language or "").strip() or None
             kw = {"language": lang} if lang else {}
-            def _do_align():
-                try:
-                    return _state["model"].align(audio=path, text=text, **kw)
-                except TypeError:
-                    return _state["model"].align(path, text)
-            # Off the event loop + serialised: keeps uvicorn responsive to concurrent
-            # requests (no unread-socket 47s RST) while GPU aligns run one at a time.
-            async with _align_lock:
-                results = await asyncio.to_thread(_do_align)
+            try:
+                results = _state["model"].align(audio=path, text=text, **kw)
+            except TypeError:
+                results = _state["model"].align(path, text)
             # results is a batch list; results[0] is the unit list for our single input.
             units_raw = results[0] if results else []
             units = []
@@ -1347,14 +1335,12 @@ data:
     PORT = int(os.environ.get("WRAPPER_PORT", "8000"))
     GPU_UTIL = float(os.environ.get("VLLM_GPU_UTIL", "0.45") or 0.45)
     MAX_NEW_TOKENS = int(os.environ.get("STREAM_MAX_NEW_TOKENS", "32") or 32)
-    # max_model_len only has to hold ONE unit of work at a time, NOT a whole long clip:
-    #   - offline: qwen-asr internally chunks a long clip to <=540s (~7.4k audio tokens,
-    #     patched at load to fit the ~8192 audio encoder cache) + <=4096 output tokens;
-    #   - streaming: a rolled window (STREAM_ROLL_SEC, ~240s) + tiny per-step output.
-    # So ~16384 is plenty and 65536 was overkill (it was a wrong assumption that offline
-    # had to hold a 20min clip whole). STREAM_MAX_LEN is DERIVED from the GPU quota by the
-    # chart (engine.yaml): 12Gi -> 16384, which is why this instance runs fine at 12Gi.
-    # The real long-audio ceiling is the encoder cache (window size), not this.
+    # Qwen3-ASR's default max_model_len is 65536 -> needs ~7GiB KV cache, which does NOT fit
+    # in the KV budget left after weights under the 12GiB HAMI quota (only ~2.4GiB free), so
+    # the vLLM engine ValueError-crashes at init. Streaming only processes tiny 2s chunks, so
+    # a small window is plenty. Cap it (well under the ~22.5k the engine reports as feasible).
+    # Mirrors what the offline qwen `vllm serve` does with --max-model-len. Override via
+    # STREAM_MAX_LEN. (Do NOT reuse VLLM_MAX_LEN=32768 — still too big for the KV budget here.)
     MAX_MODEL_LEN = int(os.environ.get("STREAM_MAX_LEN", "16384") or 16384)
     # Streaming state knobs mirror the official example defaults (2s chunks, keep the last
     # few chunks/tokens "unfixed" so they can still change as more audio arrives).
@@ -1405,26 +1391,6 @@ data:
             subprocess.run([sys.executable, "-m", "pip", "install",
                             "qwen-asr", "soundfile"], check=False)
             from qwen_asr import Qwen3ASRModel
-        # OFFLINE long-audio: qwen-asr's transcribe() silence-splits a long clip at the
-        # module constant MAX_ASR_INPUT_SECONDS (default 1200s/20min) and "".join-merges the
-        # pieces itself (no seams — split is at low-energy boundaries, merge has no separator).
-        # BUT the audio ENCODER CACHE (vLLM, ~8192 tokens @ ~13.65 tok/s ≈ 600s) is the real
-        # ceiling, NOT max_model_len — a chunk above it hard-errors ("exceeds pre-allocated
-        # encoder cache 8192"). So we LOWER the package's window to fit the cache (default
-        # 540s ≈ 7.4k tokens, ~750 under 8192, incl. the splitter's +5s expand). Then
-        # asr.transcribe(whole) handles ANY length (incl. 3h → ~20 chunks) in one call,
-        # merged by the package. The constant is imported by-name into qwen3_asr, so patch
-        # THAT binding (and utils, for good measure). Bigger window ⇒ bigger encoder cache
-        # ⇒ more GPU; at the 12Gi/8192-cache tier 540s is the safe max.
-        try:
-            import qwen_asr.inference.qwen3_asr as _qasr_mod
-            import qwen_asr.inference.utils as _qasr_utils
-            _win = int(os.environ.get("OFFLINE_MAX_INPUT_SEC", "540") or 540)
-            _qasr_utils.MAX_ASR_INPUT_SECONDS = _win
-            _qasr_mod.MAX_ASR_INPUT_SECONDS = _win
-            _p("patched qwen-asr MAX_ASR_INPUT_SECONDS -> %ds (fit 8192 encoder cache; long audio auto-chunked+merged by package)" % _win)
-        except Exception as e:
-            _p("WARN could not patch MAX_ASR_INPUT_SECONDS (%s); offline long audio may hit the encoder-cache cap" % e)
         _p("constructing Qwen3ASRModel.LLM(model=%s, gpu_util=%.2f, max_model_len=%d) ..."
            % (MODEL_REPO, GPU_UTIL, MAX_MODEL_LEN))
         # gpu_memory_utilization + max_model_len are vLLM LLM kwargs the qwen-asr wrapper
@@ -1482,42 +1448,21 @@ data:
         return y.astype("float32")
 
     async def _offline_transcribe(audio):
-        # Native offline transcription on the SAME loaded Qwen model — pass the WHOLE
-        # clip to the qwen-asr batch API asr.transcribe(). We do NOT chunk ourselves:
-        # qwen-asr internally silence-splits at MAX_ASR_INPUT_SECONDS (patched to 540s at
-        # load, above, so each chunk fits the ~8192-token audio encoder cache) and
-        # "".join-merges the pieces (no separator, split at low-energy boundaries) — so a
-        # single call returns one clean transcript with NO seams / NO stitched spaces, for
-        # ANY length (a 3h clip becomes ~20 internal chunks, merged by the package).
-        # Offline and streaming never run concurrently on this instance.
-        #
-        # max_tokens: the model is loaded with a small max_new_tokens for streaming
-        # (low-latency 2s steps). Each offline chunk (<=~9min) needs a larger decode
-        # budget, so we TEMPORARILY raise sampling_params.max_tokens for the offline call
-        # and restore it after; _infer_lock serialises all inference so mutating the
-        # shared sampling_params is race-free. 4096 covers a 9min chunk's transcript and
-        # keeps audio(~7.4k)+output within the 16384 max_model_len at the 12Gi tier.
         asr = _state["asr"]
-        off_max = int(os.environ.get("OFFLINE_MAX_TOKENS", "4096") or 4096)
-
-        def _run():
-            sp = getattr(asr, "sampling_params", None)
-            old = getattr(sp, "max_tokens", None) if sp is not None else None
-            try:
-                if sp is not None:
-                    sp.max_tokens = off_max
-                return asr.transcribe(audio=(audio, 16000), language=None, return_time_stamps=False)
-            finally:
-                if sp is not None and old is not None:
-                    sp.max_tokens = old
-
+        st = asr.init_streaming_state(
+            unfixed_chunk_num=UNFIXED_CHUNK_NUM,
+            unfixed_token_num=UNFIXED_TOKEN_NUM,
+            chunk_size_sec=CHUNK_SIZE_SEC,
+        )
+        step = max(1, int(CHUNK_SIZE_SEC * 16000))
         async with _infer_lock:
-            results = await asyncio.to_thread(_run)
-        r = results[0] if results else None
-        t = getattr(r, "text", None) if r is not None else None
-        if t is None and isinstance(r, dict):
-            t = r.get("text")
-        return (t or "").strip()
+            i, n = 0, int(audio.shape[0])
+            while i < n:
+                cur = audio[i:i + step]
+                i += step
+                await asyncio.to_thread(asr.streaming_transcribe, cur, st)
+            await asyncio.to_thread(asr.finish_streaming_transcribe, st)
+        return getattr(st, "text", "") or ""
 
     @app.post("/v1/audio/transcriptions")
     async def transcriptions(file: UploadFile = File(...),

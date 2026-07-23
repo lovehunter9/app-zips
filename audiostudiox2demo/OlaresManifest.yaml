@@ -1,0 +1,63 @@
+olaresManifest.version: '0.8.0'
+olaresManifest.type: app
+metadata:
+  name: audiostudiox2demo
+  icon: https://app.cdn.olares.com/appstore/llamacpp/icon.png
+  description: Run M1 audio capabilities through the LLM Gateway from the browser.
+  appid: audiostudiox2demo
+  title: Audio Studio X2 Demo
+  version: '1.0.0'
+  categories:
+    - Utilities
+permission:
+  appData: true
+spec:
+  runAsUser: true
+  versionName: '1.0.0'
+  fullDescription: |
+    Audio Studio X2 Demo is a prototype that showcases the M1 audio platform: upload
+    an audio or video file and run an orchestrated workflow over the LLM Gateway —
+    speech-to-text, translation, voice activity detection, speaker diarization,
+    denoise enhancement and speaker embeddings.
+
+    - All model calls go through the LLM Gateway; configure the Gateway URL and API
+      key in the app UI. Available models per capability are discovered from the
+      Gateway's console API.
+    - Video uploads are decoded to audio server-side (ffmpeg) before processing.
+    - Each capability can be toggled; a transparent execution panel proves which
+      capabilities were invoked (and which were skipped), with per-call details.
+    - Results: transcription with timestamps, translation, VAD segments, a speaker
+      timeline, enhance before/after audio, and a speaker-similarity matrix.
+  upgradeDescription: |
+    1.0.0: first packaged release.
+  developer: Olares
+  website: https://olares.com
+  submitter: Olares
+  locale:
+    - en-US
+    - zh-CN
+  requiredMemory: 256Mi
+  limitedMemory: 2Gi
+  requiredDisk: 1Gi
+  limitedDisk: 20Gi
+  requiredCpu: 100m
+  limitedCpu: '2'
+  supportArch:
+    - amd64
+options:
+  apiTimeout: 0
+  allowedOutboundPorts:
+    - 80
+    - 443
+  dependencies:
+    - name: olares
+      type: system
+      version: '>=1.12.6-0'
+entrances:
+  - name: audiostudiox2demo
+    port: 8080
+    host: audiostudiox2demo
+    title: Audio Studio X2 Demo
+    icon: https://app.cdn.olares.com/appstore/llamacpp/icon.png
+    openMethod: window
+    authLevel: internal
