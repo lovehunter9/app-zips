@@ -876,7 +876,7 @@ data:
     # which is exactly why it fits our "the capability lives in the model" paradigm.
     # The llm-init-downloaded model (e.g. Qwen/Qwen3-ForcedAligner-0.6B) is read from the
     # shared HF cache (HF_HUB_OFFLINE=1). Exposes: GET /health, GET /healthz, GET /readyz,
-    # GET /v1/models, POST /v1/align (multipart audio file + text [+ language]).
+    # GET /v1/models, POST /v1/audio/align (multipart audio file + text [+ language]).
     import os, tempfile, threading, logging
     from fastapi import FastAPI, UploadFile, File, Form, HTTPException
     import uvicorn
@@ -964,10 +964,8 @@ data:
 
     # Gateway routes multipart audio-in capabilities under /v1/audio/<op>
     # (same family as vad/diar/embed/enhance), so /v1/audio/align is the path
-    # the LLM Gateway hits. /v1/align is kept as an alias for direct curl /
-    # the documented contract.
+    # the LLM Gateway hits.
     @app.post("/v1/audio/align")
-    @app.post("/v1/align")
     async def align(file: UploadFile = File(...), text: str = Form(...),
                     language: str = Form(default=None)):
         if not _state["ready"]:

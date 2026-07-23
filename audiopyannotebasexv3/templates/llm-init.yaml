@@ -76,7 +76,7 @@ spec:
             runAsUser: 0
       containers:
         - name: llm-init
-          image: docker.io/lovehunter9/llm-init:v1.3.2-audiobase4
+          image: docker.io/lovehunter9/llm-init:v1.3.2-audiobase5
           imagePullPolicy: IfNotPresent
           env:
             # AUDIO proxy mode: llm-init fronts http://audio-engine:8000 (hardcoded)
