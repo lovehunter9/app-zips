@@ -1,0 +1,231 @@
+olaresManifest.version: "0.12.0"
+olaresManifest.type: app
+apiVersion: 'v3'
+metadata:
+  name: audiocosyvoicebasexv3
+  icon: https://app.cdn.olares.com/appstore/whisperwebui/icon.png
+  description: Audio model base (CosyVoice2 engine, llm-init audio-proxy). One instance = one CosyVoice model; capabilities tts + tts_clone (zero-shot voice clone) via MODEL_SUPPORTS. llm-init downloads the model AND fronts the engine's OpenAI /v1/* directly (ENGINE_KIND=audio, no nginx).
+  appid: audiocosyvoicebasexv3
+  title: Audio CosyVoice Clone Base X V3
+  version: '1.0.0'
+  categories:
+    - AI
+# INTERNAL shared API: a sharedEntrances stub -> the sharedentrances-api Service
+# (:80 -> llm-init:8090). Cluster-internal, no-public-edge, no-SSO endpoint the LLM
+# Gateway uses as provider base_url (http://sharedentrances-api.<ns>:80 + /v1).
+sharedEntrances:
+  - name: audiocosyvoicebasexv3api
+    host: sharedentrances-api
+    port: 0
+    title: Audio CosyVoice Clone Base X V3 API
+    invisible: true
+    authLevel: internal
+    icon: https://app.cdn.olares.com/appstore/whisperwebui/icon.png
+# Public entrance -> llm-init (download-svc:8090). In audio-proxy mode llm-init IS the
+# complete base: serves control plane on "/", reverse-proxies "/v1/*" to the engine.
+entrances:
+  - name: audiocosyvoicebasexv3
+    port: 8090
+    host: download-svc
+    title: Audio CosyVoice Clone Base X V3
+    icon: https://app.cdn.olares.com/appstore/whisperwebui/icon.png
+    openMethod: window
+    authLevel: public
+workloadReplicas:
+  audiocosyvoicebasexv3: 1
+  llminit: 1
+spec:
+  versionName: '1.0.0'
+  fullDescription: |
+    **Audio model base — CosyVoice2 engine (`audiocosyvoicebasexv3`, llm-init audio-proxy)**
+    A generic *base* for text-to-speech AND zero-shot voice-clone models that run on the
+    CosyVoice2 engine. One installed instance = one model. Capabilities are chosen at
+    install time via `MODEL_SUPPORTS` (multi-select): `tts` / `tts_clone`.
+
+    **HOW IT WORKS (llm-init audio-proxy mode, `ENGINE_KIND=audio`)**
+    llm-init downloads the model into the shared HF cache AND reverse-proxies `/v1/*` to
+    the sibling audio engine at `http://audio-engine:8000`, synthesizes `/v1/models` at the
+    edge, and serves its control plane / dashboard on `/`. Single entrance `download-svc:8090`.
+
+    **Engine** — CosyVoice2. `/wrappers/cosyvoice.py` loads the model from the shared HF
+    cache and serves:
+    - `POST /v1/audio/speech` (`tts`) — plain TTS; zero-shot against the configured
+      default reference (`COSYVOICE_DEFAULT_PROMPT_WAV` + `_PROMPT_TEXT`).
+    - `POST /v1/audio/clone` (`tts_clone`) — multipart: `file` = reference audio,
+      `text` = text to synthesize, `prompt_text` = reference transcript.
+
+    **Clone form**
+    - `MODEL_SOURCE` — `hf://<repo>` (llm-init download spec).
+    - `MODEL_NAME` — model id advertised to clients.
+    - `MODEL_SUPPORTS` — `tts`, `tts_clone` (pick what you want to expose).
+    - `AUDIO_REQUIRED_GPU_MEMORY` — CosyVoice2-0.5B: `6Gi` is a reasonable start.
+
+    **Example clone set**
+    - TTS + clone (CosyVoice2): MODEL_SOURCE=hf://FunAudioLLM/CosyVoice2-0.5B
+      MODEL_NAME=FunAudioLLM/CosyVoice2-0.5B  MODEL_SUPPORTS=tts,tts_clone
+      AUDIO_REQUIRED_GPU_MEMORY=6Gi
+
+    NOTE (first version): CosyVoice is not a clean pip install — a DEDICATED engine image
+    bundling CosyVoice (repo + Matcha-TTS + WeTextProcessing) is required; set ENGINE_IMAGE
+    to it once mirrored to beclab/. Requires llm-init with the /v1/audio/speech (tts) and
+    /v1/audio/clone (tts_clone) routes.
+
+  upgradeDescription: |
+    v1.0.0: initial CosyVoice2 TTS + voice-clone audio base. llm-init runs ENGINE_KIND=audio:
+    it downloads the model AND reverse-proxies the engine's OpenAI /v1/* directly (no nginx).
+    Capabilities tts / tts_clone chosen at clone via MODEL_SUPPORTS; GPU required.
+
+  developer: beclab
+  website: https://github.com/beclab/llm-init
+  sourceCode: https://github.com/beclab/llm-init
+  submitter: Olares
+  locale:
+    - en-US
+    - zh-CN
+  license:
+    - text: Apache-2.0
+      url: https://huggingface.co/FunAudioLLM/CosyVoice2-0.5B
+
+  accelerator:
+    - mode: nvidia
+      limitedCpu: "-1"
+      requiredCpu: "-1"
+      requiredDisk: 50Mi
+      limitedDisk: 500Gi
+      limitedMemory: "-1"
+      requiredMemory: "-1"
+      requiredGPUMemory: "-1"
+      limitedGPUMemory: "-1"
+    - mode: nvidia-gb10
+      limitedCpu: "-1"
+      requiredCpu: "-1"
+      requiredDisk: 50Mi
+      limitedDisk: 500Gi
+      limitedMemory: "-1"
+      requiredMemory: "-1"
+
+  supportArch:
+    - amd64
+    - arm64
+permission:
+  appData: true
+  appCache: true
+  appCommon: true
+options:
+  apiTimeout: 0
+  LLMGatewaySupported: true
+  allowMultipleInstall: true
+  shared: true
+  templateOnly: true
+  dependencies:
+    - name: olares
+      version: '>=1.12.6-0'
+      type: system
+envs:
+  - envName: MODEL_SOURCE
+    required: true
+    type: string
+    editable: true
+    applyOnChange: true
+  - envName: MODEL_NAME
+    required: true
+    type: string
+    editable: true
+    applyOnChange: true
+  # MODEL_SUPPORTS: multi-select of the capabilities THIS instance exposes.
+  #   tts       -> POST /v1/audio/speech
+  #   tts_clone -> POST /v1/audio/clone
+  - envName: MODEL_SUPPORTS
+    required: true
+    default: ""
+    type: string
+    editable: true
+    applyOnChange: true
+    multiSelect: true
+    splitter: ","
+    options:
+    - title: TTS (text-to-speech, CosyVoice2)
+      value: tts
+    - title: TTS clone (zero-shot voice clone, CosyVoice2)
+      value: tts_clone
+  - envName: COSYVOICE_DEFAULT_PROMPT_WAV
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+    default: ""
+  - envName: COSYVOICE_DEFAULT_PROMPT_TEXT
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+    default: ""
+  - envName: ENGINE_IMAGE
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+  - envName: ENGINE_PORT
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+  - envName: ENGINE_HEALTH_PATH
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+  - envName: LOG_LEVEL
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+    default: "info"
+    options:
+    - title: Debug
+      value: debug
+    - title: Info
+      value: info
+    - title: Warn
+      value: warn
+    - title: Error
+      value: error
+  - envName: HF_ENDPOINT
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_USER_HUGGINGFACE_SERVICE
+  - envName: HF_TOKEN
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_USER_HUGGINGFACE_TOKEN
+  - envName: AUDIO_CPU_REQUEST
+    required: true
+    default: "500m"
+    type: string
+    editable: true
+    applyOnChange: true
+  - envName: AUDIO_MEMORY_REQUEST
+    required: true
+    default: "2Gi"
+    type: string
+    editable: true
+    applyOnChange: true
+  - envName: AUDIO_CPU_LIMIT
+    required: true
+    default: "6"
+    type: string
+    editable: true
+    applyOnChange: true
+  - envName: AUDIO_MEMORY_LIMIT
+    required: true
+    default: "16Gi"
+    type: string
+    editable: true
+    applyOnChange: true
+  - envName: AUDIO_REQUIRED_GPU_MEMORY
+    required: true
+    type: string
+    editable: true
+    applyOnChange: true

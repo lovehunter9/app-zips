@@ -1,17 +1,4 @@
-{{- /* NeMo audio engine base (audionemobasexv3).
-       ONE engine image only: nvidia-nemo (NVIDIA Streaming Sortformer is a .nemo
-       checkpoint needing the NeMo runtime — it cannot ride pyannote/vLLM). Only
-       capability: diar_stream (/wrappers/diar_stream.py, a WebSocket at
-       /v1/audio/diarize/stream emitting speaker-turn segments with native frame
-       timestamps). No cross-engine auto-select.
-
-       CRITICAL PYTHON GOTCHA (audiolabx2v3 ledger): the NeMo image keeps
-       nemo_toolkit in its OWN uv venv at /opt/venv, separate from the SYSTEM
-       python where torch lives; --system-site-packages does NOT expose nemo. So
-       diar_stream runs /opt/venv/bin/python directly (the only interpreter with
-       nemo) and persists fastapi/uvicorn/websockets into /pydeps/diarstream-site
-       via --target (PYTHONPATH RESET to $SITE), gated by /pydeps/.diar_stream.ok.
-       The gateway-facing coarse mode is fixed to `audio` (see llm-init.yaml). */ -}}
+{{- /* NeMo audio engine base (audionemobasexv3): ONE image only (nvidia-nemo), ONE capability diar_stream (/wrappers/diar_stream.py, WS /v1/audio/diarize/stream with native frame timestamps). NVIDIA Streaming Sortformer is a .nemo checkpoint needing the NeMo runtime (cannot ride pyannote/vLLM); its nemo_toolkit lives in the image's OWN uv venv at /opt/venv (--system-site-packages does NOT expose it), so diar_stream runs /opt/venv/bin/python directly and persists fastapi/uvicorn/websockets into /pydeps/diarstream-site via --target (PYTHONPATH RESET to $SITE), gated by /pydeps/.diar_stream.ok. Gateway-facing coarse mode fixed to `audio` (see llm-init.yaml). */ -}}
 {{- $oe := .Values.olaresEnv | default dict -}}
 {{- $modelName := $oe.MODEL_NAME | default "" -}}
 {{- $modelSource := $oe.MODEL_SOURCE | default "" -}}

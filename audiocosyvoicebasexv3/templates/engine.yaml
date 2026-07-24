@@ -1,39 +1,28 @@
-{{- /* pyannote/torch audio engine base (audiopyannotebasexv3): ONE CUDA pyannote_fastapi image serving vad/diar/speaker_embed/enhance via injected wrappers; capability selected by MODEL_SUPPORTS (CSV), primaryCap (precedence below) picks the wrapper when several are set. */ -}}
+{{- /* CosyVoice2 TTS + voice-clone audio engine base (audiocosyvoicebasexv3).
+       Serves the OpenAI TTS contract PLUS a zero-shot voice-clone route:
+         POST /v1/audio/speech  (tts       — text -> speech)
+         POST /v1/audio/clone   (tts_clone — text + reference audio -> cloned speech)
+       plus /v1/models + /health + /metrics. MODEL_NAME must be a CosyVoice2 repo
+       (e.g. FunAudioLLM/CosyVoice2-0.5B). Gateway-facing coarse mode fixed to `audio`.
+
+       ENGINE IMAGE (first version — MUST finalize before publish): CosyVoice is NOT a
+       clean `pip install` — it needs the CosyVoice repo + its Matcha-TTS submodule +
+       WeTextProcessing/ttsfrd. The pyannote/torch image is used here as a placeholder and
+       the wrapper best-effort pip-installs what it can; a DEDICATED engine image that
+       bundles CosyVoice (repo on PYTHONPATH + deps) is required for a working deploy.
+       Set ENGINE_IMAGE to that image once mirrored to beclab/. */ -}}
 {{- $oe := .Values.olaresEnv | default dict -}}
 {{- $modelName := $oe.MODEL_NAME | default "" -}}
 {{- $modelSource := $oe.MODEL_SOURCE | default "" -}}
-{{- /* MODEL_SUPPORTS: multi-select CSV; pyannote base valid values are vad / diar / speaker_embed / enhance. */ -}}
-{{- $supportsRaw := $oe.MODEL_SUPPORTS | default "diar" -}}
-{{- $supports := list -}}
-{{- range $tok := splitList "," $supportsRaw -}}
-{{- $t := trim $tok -}}
-{{- if $t -}}{{- $supports = append $supports $t -}}{{- end -}}
-{{- end -}}
-{{- $hasVad := has "vad" $supports -}}
-{{- $hasDiar := has "diar" $supports -}}
-{{- $hasEmbed := has "speaker_embed" $supports -}}
-{{- $hasEnhance := has "enhance" $supports -}}
-{{- /* Pick the primary runtime (precedence: diar > speaker_embed > vad > enhance); primaryCap also names the engine container. */ -}}
-{{- $primaryCap := "diar" -}}
-{{- $healthPath := "/healthz" -}}
-{{- $engineCmd := "" -}}
+{{- /* MODEL_SUPPORTS: on the CosyVoice base valid values are tts and tts_clone. */ -}}
+{{- $supportsRaw := $oe.MODEL_SUPPORTS | default "tts,tts_clone" -}}
+{{- $primaryCap := "tts_clone" -}}
+{{- $healthPath := "/health" -}}
 {{- $baseImage := "docker.io/beclab/maximsachs-pyannote_fastapi:4.0.4" -}}
-{{- if $hasDiar -}}
-{{- $primaryCap = "diar" -}}
-{{- $engineCmd = "exec $(command -v python3 || command -v python) /wrappers/diar.py" -}}
-{{- else if $hasEmbed -}}
-{{- $primaryCap = "speaker_embed" -}}
-{{- $engineCmd = "exec $(command -v python3 || command -v python) /wrappers/embed.py" -}}
-{{- else if $hasVad -}}
-{{- $primaryCap = "vad" -}}
-{{- $engineCmd = "exec $(command -v python3 || command -v python) /wrappers/vad.py" -}}
-{{- else if $hasEnhance -}}
-{{- $primaryCap = "enhance" -}}
-{{- $engineCmd = "exec $(command -v python3 || command -v python) /wrappers/enhance.py" -}}
-{{- end -}}
-{{- /* Container name = audio-<primaryCap>-<model> (DNS-safe, <=63 chars). */ -}}
+{{- $engineCmd := "export HF_HUB_OFFLINE=1; [ -f /pydeps/.cosyvoice.ok ] || { python3 -m pip install -q fastapi uvicorn python-multipart soundfile librosa && python3 -m pip install -q cosyvoice 2>/dev/null; touch /pydeps/.cosyvoice.ok; }; exec $(command -v python3 || command -v python) /wrappers/cosyvoice.py" -}}
+{{- /* Container name = audio-stt-<model> (DNS-safe, <=63 chars). */ -}}
 {{- $modelSan := regexReplaceAll "[^a-z0-9]+" (lower $modelName) "-" | trimAll "-" -}}
-{{- $cname := printf "audio-%s-%s" ($primaryCap | replace "_" "-") $modelSan | trunc 63 | trimSuffix "-" -}}
+{{- $cname := printf "audio-%s-%s" $primaryCap $modelSan | trunc 63 | trimSuffix "-" -}}
 {{- $engineImage := $oe.ENGINE_IMAGE | default $baseImage -}}
 {{- $enginePort := int ($oe.ENGINE_PORT | default "8000") -}}
 {{- $healthPath = $oe.ENGINE_HEALTH_PATH | default $healthPath -}}
@@ -41,7 +30,6 @@
 {{- $memRequest := trim ($oe.AUDIO_MEMORY_REQUEST | default "2Gi") -}}
 {{- $cpuLimit := trim ($oe.AUDIO_CPU_LIMIT | default "6") -}}
 {{- $memLimit := trim ($oe.AUDIO_MEMORY_LIMIT | default "24Gi") -}}
-{{- /* GPU is OPTIONAL (AUDIO_REQUIRED_GPU_MEMORY = "" or "0" => CPU-only; vad/embed run fine on CPU, diar/enhance benefit from GPU). */ -}}
 {{- $gpuRaw := trim ($oe.AUDIO_REQUIRED_GPU_MEMORY | default "") -}}
 {{- $wantGpu := and (ne $gpuRaw "") (ne $gpuRaw "0") -}}
 {{- $gpuMiB := "" -}}
@@ -77,7 +65,7 @@ metadata:
     applications.app.bytetrade.io/gpu-inject: "{{ $cname }}"
 {{- end }}
 spec:
-  replicas: {{ .Values.workloads.audiopyannotebasexv3.replicaCount }}
+  replicas: {{ .Values.workloads.audiocosyvoicebasexv3.replicaCount }}
   selector:
     matchLabels:
       io.kompose.service: audio-engine

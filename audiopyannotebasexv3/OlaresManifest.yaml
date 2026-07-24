@@ -10,12 +10,7 @@ metadata:
   version: '1.0.0'
   categories:
     - AI
-# INTERNAL shared API (mirrors the updated llamacppllmbasev3 base): a sharedEntrances
-# stub -> the sharedentrances-api Service (:80 -> llm-init:8090). This is the cluster-
-# internal, no-public-edge, no-SSO endpoint the LLM Gateway should use as provider
-# base_url (http://sharedentrances-api.<ns>:80 + /v1), bypassing the public edge's
-# ~17s first-byte timeout that RST's queued/long requests. invisible + authLevel
-# internal: no public URL, not shown on the desktop.
+# INTERNAL shared API: sharedEntrances stub -> sharedentrances-api Service (:80 -> llm-init:8090), the no-edge/no-SSO base_url the LLM Gateway should use (http://sharedentrances-api.<ns>:80 + /v1) to bypass the public edge's ~17s first-byte timeout; invisible + authLevel internal.
 sharedEntrances:
   - name: audiopyannotebasexv3api
     host: sharedentrances-api
@@ -24,10 +19,7 @@ sharedEntrances:
     invisible: true
     authLevel: internal
     icon: https://app.cdn.olares.com/appstore/whisperwebui/icon.png
-# Public entrance -> llm-init (download-svc:8090). In audio-proxy mode llm-init IS
-# the complete base: it serves its control plane / dashboard / /api/model-spec on
-# "/", reverse-proxies "/v1/*" to the sibling audio engine, and synthesizes
-# /v1/models at the edge. No openresty/nginx sidecar (removed vs audiolabxv3).
+# Public entrance -> llm-init (download-svc:8090): in audio-proxy mode llm-init IS the complete base (control plane/dashboard/model-spec on "/", reverse-proxies "/v1/*" to the audio engine, synthesizes /v1/models), no openresty/nginx sidecar.
 entrances:
   - name: audiopyannotebasexv3
     port: 8090
@@ -152,9 +144,7 @@ envs:
     type: string
     editable: true
     applyOnChange: true
-  # MODEL_SUPPORTS: multi-select of the capabilities THIS instance exposes. On the
-  # pyannote base the valid values are vad / diar / speaker_embed / enhance (each maps
-  # to /v1/audio/* endpoints in llm-init). Pick what the chosen model actually supports.
+  # MODEL_SUPPORTS: multi-select of the capabilities THIS instance exposes (pyannote base valid values vad / diar / speaker_embed / enhance, each mapping to /v1/audio/* in llm-init); pick what the model supports.
   - envName: MODEL_SUPPORTS
     required: true
     default: ""

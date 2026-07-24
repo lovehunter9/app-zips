@@ -1,0 +1,6 @@
+apiVersion: v2
+appVersion: "1.0.0"
+description: Audio model base (Kokoro TTS engine, llm-init audio-proxy). One instance = one Kokoro TTS model; capability tts (text-to-speech). llm-init downloads the model AND fronts the engine's OpenAI /v1/* directly (ENGINE_KIND=audio, no nginx).
+name: audiokokorobasexv3
+type: application
+version: 1.0.0

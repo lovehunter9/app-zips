@@ -1,24 +1,8 @@
-{{- /* vLLM audio engine base (audiovllmbasexv3).
-       ONE engine image only: vLLM cu129. This base serves the audio capabilities
-       that ride vLLM: stt (native `vllm serve`), stt_stream (/wrappers/stream.py,
-       WebSocket), align (/wrappers/align.py). No cross-engine auto-select — every
-       other engine family (pyannote/torch, NeMo, faster-whisper) is its own base.
-
-       Capability selection is driven by MODEL_SUPPORTS (CSV, e.g. "stt" or
-       "stt,stt_stream"), NOT by a single MODEL_MODE. The gateway-facing coarse mode
-       is fixed to `audio` (set on the llm-init container, see llm-init.yaml). The
-       llm-init front decides which /v1/audio/* endpoints to expose from MODEL_SUPPORTS.
-
-       FIRST CUT: single-capability runtimes reuse the exact tested commands. The
-       stt+stt_stream single-model-load unified wrapper (one loaded qwen-asr serving
-       BOTH offline transcription and streaming WS) is NOT yet built — that path needs
-       a GPU to validate. Until then, selecting stt_stream runs stream.py (streaming);
-       combining it with stt on one instance is the pending unified wrapper. */ -}}
+{{- /* vLLM audio engine base: ONE image (vLLM cu129) serving stt / stt_stream / align chosen via MODEL_SUPPORTS CSV (coarse mode fixed to `audio` on llm-init); single-capability runtimes reuse tested commands, the stt+stt_stream unified wrapper is pending GPU validation. */ -}}
 {{- $oe := .Values.olaresEnv | default dict -}}
 {{- $modelName := $oe.MODEL_NAME | default "" -}}
 {{- $modelSource := $oe.MODEL_SOURCE | default "" -}}
-{{- /* MODEL_SUPPORTS: multi-select CSV of the capabilities this instance exposes.
-       On the vLLM base the valid values are stt / stt_stream / align. */ -}}
+{{- /* MODEL_SUPPORTS: multi-select CSV of this instance's capabilities (valid on the vLLM base: stt / stt_stream / align). */ -}}
 {{- $supportsRaw := $oe.MODEL_SUPPORTS | default "stt" -}}
 {{- $supports := list -}}
 {{- range $tok := splitList "," $supportsRaw -}}
@@ -29,8 +13,7 @@
 {{- $hasSttStream := has "stt_stream" $supports -}}
 {{- $hasAlign := has "align" $supports -}}
 {{- $isQwen := contains "qwen" (lower $modelName) -}}
-{{- /* Pick the primary runtime (precedence: stt_stream > stt > align). primaryCap
-       also becomes the engine container's MODEL_MODE for tested-wrapper compat. */ -}}
+{{- /* Pick the primary runtime (precedence stt_stream > stt > align); primaryCap also becomes the engine container's MODEL_MODE for tested-wrapper compat. */ -}}
 {{- $primaryCap := "stt" -}}
 {{- $healthPath := "/health" -}}
 {{- $engineCmd := "" -}}
@@ -52,8 +35,7 @@
 {{- $healthPath = "/healthz" -}}
 {{- $engineCmd = "export HF_HUB_OFFLINE=1; [ -f /pydeps/.align.ok ] || { python3 -m pip install -q --ignore-installed blinker || true; python3 -m pip install -q qwen-asr librosa soundfile av && touch /pydeps/.align.ok; }; exec $(command -v python3 || command -v python) /wrappers/align.py" -}}
 {{- end -}}
-{{- /* Container name = audio-<primaryCap>-<model> (DNS-safe, <=63 chars) so the
-       Containers panel shows capability+model at a glance. */ -}}
+{{- /* Container name = audio-<primaryCap>-<model> (DNS-safe, <=63 chars) so the Containers panel shows capability+model at a glance. */ -}}
 {{- $modelSan := regexReplaceAll "[^a-z0-9]+" (lower $modelName) "-" | trimAll "-" -}}
 {{- $cname := printf "audio-%s-%s" ($primaryCap | replace "_" "-") $modelSan | trunc 63 | trimSuffix "-" -}}
 {{- $engineImage := $oe.ENGINE_IMAGE | default $vllmImage -}}
@@ -89,13 +71,7 @@
 {{- $vllmUtil = printf "%.2f" $u -}}
 {{- end -}}
 {{- if not $vllmUtil -}}{{- $vllmUtil = "0.45" -}}{{- end -}}
-{{- /* stt_stream max_model_len is DERIVED from the allocated GPU quota, not hardcoded:
-       give the instance more gpumem and it automatically holds a longer context (offline
-       whole-clip capacity + streaming window both scale with it). This is the qwen-asr
-       DEFAULT (65536) when there is enough VRAM, matched to the package's own 1200s
-       silence-chunker; smaller quotas step down so the engine still boots instead of
-       OOM-crashing. Override explicitly via STREAM_MAX_LEN if ever needed. Roughly:
-       KV(65536)~7GiB, KV scales ~linearly, weights+streaming-overhead+activations~8GiB. */ -}}
+{{- /* stt_stream max_model_len is DERIVED from the allocated GPU quota (more gpumem => longer context), stepping down from the qwen-asr default 65536 so small quotas still boot instead of OOMing; override via STREAM_MAX_LEN. */ -}}
 {{- $streamMaxLen := trim ($oe.STREAM_MAX_LEN | default "") -}}
 {{- if and (eq $streamMaxLen "") $wantGpu -}}
 {{- $g := int $gpuMiB -}}
@@ -170,9 +146,7 @@ spec:
               value: "{{ $modelName }}"
             - name: MODEL_SOURCE
               value: "{{ $modelSource }}"
-            # Engine-container MODEL_MODE = primary capability (kept for tested-wrapper
-            # compatibility). The gateway-facing coarse mode `audio` + MODEL_SUPPORTS
-            # live on the llm-init container (llm-init.yaml).
+            # Engine-container MODEL_MODE = primary capability (tested-wrapper compat); the coarse `audio` mode + MODEL_SUPPORTS live on the llm-init container.
             - name: MODEL_MODE
               value: "{{ $primaryCap }}"
             - name: MODEL_SUPPORTS
@@ -183,8 +157,7 @@ spec:
               value: "{{ $vllmUtil }}"
             - name: VLLM_MAX_LEN
               value: "{{ $oe.MODEL_MAX_LEN | default "32768" }}"
-            # stt_stream (stream.py) max_model_len, DERIVED from the GPU quota above
-            # (bigger GPU => longer offline/streaming context). Not a clone --env.
+            # stt_stream (stream.py) max_model_len, DERIVED from the GPU quota above (bigger GPU => longer context); not a clone --env.
             - name: STREAM_MAX_LEN
               value: "{{ $streamMaxLen }}"
             - name: VLLM_MAX_AUDIO_CLIP_FILESIZE_MB
@@ -218,9 +191,7 @@ spec:
           ports:
             - name: http
               containerPort: {{ $enginePort }}
-          # NO readinessProbe (mirrors llamacpp): pod Ready as soon as it starts so the
-          # app reaches "running" while the model downloads; llm-init NotReadyGuard 503-gates
-          # /v1/* until the engine is alive.
+          # NO readinessProbe (mirrors llamacpp): pod Ready at start so the app reaches "running" while the model downloads; llm-init NotReadyGuard 503-gates /v1/* until the engine is alive.
           volumeMounts:
             - name: hf-cache
               mountPath: /cache/hf/hub

@@ -1,0 +1,224 @@
+olaresManifest.version: "0.12.0"
+olaresManifest.type: app
+apiVersion: 'v3'
+metadata:
+  name: audiokokorobasexv3
+  icon: https://app.cdn.olares.com/appstore/whisperwebui/icon.png
+  description: Audio model base (Kokoro TTS engine, llm-init audio-proxy). One instance = one Kokoro model; capability tts (text-to-speech) via MODEL_SUPPORTS. llm-init downloads the model AND fronts the engine's OpenAI /v1/* directly (ENGINE_KIND=audio, no nginx).
+  appid: audiokokorobasexv3
+  title: Audio Kokoro TTS Base X V3
+  version: '1.0.0'
+  categories:
+    - AI
+# INTERNAL shared API: a sharedEntrances stub -> the sharedentrances-api Service
+# (:80 -> llm-init:8090). This is the cluster-internal, no-public-edge, no-SSO endpoint
+# the LLM Gateway should use as provider base_url (http://sharedentrances-api.<ns>:80 +
+# /v1), bypassing the public edge's ~17s first-byte timeout.
+sharedEntrances:
+  - name: audiokokorobasexv3api
+    host: sharedentrances-api
+    port: 0
+    title: Audio Kokoro TTS Base X V3 API
+    invisible: true
+    authLevel: internal
+    icon: https://app.cdn.olares.com/appstore/whisperwebui/icon.png
+# Public entrance -> llm-init (download-svc:8090). In audio-proxy mode llm-init IS the
+# complete base: serves its control plane / dashboard / /api/model-spec on "/",
+# reverse-proxies "/v1/*" to the sibling audio engine, synthesizes /v1/models at the edge.
+entrances:
+  - name: audiokokorobasexv3
+    port: 8090
+    host: download-svc
+    title: Audio Kokoro TTS Base X V3
+    icon: https://app.cdn.olares.com/appstore/whisperwebui/icon.png
+    openMethod: window
+    authLevel: public
+workloadReplicas:
+  audiokokorobasexv3: 1
+  llminit: 1
+spec:
+  versionName: '1.0.0'
+  fullDescription: |
+    **Audio model base — Kokoro TTS engine (`audiokokorobasexv3`, llm-init audio-proxy)**
+    A generic *base* for text-to-speech models that run on the Kokoro engine. One
+    installed instance = one model. The capability exposed is `tts` (text-to-speech),
+    chosen at install time via `MODEL_SUPPORTS`.
+
+    **HOW IT WORKS (llm-init audio-proxy mode, `ENGINE_KIND=audio`)**
+    llm-init does BOTH jobs: (1) downloads the configured model into the shared HF
+    cache, and (2) IS the OpenAI-compatible data plane — it reverse-proxies `/v1/*`
+    to the sibling audio engine at `http://audio-engine:8000`, synthesizes `/v1/models`
+    at the edge, and serves its control plane / dashboard on `/`. The single entrance is
+    `download-svc:8090`. The engine container waits for llm-init's download sentinel.
+
+    **Engine** — the pyannote/torch image is reused as a generic torch+fastapi runtime
+    (same paradigm as the vad/translate/embed/enhance wrappers). On first run
+    `/wrappers/kokoro.py` pip-installs `kokoro` into the persistent `/pydeps` venv, loads
+    the model from the shared HF cache, and serves `POST /v1/audio/speech`
+    (OpenAI-compatible: `{model, input, voice, response_format, speed}`).
+
+    **Clone form**
+    - `MODEL_SOURCE` — `hf://<repo>` (llm-init download spec).
+    - `MODEL_NAME` — model id advertised to clients.
+    - `MODEL_SUPPORTS` — `tts` (text-to-speech).
+    - `AUDIO_REQUIRED_GPU_MEMORY` — Kokoro-82M is tiny; `4Gi` is ample (CPU also viable).
+
+    **Example clone set**
+    - TTS (Kokoro): MODEL_SOURCE=hf://hexgrad/Kokoro-82M
+      MODEL_NAME=hexgrad/Kokoro-82M  MODEL_SUPPORTS=tts  AUDIO_REQUIRED_GPU_MEMORY=4Gi
+
+    NOTE (first version): espeak-ng (misaki g2p OOV/multilingual fallback) may be absent
+    from the reused image; English works via misaki's built-in G2P. Bake espeak-ng into a
+    dedicated engine image for full multilingual quality. Requires llm-init with the
+    /v1/audio/speech (tts) route.
+
+  upgradeDescription: |
+    v1.0.0: initial Kokoro TTS audio base. llm-init runs ENGINE_KIND=audio: it downloads
+    the model AND reverse-proxies the engine's OpenAI /v1/* directly (no nginx). Capability
+    tts chosen at clone via MODEL_SUPPORTS; GPU optional (Kokoro-82M runs on CPU too).
+
+  developer: beclab
+  website: https://github.com/beclab/llm-init
+  sourceCode: https://github.com/beclab/llm-init
+  submitter: Olares
+  locale:
+    - en-US
+    - zh-CN
+  license:
+    - text: Apache-2.0
+      url: https://huggingface.co/hexgrad/Kokoro-82M
+
+  accelerator:
+    - mode: nvidia
+      limitedCpu: "-1"
+      requiredCpu: "-1"
+      requiredDisk: 50Mi
+      limitedDisk: 500Gi
+      limitedMemory: "-1"
+      requiredMemory: "-1"
+      requiredGPUMemory: "-1"
+      limitedGPUMemory: "-1"
+    - mode: nvidia-gb10
+      limitedCpu: "-1"
+      requiredCpu: "-1"
+      requiredDisk: 50Mi
+      limitedDisk: 500Gi
+      limitedMemory: "-1"
+      requiredMemory: "-1"
+
+  supportArch:
+    - amd64
+    - arm64
+permission:
+  appData: true
+  appCache: true
+  appCommon: true
+options:
+  apiTimeout: 0
+  LLMGatewaySupported: true
+  allowMultipleInstall: true
+  shared: true
+  templateOnly: true
+  dependencies:
+    - name: olares
+      version: '>=1.12.6-0'
+      type: system
+envs:
+  - envName: MODEL_SOURCE
+    required: true
+    type: string
+    editable: true
+    applyOnChange: true
+  - envName: MODEL_NAME
+    required: true
+    type: string
+    editable: true
+    applyOnChange: true
+  # MODEL_SUPPORTS: on the Kokoro base the only valid value is tts (maps to
+  # /v1/audio/speech in llm-init).
+  - envName: MODEL_SUPPORTS
+    required: true
+    default: ""
+    type: string
+    editable: true
+    applyOnChange: true
+    multiSelect: true
+    splitter: ","
+    options:
+    - title: TTS (text-to-speech, Kokoro)
+      value: tts
+  - envName: KOKORO_DEFAULT_VOICE
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+    default: "af_heart"
+  - envName: ENGINE_IMAGE
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+  - envName: ENGINE_PORT
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+  - envName: ENGINE_HEALTH_PATH
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+  - envName: LOG_LEVEL
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+    default: "info"
+    options:
+    - title: Debug
+      value: debug
+    - title: Info
+      value: info
+    - title: Warn
+      value: warn
+    - title: Error
+      value: error
+  - envName: HF_ENDPOINT
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_USER_HUGGINGFACE_SERVICE
+  - envName: HF_TOKEN
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_USER_HUGGINGFACE_TOKEN
+  - envName: AUDIO_CPU_REQUEST
+    required: true
+    default: "500m"
+    type: string
+    editable: true
+    applyOnChange: true
+  - envName: AUDIO_MEMORY_REQUEST
+    required: true
+    default: "2Gi"
+    type: string
+    editable: true
+    applyOnChange: true
+  - envName: AUDIO_CPU_LIMIT
+    required: true
+    default: "6"
+    type: string
+    editable: true
+    applyOnChange: true
+  - envName: AUDIO_MEMORY_LIMIT
+    required: true
+    default: "16Gi"
+    type: string
+    editable: true
+    applyOnChange: true
+  - envName: AUDIO_REQUIRED_GPU_MEMORY
+    required: true
+    type: string
+    editable: true
+    applyOnChange: true

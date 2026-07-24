@@ -1,0 +1,231 @@
+{{- /* Engine wrapper scripts for the Kokoro TTS base. Injected into the REUSED
+       pyannote/torch image (no new image build). engine.yaml's $engineCmd pip-installs
+       `kokoro` (+ soundfile) into the persistent /pydeps venv on first run, then runs
+       /wrappers/kokoro.py. The wrapper loads the llm-init-downloaded Kokoro model from
+       the shared HF cache and serves the OpenAI TTS contract. */ -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: audio-wrappers
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: audio-engine
+data:
+  # Shared GPU-introspection helper (same as every other audio base). Exposes the
+  # audio_gpu_* Prometheus gauges llm-init reads for GET /api/diag/gpu.
+  _gpumetrics.py: |
+    # Uniform GPU /metrics for audio engine wrappers. import + mount_metrics(app).
+    def gpu_metrics_text():
+        present, used, total, util = 0, 0, 0, 0.0
+        try:
+            import torch
+            if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+                present = 1
+                free, tot = torch.cuda.mem_get_info()  # bytes, current device (HAMi slice)
+                total = int(tot)
+                used = int(tot - free)
+                try:
+                    util = float(torch.cuda.utilization()) / 100.0  # needs pynvml; 0 if absent
+                except Exception:
+                    util = 0.0
+        except Exception:
+            present = 0
+        lines = []
+        def g(name, help_, val):
+            lines.append("# HELP %s %s" % (name, help_))
+            lines.append("# TYPE %s gauge" % name)
+            lines.append("%s %s" % (name, val))
+        g("audio_gpu_present", "1 if a CUDA device is visible to this engine, else 0", present)
+        g("audio_gpu_mem_used_bytes", "GPU memory in use on this engine's device slice (bytes)", used)
+        g("audio_gpu_mem_total_bytes", "GPU memory visible to this engine (HAMi quota, bytes)", total)
+        g("audio_gpu_util_ratio", "GPU compute utilization 0..1 (0 when unavailable)", "%.4f" % util)
+        return "\n".join(lines) + "\n"
+
+    def mount_metrics(app):
+        # Register GET /metrics on a FastAPI/Starlette app (Prometheus text exposition).
+        from fastapi.responses import PlainTextResponse
+        @app.get("/metrics")
+        def _metrics():
+            return PlainTextResponse(gpu_metrics_text(),
+                                     media_type="text/plain; version=0.0.4")
+        return app
+  kokoro.py: |
+    # Kokoro-82M TTS on the shared pyannote/torch image. Loads the llm-init-downloaded
+    # model from the shared HF cache and exposes the OpenAI-compatible TTS contract so it
+    # is a drop-in behind llm-init's audio proxy (gateway + Demo unchanged):
+    #   GET /health, GET /healthz, GET /v1/models, GET /v1/audio/voices,
+    #   POST /v1/audio/speech  (OpenAI: {model, input, voice, response_format, speed}).
+    #
+    # FIRST VERSION — open items (verify before publish):
+    #   * espeak-ng: misaki (Kokoro g2p) falls back to espeak-ng for OOV / non-English.
+    #     The pyannote image may not ship it and we have no root at runtime to apt it.
+    #     English works via misaki's built-in G2P; bake espeak-ng into a dedicated image
+    #     for full multilingual quality.
+    #   * response_format: WAV/PCM are produced natively (soundfile). mp3/opus/flac fall
+    #     back to WAV unless ffmpeg is present (best-effort transcode).
+    import os, io, sys, threading, logging, subprocess
+    import numpy as np
+    from fastapi import FastAPI, HTTPException, Body
+    from fastapi.responses import Response
+    import uvicorn
+
+    LOG_LEVEL = os.environ.get("LOG_LEVEL", "info").lower()
+    logging.basicConfig(level=getattr(logging, LOG_LEVEL.upper(), logging.INFO))
+    log = logging.getLogger("audio-tts-kokoro")
+
+    MODEL_NAME = os.environ.get("MODEL_NAME", "hexgrad/Kokoro-82M")
+    _src = os.environ.get("MODEL_SOURCE", "")
+    MODEL_REPO = _src[5:] if _src.startswith("hf://") else (_src or MODEL_NAME)
+    PORT = int(os.environ.get("WRAPPER_PORT", "8000"))
+    SAMPLE_RATE = 24000  # Kokoro output rate
+    DEFAULT_VOICE = os.environ.get("KOKORO_DEFAULT_VOICE", "af_heart")
+    # voice-prefix -> KPipeline lang_code (Kokoro convention). Override per-request with
+    # `lang_code` / `language`, else derived from the voice's first char.
+    _VOICE_LANG = {"a": "a", "b": "b", "z": "z", "j": "j", "e": "e",
+                   "f": "f", "h": "h", "i": "i", "p": "p"}
+
+    app = FastAPI(title="audio-tts (kokoro)")
+    try:
+        from _gpumetrics import mount_metrics
+        mount_metrics(app)  # GET /metrics -> uniform audio_gpu_* gauges
+    except Exception as _e:
+        log.warning("gpu /metrics unavailable: %s", _e)
+
+    _state = {"ready": False, "error": None, "device": None}
+    _pipelines = {}          # lang_code -> KPipeline (one model load, many pipelines)
+    _lock = threading.Lock()
+
+    def _load():
+        try:
+            import torch
+            from kokoro import KPipeline  # noqa: F401  (import proves the dep is present)
+            _state["device"] = "cuda" if torch.cuda.is_available() else "cpu"
+            # Warm the default lang's pipeline (also validates the HF cache download).
+            _get_pipeline(_lang_for_voice(DEFAULT_VOICE))
+            _state["ready"] = True
+            log.info("kokoro loaded (repo=%s device=%s)", MODEL_REPO, _state["device"])
+        except Exception as e:
+            _state["error"] = str(e)
+            log.exception("tts load failed: %s", e)
+
+    def _lang_for_voice(voice):
+        v = (voice or DEFAULT_VOICE).strip().lower()
+        return _VOICE_LANG.get(v[:1], "a")
+
+    def _get_pipeline(lang_code):
+        with _lock:
+            p = _pipelines.get(lang_code)
+            if p is None:
+                from kokoro import KPipeline
+                import torch
+                dev = "cuda" if torch.cuda.is_available() else "cpu"
+                p = KPipeline(lang_code=lang_code, repo_id=MODEL_REPO, device=dev)
+                _pipelines[lang_code] = p
+            return p
+
+    @app.on_event("startup")
+    def _startup():
+        threading.Thread(target=_load, daemon=True).start()
+
+    @app.get("/health")
+    def health():
+        if _state["ready"]:
+            return {"status": "ok", "device": _state["device"]}
+        raise HTTPException(status_code=503, detail=_state["error"] or "loading model")
+
+    @app.get("/healthz")
+    def healthz():
+        return health()
+
+    @app.get("/readyz")
+    def readyz():
+        return health()
+
+    @app.get("/v1/models")
+    def models():
+        return {"object": "list",
+                "data": [{"id": MODEL_NAME, "object": "model", "owned_by": "local", "mode": "tts"}]}
+
+    @app.get("/v1/audio/voices")
+    def voices():
+        # Best-effort listing of the voices packaged in the model repo (voices/*.pt).
+        out = []
+        try:
+            from huggingface_hub import list_repo_files
+            for f in list_repo_files(MODEL_REPO):
+                if f.startswith("voices/") and f.endswith(".pt"):
+                    out.append(os.path.basename(f)[:-3])
+        except Exception:
+            pass
+        return {"voices": sorted(out) or [DEFAULT_VOICE]}
+
+    def _synth(text, voice, speed, lang_code):
+        pipe = _get_pipeline(lang_code)
+        chunks = []
+        for _gs, _ps, audio in pipe(text, voice=voice, speed=speed):
+            a = audio
+            try:
+                import torch
+                if isinstance(a, torch.Tensor):
+                    a = a.detach().cpu().numpy()
+            except Exception:
+                pass
+            chunks.append(np.asarray(a, dtype=np.float32).reshape(-1))
+        if not chunks:
+            return np.zeros(1, dtype=np.float32)
+        return np.concatenate(chunks)
+
+    def _encode(wav, fmt):
+        import soundfile as sf
+        fmt = (fmt or "wav").lower()
+        if fmt in ("pcm", "wav", ""):
+            buf = io.BytesIO()
+            sf.write(buf, wav, SAMPLE_RATE, format="WAV", subtype="PCM_16")
+            return buf.getvalue(), "audio/wav"
+        # Try native libsndfile formats first (flac/ogg), then ffmpeg for mp3.
+        try:
+            buf = io.BytesIO()
+            sf.write(buf, wav, SAMPLE_RATE, format=fmt.upper())
+            mt = {"flac": "audio/flac", "ogg": "audio/ogg", "opus": "audio/ogg"}.get(fmt, "application/octet-stream")
+            return buf.getvalue(), mt
+        except Exception:
+            pass
+        try:  # ffmpeg best-effort (mp3/opus/etc.)
+            wbuf = io.BytesIO()
+            sf.write(wbuf, wav, SAMPLE_RATE, format="WAV", subtype="PCM_16")
+            p = subprocess.run(["ffmpeg", "-y", "-nostdin", "-i", "pipe:0", "-f", fmt, "pipe:1"],
+                               input=wbuf.getvalue(), capture_output=True)
+            if p.returncode == 0 and p.stdout:
+                mt = {"mp3": "audio/mpeg", "opus": "audio/ogg", "aac": "audio/aac"}.get(fmt, "application/octet-stream")
+                return p.stdout, mt
+        except Exception:
+            pass
+        buf = io.BytesIO()  # last resort: WAV
+        sf.write(buf, wav, SAMPLE_RATE, format="WAV", subtype="PCM_16")
+        return buf.getvalue(), "audio/wav"
+
+    @app.post("/v1/audio/speech")
+    def speech(body: dict = Body(...)):
+        if not _state["ready"]:
+            raise HTTPException(status_code=503, detail=_state["error"] or "model not ready")
+        text = (body.get("input") or body.get("text") or "").strip()
+        if not text:
+            raise HTTPException(status_code=400, detail="`input` (text) is required")
+        voice = (body.get("voice") or DEFAULT_VOICE).strip()
+        fmt = (body.get("response_format") or "wav").strip().lower()
+        try:
+            speed = float(body.get("speed") or 1.0)
+        except Exception:
+            speed = 1.0
+        lang_code = (body.get("lang_code") or body.get("language") or "").strip().lower() \
+            or _lang_for_voice(voice)
+        try:
+            wav = _synth(text, voice, speed, lang_code)
+        except Exception as e:
+            log.exception("tts synth failed: %s", e)
+            raise HTTPException(status_code=500, detail="tts failed: %s" % e)
+        data, mt = _encode(wav, fmt)
+        return Response(content=data, media_type=mt)
+
+    if __name__ == "__main__":
+        uvicorn.run(app, host="0.0.0.0", port=PORT, log_level=LOG_LEVEL)

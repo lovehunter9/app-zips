@@ -1,15 +1,29 @@
-{{- /* llm-init in AUDIO-PROXY mode (ENGINE_KIND=audio) — the single entrance: it BOTH downloads MODEL_SOURCE into the shared HF cache AND is the OpenAI data plane (reverse-proxies /v1/* to audio-engine:8000, synthesizes /v1/models, serves dashboard on :8090); one Service (download-svc:8090) is the complete base, and the engine blocks on the download sentinel instead of polling /readyz. */ -}}
-{{- $clientDomainENV := split "," .Values.domain.audiopyannotebasexv3 -}}
+{{- /* llm-init in AUDIO-PROXY mode (ENGINE_KIND=audio) — the single entrance.
+       Unlike audiolabxv3 (download-only llm-init + nginx sidecar), here llm-init:
+         1. downloads MODEL_SOURCE into the shared HF cache (like before), and
+         2. IS the OpenAI-compatible data plane: it reverse-proxies /v1/* to the
+            sibling audio-engine (http://audio-engine:8000, hardcoded in llm-init),
+            synthesizes /v1/models at the edge, and serves its control plane +
+            dashboard on :8090.
+       No nginx/openresty ingress: this one Service (download-svc:8090) is the
+       complete base, like llamacppllmbasev3. Requires llm-init >= v1.3.2-test1
+       (adds ENGINE_KIND=audio). The engine (engine.yaml) no longer polls /readyz;
+       it blocks on the download sentinel llm-init writes to the shared run-state
+       hostPath (RUN_DIR), which breaks the proxy<->engine readiness deadlock. */ -}}
+{{- $clientDomainENV := split "," .Values.domain.audiocosyvoicebasexv3 -}}
 {{- $clientDomain := index $clientDomainENV "_0" -}}
 {{- $oe := .Values.olaresEnv | default dict -}}
 {{- $modelSource := $oe.MODEL_SOURCE | default "" -}}
 {{- $modelName := $oe.MODEL_NAME | default "" -}}
-{{- /* Coarse gateway-facing mode is fixed to `audio`; concrete capabilities via MODEL_SUPPORTS (CSV), and llm-init exposes /v1/audio/* per MODEL_SUPPORTS. */ -}}
-{{- $modelSupports := $oe.MODEL_SUPPORTS | default "stt" -}}
+{{- /* Coarse gateway-facing mode is fixed to `audio`; the concrete capabilities are
+       carried by MODEL_SUPPORTS (CSV). llm-init exposes /v1/audio/* per MODEL_SUPPORTS. */ -}}
+{{- $modelSupports := $oe.MODEL_SUPPORTS | default "tts,tts_clone" -}}
 {{- $logLevel := $oe.LOG_LEVEL | default "debug" -}}
 {{- $hfEndpoint := $oe.HF_ENDPOINT | default "" -}}
 {{- $hfToken := $oe.HF_TOKEN | default "" -}}
-{{- /* run-state lives under appCommon/huggingface (persistent, co-located with the HF cache, survives appCache eviction); the engine reads the download sentinel from the same path. */ -}}
+{{- /* run-state lives under appCommon/huggingface (persistent, co-located with the HF
+       cache) — matches the updated llamacppllmbasev3 base and survives appCache eviction.
+       Engine's wait-models initContainer reads the download sentinel from the same path. */ -}}
 {{- $runStateHostPath := printf "%s/huggingface/llm-init-run/%s" .Values.userspace.appCommon .Release.Name -}}
 ---
 apiVersion: apps/v1
@@ -49,7 +63,9 @@ spec:
           command:
             - sh
             - -c
-            # Ensure the HF locks dir exists and the shared cache + run-state are owned by UID 1000 (a root-owned .locks subdir from a prior run would fail downloads).
+            # Ensure the HF locks dir exists and the whole shared cache + run-state are
+            # owned by UID 1000 (huggingface_hub locks under .locks; a root-owned subdir
+            # from a prior run would fail downloads). Matches the updated llamacpp base.
             - "mkdir -p /cache/hf/hub/.locks && chown -R 1000:1000 /cache/hf/hub /run/llm-init || true"
           volumeMounts:
             - name: hf-cache
@@ -63,12 +79,17 @@ spec:
           image: docker.io/lovehunter9/llm-init:v1.3.2-audiobase6
           imagePullPolicy: IfNotPresent
           env:
-            # AUDIO proxy mode: llm-init fronts http://audio-engine:8000 (hardcoded) as an OpenAI-compatible /v1/* surface + synthesizes /v1/models.
+            # AUDIO proxy mode: llm-init fronts http://audio-engine:8000 (hardcoded)
+            # as an OpenAI-compatible /v1/* surface + synthesizes /v1/models.
             - name: ENGINE_KIND
               value: "audio"
             - name: MODEL_NAME
               value: "{{ $modelName }}"
-            # Coarse mode fixed to `audio`; concrete capabilities via MODEL_SUPPORTS (llm-init exposes /v1/audio/* per supports, synthesizes /v1/models, and reads the wrapper /metrics audio_gpu_* gauges for /api/diag/gpu).
+            # Coarse mode fixed to `audio`; concrete capabilities via MODEL_SUPPORTS.
+            # llm-init (audiobase3+) exposes /v1/audio/* per MODEL_SUPPORTS and
+            # synthesizes /v1/models with the supports list. audiobase4 adds the
+            # uniform audio GPU introspection (reads the wrapper /metrics audio_gpu_*
+            # gauges for /api/diag/gpu; falls back to vLLM metrics for native stt).
             - name: MODEL_MODE
               value: "audio"
             - name: MODEL_SUPPORTS
@@ -98,7 +119,10 @@ spec:
           ports:
             - name: http
               containerPort: 8090
-          # K8s readiness stays on /livez (process up), NOT /readyz, so download-svc has an endpoint as soon as llm-init is up; /v1/* is gated inside llm-init by its own readiness (NotReadyGuard -> 503 until the engine is alive).
+          # K8s readiness stays on /livez (process up), NOT /readyz: download-svc
+          # must have an endpoint as soon as llm-init is up so the entrance works
+          # while the engine boots. /v1/* is gated inside llm-init by its own
+          # readiness (NotReadyGuard -> 503 until the engine is alive).
           livenessProbe:
             httpGet:
               path: /livez
@@ -142,7 +166,9 @@ spec:
       targetPort: 8090
   type: ClusterIP
 ---
-# Internal shared-API Service (backs the sharedEntrances stub): in-cluster clients reach llm-init's /v1/* at http://sharedentrances-api.<ns>:80 (no edge, no SSO), bypassing the edge's ~17s first-byte timeout. :80 -> llm-init:8090.
+# Internal shared-API Service (backs the sharedEntrances stub). The LLM Gateway (or any
+# in-cluster OpenAI client) reaches llm-init's /v1/* here at http://sharedentrances-api.<ns>:80
+# — no public edge, no SSO — bypassing the edge's ~17s first-byte timeout. :80 -> llm-init:8090.
 apiVersion: v1
 kind: Service
 metadata:

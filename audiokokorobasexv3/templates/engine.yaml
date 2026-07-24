@@ -1,39 +1,28 @@
-{{- /* pyannote/torch audio engine base (audiopyannotebasexv3): ONE CUDA pyannote_fastapi image serving vad/diar/speaker_embed/enhance via injected wrappers; capability selected by MODEL_SUPPORTS (CSV), primaryCap (precedence below) picks the wrapper when several are set. */ -}}
+{{- /* Kokoro TTS audio engine base (audiokokorobasexv3).
+       ONE engine image only: the pyannote/torch image (reused as a generic torch+
+       fastapi runtime, same paradigm as the vad/translate/embed/enhance wrappers).
+       On first run the wrapper pip-installs `kokoro` (+ soundfile) into the persistent
+       /pydeps venv, loads the llm-init-downloaded Kokoro model from the shared HF
+       cache, and serves the OpenAI TTS contract (POST /v1/audio/speech + /v1/models +
+       /health + /metrics). MODEL_NAME must be a Kokoro repo (e.g. hexgrad/Kokoro-82M).
+       Only capability: tts. Gateway-facing coarse mode is fixed to `audio`.
+
+       CAVEAT (first version — verify before publish): Kokoro's g2p (misaki) uses
+       espeak-ng for OOV/non-English fallback. The pyannote image may NOT ship espeak-ng
+       (no root at runtime to apt-install). English works via misaki's built-in G2P; for
+       full multilingual quality bake espeak-ng into a dedicated engine image later. */ -}}
 {{- $oe := .Values.olaresEnv | default dict -}}
 {{- $modelName := $oe.MODEL_NAME | default "" -}}
 {{- $modelSource := $oe.MODEL_SOURCE | default "" -}}
-{{- /* MODEL_SUPPORTS: multi-select CSV; pyannote base valid values are vad / diar / speaker_embed / enhance. */ -}}
-{{- $supportsRaw := $oe.MODEL_SUPPORTS | default "diar" -}}
-{{- $supports := list -}}
-{{- range $tok := splitList "," $supportsRaw -}}
-{{- $t := trim $tok -}}
-{{- if $t -}}{{- $supports = append $supports $t -}}{{- end -}}
-{{- end -}}
-{{- $hasVad := has "vad" $supports -}}
-{{- $hasDiar := has "diar" $supports -}}
-{{- $hasEmbed := has "speaker_embed" $supports -}}
-{{- $hasEnhance := has "enhance" $supports -}}
-{{- /* Pick the primary runtime (precedence: diar > speaker_embed > vad > enhance); primaryCap also names the engine container. */ -}}
-{{- $primaryCap := "diar" -}}
-{{- $healthPath := "/healthz" -}}
-{{- $engineCmd := "" -}}
+{{- /* MODEL_SUPPORTS: on the Kokoro base the only valid value is tts. */ -}}
+{{- $supportsRaw := $oe.MODEL_SUPPORTS | default "tts" -}}
+{{- $primaryCap := "tts" -}}
+{{- $healthPath := "/health" -}}
 {{- $baseImage := "docker.io/beclab/maximsachs-pyannote_fastapi:4.0.4" -}}
-{{- if $hasDiar -}}
-{{- $primaryCap = "diar" -}}
-{{- $engineCmd = "exec $(command -v python3 || command -v python) /wrappers/diar.py" -}}
-{{- else if $hasEmbed -}}
-{{- $primaryCap = "speaker_embed" -}}
-{{- $engineCmd = "exec $(command -v python3 || command -v python) /wrappers/embed.py" -}}
-{{- else if $hasVad -}}
-{{- $primaryCap = "vad" -}}
-{{- $engineCmd = "exec $(command -v python3 || command -v python) /wrappers/vad.py" -}}
-{{- else if $hasEnhance -}}
-{{- $primaryCap = "enhance" -}}
-{{- $engineCmd = "exec $(command -v python3 || command -v python) /wrappers/enhance.py" -}}
-{{- end -}}
-{{- /* Container name = audio-<primaryCap>-<model> (DNS-safe, <=63 chars). */ -}}
+{{- $engineCmd := "export HF_HUB_OFFLINE=1; [ -f /pydeps/.kokoro.ok ] || { python3 -m pip install -q fastapi uvicorn python-multipart soundfile kokoro && touch /pydeps/.kokoro.ok; }; exec $(command -v python3 || command -v python) /wrappers/kokoro.py" -}}
+{{- /* Container name = audio-stt-<model> (DNS-safe, <=63 chars). */ -}}
 {{- $modelSan := regexReplaceAll "[^a-z0-9]+" (lower $modelName) "-" | trimAll "-" -}}
-{{- $cname := printf "audio-%s-%s" ($primaryCap | replace "_" "-") $modelSan | trunc 63 | trimSuffix "-" -}}
+{{- $cname := printf "audio-%s-%s" $primaryCap $modelSan | trunc 63 | trimSuffix "-" -}}
 {{- $engineImage := $oe.ENGINE_IMAGE | default $baseImage -}}
 {{- $enginePort := int ($oe.ENGINE_PORT | default "8000") -}}
 {{- $healthPath = $oe.ENGINE_HEALTH_PATH | default $healthPath -}}
@@ -41,7 +30,6 @@
 {{- $memRequest := trim ($oe.AUDIO_MEMORY_REQUEST | default "2Gi") -}}
 {{- $cpuLimit := trim ($oe.AUDIO_CPU_LIMIT | default "6") -}}
 {{- $memLimit := trim ($oe.AUDIO_MEMORY_LIMIT | default "24Gi") -}}
-{{- /* GPU is OPTIONAL (AUDIO_REQUIRED_GPU_MEMORY = "" or "0" => CPU-only; vad/embed run fine on CPU, diar/enhance benefit from GPU). */ -}}
 {{- $gpuRaw := trim ($oe.AUDIO_REQUIRED_GPU_MEMORY | default "") -}}
 {{- $wantGpu := and (ne $gpuRaw "") (ne $gpuRaw "0") -}}
 {{- $gpuMiB := "" -}}
@@ -77,7 +65,7 @@ metadata:
     applications.app.bytetrade.io/gpu-inject: "{{ $cname }}"
 {{- end }}
 spec:
-  replicas: {{ .Values.workloads.audiopyannotebasexv3.replicaCount }}
+  replicas: {{ .Values.workloads.audiokokorobasexv3.replicaCount }}
   selector:
     matchLabels:
       io.kompose.service: audio-engine

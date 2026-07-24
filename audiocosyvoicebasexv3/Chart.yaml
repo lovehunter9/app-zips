@@ -1,0 +1,6 @@
+apiVersion: v2
+appVersion: "1.0.0"
+description: Audio model base (CosyVoice2 TTS engine, llm-init audio-proxy). One instance = one CosyVoice model; capabilities tts + tts_clone (zero-shot voice clone) via MODEL_SUPPORTS. llm-init downloads the model AND fronts the engine's OpenAI /v1/* directly (ENGINE_KIND=audio, no nginx).
+name: audiocosyvoicebasexv3
+type: application
+version: 1.0.0

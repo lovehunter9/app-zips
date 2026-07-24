@@ -1,0 +1,258 @@
+{{- /* Engine wrapper scripts for the CosyVoice2 TTS + voice-clone base. Injected into
+       the engine image (see engine.yaml). $engineCmd best-effort pip-installs deps into
+       /pydeps and runs /wrappers/cosyvoice.py, which loads the llm-init-downloaded
+       CosyVoice2 model from the shared HF cache and serves the OpenAI TTS contract plus a
+       zero-shot voice-clone route.
+
+       NOTE: CosyVoice is not a clean pip install (needs the repo + Matcha-TTS +
+       WeTextProcessing). A dedicated engine image bundling CosyVoice is required for a
+       working deploy — this wrapper assumes `cosyvoice` is importable. */ -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: audio-wrappers
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: audio-engine
+data:
+  # Shared GPU-introspection helper (same as every other audio base).
+  _gpumetrics.py: |
+    # Uniform GPU /metrics for audio engine wrappers. import + mount_metrics(app).
+    def gpu_metrics_text():
+        present, used, total, util = 0, 0, 0, 0.0
+        try:
+            import torch
+            if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+                present = 1
+                free, tot = torch.cuda.mem_get_info()  # bytes, current device (HAMi slice)
+                total = int(tot)
+                used = int(tot - free)
+                try:
+                    util = float(torch.cuda.utilization()) / 100.0  # needs pynvml; 0 if absent
+                except Exception:
+                    util = 0.0
+        except Exception:
+            present = 0
+        lines = []
+        def g(name, help_, val):
+            lines.append("# HELP %s %s" % (name, help_))
+            lines.append("# TYPE %s gauge" % name)
+            lines.append("%s %s" % (name, val))
+        g("audio_gpu_present", "1 if a CUDA device is visible to this engine, else 0", present)
+        g("audio_gpu_mem_used_bytes", "GPU memory in use on this engine's device slice (bytes)", used)
+        g("audio_gpu_mem_total_bytes", "GPU memory visible to this engine (HAMi quota, bytes)", total)
+        g("audio_gpu_util_ratio", "GPU compute utilization 0..1 (0 when unavailable)", "%.4f" % util)
+        return "\n".join(lines) + "\n"
+
+    def mount_metrics(app):
+        from fastapi.responses import PlainTextResponse
+        @app.get("/metrics")
+        def _metrics():
+            return PlainTextResponse(gpu_metrics_text(),
+                                     media_type="text/plain; version=0.0.4")
+        return app
+  cosyvoice.py: |
+    # CosyVoice2-0.5B TTS + zero-shot voice clone. Loads the llm-init-downloaded model
+    # from the shared HF cache and exposes:
+    #   GET  /health, /healthz, /readyz, GET /v1/models
+    #   POST /v1/audio/speech  (tts       — JSON {input, response_format, speed};
+    #                           zero-shot against COSYVOICE_DEFAULT_PROMPT_* if set)
+    #   POST /v1/audio/clone   (tts_clone — multipart: file=reference audio,
+    #                           text=to synthesize, prompt_text=reference transcript,
+    #                           response_format, speed)
+    #
+    # FIRST VERSION — open items (verify before publish):
+    #   * Engine image: `cosyvoice` must be importable (repo + Matcha-TTS +
+    #     WeTextProcessing). Bake a dedicated image; the torch-image pip path is a stub.
+    #   * /v1/audio/speech without a reference: CosyVoice2-0.5B is zero-shot/instruct (no
+    #     built-in SFT speakers). Set COSYVOICE_DEFAULT_PROMPT_WAV + _PROMPT_TEXT to a
+    #     bundled sample to enable plain TTS; otherwise /speech returns 400 (use /clone).
+    import os, io, sys, tempfile, threading, logging, subprocess
+    import numpy as np
+    from fastapi import FastAPI, HTTPException, Body, UploadFile, File, Form
+    from fastapi.responses import Response
+    import uvicorn
+
+    LOG_LEVEL = os.environ.get("LOG_LEVEL", "info").lower()
+    logging.basicConfig(level=getattr(logging, LOG_LEVEL.upper(), logging.INFO))
+    log = logging.getLogger("audio-tts-cosyvoice")
+
+    MODEL_NAME = os.environ.get("MODEL_NAME", "FunAudioLLM/CosyVoice2-0.5B")
+    _src = os.environ.get("MODEL_SOURCE", "")
+    MODEL_REPO = _src[5:] if _src.startswith("hf://") else (_src or MODEL_NAME)
+    PORT = int(os.environ.get("WRAPPER_PORT", "8000"))
+    SAMPLE_RATE = int(os.environ.get("COSYVOICE_SAMPLE_RATE", "24000"))
+    PROMPT_SR = 16000  # CosyVoice expects the reference (prompt) audio at 16 kHz
+    DEF_PROMPT_WAV = os.environ.get("COSYVOICE_DEFAULT_PROMPT_WAV", "").strip()
+    DEF_PROMPT_TEXT = os.environ.get("COSYVOICE_DEFAULT_PROMPT_TEXT", "").strip()
+
+    app = FastAPI(title="audio-tts (cosyvoice2)")
+    try:
+        from _gpumetrics import mount_metrics
+        mount_metrics(app)
+    except Exception as _e:
+        log.warning("gpu /metrics unavailable: %s", _e)
+
+    _state = {"ready": False, "error": None, "device": None, "model": None, "sr": SAMPLE_RATE}
+    _lock = threading.Lock()
+
+    def _locate():
+        from huggingface_hub import snapshot_download
+        return snapshot_download(MODEL_REPO, local_files_only=True,
+                                 cache_dir=os.environ.get("HF_HUB_CACHE"),
+                                 token=os.environ.get("HF_TOKEN") or None)
+
+    def _load():
+        try:
+            from cosyvoice.cli.cosyvoice import CosyVoice2
+            path = _locate()
+            model = CosyVoice2(path, load_jit=False, load_trt=False, fp16=False)
+            try:
+                _state["sr"] = int(getattr(model, "sample_rate", SAMPLE_RATE))
+            except Exception:
+                _state["sr"] = SAMPLE_RATE
+            import torch
+            _state["device"] = "cuda" if torch.cuda.is_available() else "cpu"
+            _state["model"] = model
+            _state["ready"] = True
+            log.info("cosyvoice2 loaded from %s (sr=%d, device=%s)", path, _state["sr"], _state["device"])
+        except Exception as e:
+            _state["error"] = str(e)
+            log.exception("tts_clone load failed: %s", e)
+
+    @app.on_event("startup")
+    def _startup():
+        threading.Thread(target=_load, daemon=True).start()
+
+    @app.get("/health")
+    def health():
+        if _state["ready"]:
+            return {"status": "ok", "device": _state["device"], "sample_rate": _state["sr"]}
+        raise HTTPException(status_code=503, detail=_state["error"] or "loading model")
+
+    @app.get("/healthz")
+    def healthz():
+        return health()
+
+    @app.get("/readyz")
+    def readyz():
+        return health()
+
+    @app.get("/v1/models")
+    def models():
+        return {"object": "list",
+                "data": [{"id": MODEL_NAME, "object": "model", "owned_by": "local", "mode": "tts"}]}
+
+    def _load_prompt_16k(path):
+        # Reference audio -> mono 16 kHz float32 torch tensor [1, N] (what CosyVoice wants).
+        import librosa, torch
+        y, _sr = librosa.load(path, sr=PROMPT_SR, mono=True)
+        return torch.from_numpy(np.asarray(y, dtype=np.float32)).unsqueeze(0)
+
+    def _collect(gen):
+        # CosyVoice yields dicts {'tts_speech': tensor[1,N]}; concat to one float32 array.
+        import torch
+        parts = []
+        for out in gen:
+            a = out["tts_speech"] if isinstance(out, dict) else out
+            if isinstance(a, torch.Tensor):
+                a = a.detach().cpu().numpy()
+            parts.append(np.asarray(a, dtype=np.float32).reshape(-1))
+        if not parts:
+            return np.zeros(1, dtype=np.float32)
+        return np.concatenate(parts)
+
+    def _encode(wav, fmt):
+        import soundfile as sf
+        sr = _state["sr"]
+        fmt = (fmt or "wav").lower()
+        if fmt in ("pcm", "wav", ""):
+            buf = io.BytesIO(); sf.write(buf, wav, sr, format="WAV", subtype="PCM_16")
+            return buf.getvalue(), "audio/wav"
+        try:
+            buf = io.BytesIO(); sf.write(buf, wav, sr, format=fmt.upper())
+            mt = {"flac": "audio/flac", "ogg": "audio/ogg", "opus": "audio/ogg"}.get(fmt, "application/octet-stream")
+            return buf.getvalue(), mt
+        except Exception:
+            pass
+        try:
+            wbuf = io.BytesIO(); sf.write(wbuf, wav, sr, format="WAV", subtype="PCM_16")
+            p = subprocess.run(["ffmpeg", "-y", "-nostdin", "-i", "pipe:0", "-f", fmt, "pipe:1"],
+                               input=wbuf.getvalue(), capture_output=True)
+            if p.returncode == 0 and p.stdout:
+                mt = {"mp3": "audio/mpeg", "opus": "audio/ogg", "aac": "audio/aac"}.get(fmt, "application/octet-stream")
+                return p.stdout, mt
+        except Exception:
+            pass
+        buf = io.BytesIO(); sf.write(buf, wav, sr, format="WAV", subtype="PCM_16")
+        return buf.getvalue(), "audio/wav"
+
+    def _zero_shot(text, prompt_text, prompt_wav_path, speed):
+        model = _state["model"]
+        prompt_16k = _load_prompt_16k(prompt_wav_path)
+        gen = model.inference_zero_shot(text, prompt_text or "", prompt_16k,
+                                        stream=False, speed=speed)
+        return _collect(gen)
+
+    @app.post("/v1/audio/speech")
+    def speech(body: dict = Body(...)):
+        # Plain TTS: zero-shot against the configured default reference voice.
+        if not _state["ready"]:
+            raise HTTPException(status_code=503, detail=_state["error"] or "model not ready")
+        text = (body.get("input") or body.get("text") or "").strip()
+        if not text:
+            raise HTTPException(status_code=400, detail="`input` (text) is required")
+        try:
+            speed = float(body.get("speed") or 1.0)
+        except Exception:
+            speed = 1.0
+        fmt = (body.get("response_format") or "wav").strip().lower()
+        if not DEF_PROMPT_WAV or not os.path.exists(DEF_PROMPT_WAV):
+            raise HTTPException(status_code=400, detail=(
+                "CosyVoice2 has no built-in speakers; /v1/audio/speech needs a default "
+                "reference. Set COSYVOICE_DEFAULT_PROMPT_WAV + _PROMPT_TEXT, or use "
+                "POST /v1/audio/clone with a reference audio."))
+        try:
+            with _lock:
+                wav = _zero_shot(text, DEF_PROMPT_TEXT, DEF_PROMPT_WAV, speed)
+        except Exception as e:
+            log.exception("tts failed: %s", e)
+            raise HTTPException(status_code=500, detail="tts failed: %s" % e)
+        data, mt = _encode(wav, fmt)
+        return Response(content=data, media_type=mt)
+
+    @app.post("/v1/audio/clone")
+    async def clone(file: UploadFile = File(...),
+                    text: str = Form(...),
+                    prompt_text: str = Form(default=""),
+                    response_format: str = Form(default="wav"),
+                    speed: str = Form(default="1.0")):
+        # Zero-shot voice clone: synthesize `text` in the voice of the uploaded reference.
+        if not _state["ready"]:
+            raise HTTPException(status_code=503, detail=_state["error"] or "model not ready")
+        if not (text or "").strip():
+            raise HTTPException(status_code=400, detail="`text` is required")
+        try:
+            spd = float(speed or 1.0)
+        except Exception:
+            spd = 1.0
+        raw = await file.read()
+        suffix = os.path.splitext(file.filename or "ref.wav")[1] or ".wav"
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
+            f.write(raw); ref_path = f.name
+        try:
+            with _lock:
+                wav = _zero_shot(text.strip(), prompt_text.strip(), ref_path, spd)
+        except Exception as e:
+            log.exception("tts_clone failed: %s", e)
+            raise HTTPException(status_code=500, detail="tts_clone failed: %s" % e)
+        finally:
+            try:
+                os.unlink(ref_path)
+            except Exception:
+                pass
+        data, mt = _encode(wav, response_format)
+        return Response(content=data, media_type=mt)
+
+    if __name__ == "__main__":
+        uvicorn.run(app, host="0.0.0.0", port=PORT, log_level=LOG_LEVEL)

@@ -1,14 +1,4 @@
-{{- /* faster-whisper (CTranslate2) audio engine base (audiofasterwhisperbasexv3).
-       ONE engine image only: the harveyff Whisper-WebUI image (we take ONLY its
-       Blackwell-built ctranslate2/faster_whisper and run /wrappers/stt_fw.py, NOT
-       the WebUI app). Serves the OpenAI STT contract (/v1/audio/transcriptions +
-       /translations + /v1/models + /health). MODEL_NAME must be a CT2 whisper repo
-       (e.g. Systran/faster-whisper-large-v3). No cross-engine auto-select.
-
-       faster-whisper is chosen over vLLM-Whisper on time-sliced vGPU: ctranslate2
-       issues FEW CUDA calls/sec so it stays fast under the vGPU lock (vLLM's
-       autoregressive Whisper is throttled ~10x). Only capability: stt. The
-       gateway-facing coarse mode is fixed to `audio` (see llm-init.yaml). */ -}}
+{{- /* faster-whisper (CT2) STT engine base: runs /wrappers/stt_fw.py from the harveyff Whisper-WebUI image (OpenAI STT contract); chosen over vLLM-Whisper for speed under time-sliced vGPU; only capability stt, coarse mode fixed to `audio`. */ -}}
 {{- $oe := .Values.olaresEnv | default dict -}}
 {{- $modelName := $oe.MODEL_NAME | default "" -}}
 {{- $modelSource := $oe.MODEL_SOURCE | default "" -}}

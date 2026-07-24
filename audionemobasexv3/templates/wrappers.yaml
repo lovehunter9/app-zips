@@ -1,8 +1,4 @@
-{{- /* Engine wrapper scripts injected into a REUSED converted image (no new image
-       build). A mode whose $engines entry sets "cmd" runs one of these via a command
-       override (see engine.yaml). EVERY non-stt capability rides the ONE pyannote/torch
-       image and pip-installs any missing dep on first load (vad: silero-vad; translate:
-       ctranslate2+tokenizers; embed: omegaconf; enhance: speechbrain). */ -}}
+{{- /* Engine wrapper scripts injected into a REUSED converted image (no new image build); a mode whose $engines entry sets "cmd" runs one via a command override (see engine.yaml). EVERY non-stt capability rides the ONE pyannote/torch image and pip-installs any missing dep on first load (vad: silero-vad; translate: ctranslate2+tokenizers; embed: omegaconf; enhance: speechbrain). */ -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -11,12 +7,7 @@ metadata:
   labels:
     io.kompose.service: audio-engine
 data:
-  # Shared GPU-introspection helper for EVERY audio engine wrapper (the paradigm all
-  # audio bases reuse). Exposes the audio_gpu_* Prometheus gauges that llm-init's audio
-  # adapter reads for GET /api/diag/gpu. torch is always present in the audio images
-  # (vLLM cu129 / pyannote); under HAMi torch.cuda.mem_get_info() reports (free,total)
-  # for the CONTAINER's sliced quota, which is exactly what we want to surface. No new
-  # pip dep — we hand-format the Prometheus text so any wrapper can `import _gpumetrics`.
+  # Shared GPU-introspection helper for EVERY audio engine wrapper (the paradigm all audio bases reuse): exposes the audio_gpu_* Prometheus gauges that llm-init's audio adapter reads for GET /api/diag/gpu; torch.cuda.mem_get_info() reports (free,total) for the CONTAINER's HAMi-sliced quota. No new pip dep — hand-format the Prometheus text so any wrapper can `import _gpumetrics`.
   _gpumetrics.py: |
     # Uniform GPU /metrics for audio engine wrappers. import + mount_metrics(app).
     def gpu_metrics_text():
@@ -54,11 +45,7 @@ data:
                                      media_type="text/plain; version=0.0.4")
         return app
   vad.py: |
-    # Silero VAD service running on the shared pyannote/torch image (NO faster-whisper).
-    # Decodes with soundfile (+ torchaudio only to resample) and runs Silero via the
-    # `silero-vad` pip pkg (bundles its own model, uses the image's torch), pip-installed
-    # on first load like embed/enhance. Exposes: GET /healthz, GET /readyz, GET /v1/models,
-    # POST /v1/audio/vad.
+    # Silero VAD service on the shared pyannote/torch image (NO faster-whisper): decode with soundfile (+ torchaudio only to resample) and run Silero via the `silero-vad` pip pkg (bundles its own model, uses the image's torch, pip-installed on first load like embed/enhance). Exposes GET /healthz, /readyz, /v1/models, POST /v1/audio/vad.
     import io, os, sys, subprocess, threading, logging
     from fastapi import FastAPI, UploadFile, File, Form, HTTPException
     import uvicorn
@@ -72,12 +59,7 @@ data:
     SR = 16000
 
     # Defaults tuned for music/singing (silero's stock defaults over-split and drop
-    # sung passages that have backing music). Each is overridable per-request via form.
-    #   threshold            silero default 0.5 -> 0.3  (catch quieter / accompanied vocals)
-    #   min_silence_ms        silero default 100 -> 500  (don't shred on short pauses)
-    #   speech_pad_ms         silero default  30 -> 200  (keep word edges, less clipping)
-    #   min_speech_ms         silero default 250         (drop ultra-short blips)
-    #   max_speech_s          silero default inf -> 30   (cap windows to Whisper's frame)
+    # Defaults tuned for music/singing (silero's stock defaults over-split and drop sung passages with backing music); each overridable per-request via form: threshold 0.3, min_silence_ms 500, speech_pad_ms 200, min_speech_ms 250, max_speech_s 30 (cap windows to Whisper's frame).
     def _envf(name, default):
         try:
             return float(os.environ.get(name, "") or default)
@@ -98,9 +80,7 @@ data:
     _state = {"ready": False, "error": None, "model": None, "get_ts": None}
 
     def _decode(data):
-        # Bytes -> mono float32 torch tensor @ 16k. soundfile first (same as diar/embed),
-        # torchaudio only as fallback + for resample, so we never touch the image's broken
-        # torchcodec AudioDecoder path.
+        # Bytes -> mono float32 torch tensor @16k: soundfile first (same as diar/embed), torchaudio only as fallback + for resample, so we never touch the image's broken torchcodec AudioDecoder path.
         import torch
         try:
             import soundfile as sf
@@ -207,10 +187,7 @@ data:
     if __name__ == "__main__":
         uvicorn.run(app, host="0.0.0.0", port=PORT, log_level=LOG_LEVEL)
   diar.py: |
-    # Speaker diarization via pyannote, reusing the pyannote_fastapi image's torch +
-    # pyannote.audio (we override its native SSE/auth API with this simpler one).
-    # Model is the llm-init-downloaded repo (read from the shared HF cache).
-    # Exposes: GET /healthz, GET /readyz, GET /v1/models, POST /v1/audio/diarization.
+    # Speaker diarization via pyannote, reusing the pyannote_fastapi image's torch + pyannote.audio (overriding its native SSE/auth API with a simpler one); model is the llm-init-downloaded repo read from the shared HF cache. Exposes GET /healthz, /readyz, /v1/models, POST /v1/audio/diarization.
     import os, tempfile, threading, logging
     from fastapi import FastAPI, UploadFile, File, Form, HTTPException
     import uvicorn
@@ -234,9 +211,7 @@ data:
     _state = {"ready": False, "error": None, "pipeline": None, "device": "cpu"}
 
     def _decode(path):
-        # Decode to a (channels, time) float32 tensor + sample_rate, so we can feed
-        # pyannote an in-memory waveform and bypass its torchcodec AudioDecoder path
-        # (which fails in this image: "name 'AudioDecoder' is not defined").
+        # Decode to a (channels, time) float32 tensor + sample_rate so we feed pyannote an in-memory waveform and bypass its torchcodec AudioDecoder path (broken in this image: "name 'AudioDecoder' is not defined").
         import torch
         try:
             import soundfile as sf
@@ -327,8 +302,7 @@ data:
                 os.unlink(path)
             except Exception:
                 pass
-        # pyannote 4 returns an object whose .speaker_diarization is the Annotation;
-        # v3 returned the Annotation directly. Unwrap to a common itertracks() form.
+        # pyannote 4 returns an object whose .speaker_diarization is the Annotation (v3 returned the Annotation directly); unwrap to a common itertracks() form.
         ann = getattr(out, "speaker_diarization", out)
         segs = [{"start": round(float(t.start), 3), "end": round(float(t.end), 3), "speaker": str(spk)}
                 for t, _, spk in ann.itertracks(yield_label=True)]
@@ -340,24 +314,7 @@ data:
     if __name__ == "__main__":
         uvicorn.run(app, host="0.0.0.0", port=PORT, log_level=LOG_LEVEL)
   translate.py: |
-    # Text->text machine translation on the shared pyannote/torch image, SELF-ADAPTIVE
-    # across model families: the adapter is auto-picked from MODEL_NAME (same idea as stt's
-    # engine auto-select), so ONE base serves many translation models with NO clone-form
-    # change. Runtime is CPU ctranslate2 (GPU ct2 is broken on Blackwell; CPU ct2 runs on any
-    # image); each adapter pip-installs only the deps it needs on first load (like
-    # embed/enhance). Model is the llm-init-downloaded CT2 repo, read from the shared HF cache.
-    # The EXTERNAL API is FIXED to FLORES-200 codes (eng_Latn, zho_Hans) for EVERY model —
-    # each adapter maps FLORES<->its own scheme internally, so gateway/Demo never change.
-    #   ADAPTERS (order = detection priority; picked by MODEL_NAME, file-sniff fallback):
-    #     m2m100: M2M100Tokenizer via transformers+sentencepiece; FLORES->ISO(en/zh/ja/..);
-    #             e.g. entai2965/m2m100-1.2B-ctranslate2  (MIT — the COMMERCIAL default).
-    #     nllb (default/back-compat, BYTE-IDENTICAL to the old wrapper): tokenizer.json via
-    #             `tokenizers` (NO sentencepiece); NLLB's codes ARE FLORES-200 already;
-    #             e.g. entai2965/nllb-200-distilled-600M-ctranslate2 (CC-BY-NC — opt-in only,
-    #             kept runnable for users who explicitly choose it, never offered by default).
-    #   Adding another model/engine later = add one adapter class; nothing else changes.
-    # Exposes: GET /healthz, GET /readyz, GET /v1/models,
-    # POST /v1/translate {text, target, source?} with FLORES-200 codes.
+    # Text->text machine translation on the shared pyannote/torch image, SELF-ADAPTIVE across model families: the adapter is auto-picked from MODEL_NAME so ONE base serves many translation models with NO clone-form change. Runtime is CPU ctranslate2 (GPU ct2 is broken on Blackwell); each adapter pip-installs only its own deps on first load, and the model is the llm-init-downloaded CT2 repo read from the shared HF cache. The EXTERNAL API is FIXED to FLORES-200 codes (eng_Latn, zho_Hans) for EVERY model (each adapter maps FLORES<->its own scheme internally, so gateway/Demo never change). Adapters (detection priority, picked by MODEL_NAME with file-sniff fallback): m2m100 (M2M100Tokenizer via transformers+sentencepiece, FLORES->ISO, MIT — the COMMERCIAL default) then nllb (default/back-compat, byte-identical to the old wrapper: tokenizer.json via `tokenizers`, codes ARE FLORES-200, CC-BY-NC opt-in only). Adding a model/engine later = add one adapter class. Exposes GET /healthz, /readyz, /v1/models, POST /v1/translate {text, target, source?} with FLORES-200 codes.
     import os, re, sys, subprocess, threading, logging
     from typing import Optional
     from fastapi import FastAPI, HTTPException
@@ -374,8 +331,7 @@ data:
     PORT = int(os.environ.get("WRAPPER_PORT", "8000"))
     DEVICE = os.environ.get("CT2_DEVICE", "cpu")
     DEFAULT_SRC = os.environ.get("DEFAULT_SOURCE_LANG", "eng_Latn")
-    # Advanced override only (NOT a clone-form field): force an adapter if name-detection
-    # ever guesses wrong. Empty => auto-detect from MODEL_NAME/MODEL_REPO.
+    # Advanced override only (NOT a clone-form field): force an adapter if name-detection guesses wrong. Empty => auto-detect from MODEL_NAME/MODEL_REPO.
     FORCE_ADAPTER = (os.environ.get("TRANSLATE_ADAPTER", "") or "").strip().lower()
 
     def _pip(*pkgs):
@@ -387,8 +343,7 @@ data:
         return snapshot_download(MODEL_REPO, local_files_only=True,
                                  cache_dir=os.environ.get("HF_HUB_CACHE"))
 
-    # ---- adapters: one per model family. External codes are ALWAYS FLORES-200; each adapter
-    #      owns its tokenization, its ctranslate2 call, and its FLORES<->native code mapping. ----
+    # ---- adapters: one per model family. External codes are ALWAYS FLORES-200; each adapter owns its tokenization, its ctranslate2 call, and its FLORES<->native code mapping. ----
 
     class _Adapter:
         name = "base"
@@ -401,9 +356,7 @@ data:
             raise NotImplementedError
 
     class NLLBAdapter(_Adapter):
-        # NLLB CT2 repo ships tokenizer.json (read directly by `tokenizers`, NO sentencepiece).
-        # NLLB's native language codes ARE FLORES-200, so there is NO mapping. This path is
-        # byte-identical to the pre-multi-model wrapper (existing NLLB instances unaffected).
+        # NLLB CT2 repo ships tokenizer.json (read directly by `tokenizers`, NO sentencepiece); NLLB's native codes ARE FLORES-200 so there is NO mapping — byte-identical to the pre-multi-model wrapper (existing NLLB instances unaffected).
         name = "nllb"
         @staticmethod
         def matches(repo, mdir):
@@ -435,11 +388,7 @@ data:
             return [self._decode_hyp(r.hypotheses[0], tgt) for r in res]
 
     class M2M100Adapter(_Adapter):
-        # m2m100 CT2 repo bundles the M2M100Tokenizer files (sentencepiece); its language codes
-        # are ISO 639-1 (en/zh/ja/..). We map FLORES-200 -> ISO by the code's 3-letter prefix
-        # (script suffix is irrelevant to m2m100; zho_Hans and zho_Hant both -> zh). Per the
-        # CTranslate2 m2m100 recipe: src token seq = tokenizer.convert_ids_to_tokens(encode(text)),
-        # target_prefix = [lang_code_to_token[tgt]], and hypotheses[0][1:] drops the forced tag.
+        # m2m100 CT2 repo bundles the M2M100Tokenizer (sentencepiece) with ISO 639-1 codes (en/zh/ja/..); we map FLORES-200 -> ISO by the code's 3-letter prefix (script suffix ignored), and per the CTranslate2 m2m100 recipe src = convert_ids_to_tokens(encode(text)), target_prefix = [lang_code_to_token[tgt]], hypotheses[0][1:] drops the forced tag.
         name = "m2m100"
         FLORES2M2M = {
             "eng": "en", "zho": "zh", "jpn": "ja", "kor": "ko", "fra": "fr", "deu": "de",
@@ -551,12 +500,7 @@ data:
         target: str                 # FLORES-200 code, e.g. zho_Hans
         source: Optional[str] = None  # FLORES-200 code; default DEFAULT_SOURCE_LANG
 
-    # Every model here is SENTENCE-level: feeding a whole multi-sentence paragraph in one go
-    # makes it translate only the first sentence(s) and drop the rest (looks "truncated"). So
-    # we split the input with a NON-AI splitter (punctuation only — no model, no interface
-    # change), translate the sentences as ONE ctranslate2 batch, then join. Languages that
-    # don't separate words with spaces get a "" joiner. This is adapter-agnostic (keyed on the
-    # external FLORES target), so it works the same for NLLB, m2m100, and any future model.
+    # Every model here is SENTENCE-level (feeding a whole paragraph makes it translate only the first sentence(s) and drop the rest), so split the input with a NON-AI punctuation-only splitter (no model/interface change), translate the sentences as ONE ctranslate2 batch, then join ("" joiner for languages without word spaces). Adapter-agnostic (keyed on the external FLORES target).
     _SENT_RE = re.compile(r"[^。！？!?；;…\n]*[。！？!?；;…\n]+|[^。！？!?；;…\n]+")
     _NOSPACE_TGT = ("zho", "jpn", "yue", "tha", "lao", "mya", "khm", "wuu", "bod")
 
@@ -595,11 +539,7 @@ data:
     if __name__ == "__main__":
         uvicorn.run(app, host="0.0.0.0", port=PORT, log_level=LOG_LEVEL)
   embed.py: |
-    # Speaker/audio embedding via pyannote, reusing the pyannote_fastapi image's torch +
-    # pyannote.audio (NO new image). The llm-init-downloaded embedding model (e.g.
-    # pyannote/embedding -> 512-d x-vector) is read from the shared HF cache; gated repos
-    # use the auto-injected HF_TOKEN, same as diar. Exposes: GET /healthz, GET /readyz,
-    # GET /v1/models, POST /v1/audio/embeddings (multipart file -> one whole-file vector).
+    # Speaker/audio embedding via pyannote, reusing the pyannote_fastapi image's torch + pyannote.audio (NO new image); the llm-init-downloaded embedding model (e.g. pyannote/embedding -> 512-d x-vector) is read from the shared HF cache, gated repos use the auto-injected HF_TOKEN (same as diar). Exposes GET /healthz, /readyz, /v1/models, POST /v1/audio/embeddings (multipart file -> one whole-file vector).
     import os, tempfile, threading, logging
     from fastapi import FastAPI, UploadFile, File, HTTPException
     import uvicorn
@@ -623,8 +563,7 @@ data:
     _state = {"ready": False, "error": None, "inference": None, "device": "cpu", "dim": None}
 
     def _decode(path):
-        # Decode to a (channels, time) float32 tensor + sample_rate, feeding pyannote an
-        # in-memory waveform to bypass its torchcodec AudioDecoder path (broken in image).
+        # Decode to a (channels, time) float32 tensor + sample_rate, feeding pyannote an in-memory waveform to bypass its torchcodec AudioDecoder path (broken in image).
         import torch
         try:
             import soundfile as sf
@@ -655,10 +594,7 @@ data:
 
     def _load():
         try:
-            # pyannote/embedding's checkpoint pickles an omegaconf config object, so
-            # torch.load() needs the omegaconf module. This pyannote image ships
-            # pyannote.audio but NOT omegaconf (diar's Pipeline path doesn't hit it).
-            # Best-effort pip-install at first load — no new image; node-cached after.
+            # pyannote/embedding's checkpoint pickles an omegaconf config object, so torch.load() needs the omegaconf module which this pyannote image lacks (diar's Pipeline path doesn't hit it); best-effort pip-install at first load (node-cached after).
             try:
                 import omegaconf  # noqa: F401
             except ImportError:
@@ -731,13 +667,7 @@ data:
     if __name__ == "__main__":
         uvicorn.run(app, host="0.0.0.0", port=PORT, log_level=LOG_LEVEL)
   enhance.py: |
-    # Speech enhancement / denoise reusing the pyannote_fastapi image's torch (NO new
-    # image). The llm-init-downloaded SpeechBrain model (e.g.
-    # speechbrain/mtl-mimic-voicebank -> SpectralMaskEnhancement) is read from the shared
-    # HF cache. SpeechBrain isn't in this image, so it's best-effort pip-installed on first
-    # load (same pattern as embed's omegaconf; node-cached after). Audio in -> 16k mono
-    # enhanced WAV out. Exposes: GET /healthz, GET /readyz, GET /v1/models,
-    # POST /v1/audio/enhance (multipart file -> audio/wav body).
+    # Speech enhancement / denoise reusing the pyannote_fastapi image's torch (NO new image); the llm-init-downloaded SpeechBrain model (e.g. speechbrain/mtl-mimic-voicebank -> SpectralMaskEnhancement) is read from the shared HF cache and best-effort pip-installed on first load (same pattern as embed's omegaconf; node-cached after). Audio in -> 16k mono enhanced WAV out. Exposes GET /healthz, /readyz, /v1/models, POST /v1/audio/enhance (multipart file -> audio/wav body).
     import io, os, tempfile, threading, logging
     from fastapi import FastAPI, UploadFile, File, HTTPException
     from fastapi.responses import Response
@@ -763,8 +693,7 @@ data:
     _state = {"ready": False, "error": None, "model": None, "kind": None, "device": "cpu"}
 
     def _decode(path):
-        # Decode to a mono float32 16k torch tensor, doing our own resample so we never
-        # touch the image's broken torchcodec AudioDecoder path (see diar/embed).
+        # Decode to a mono float32 16k torch tensor, doing our own resample so we never touch the image's broken torchcodec AudioDecoder path (see diar/embed).
         import torch
         try:
             import soundfile as sf
@@ -796,12 +725,7 @@ data:
                                     cache_dir=os.environ.get("HF_HUB_CACHE"), token=HF_TOKEN)
             # speechbrain needs a "<type>:<index>" device string ("cuda" alone errors).
             dev = "cuda:0" if torch.cuda.is_available() else "cpu"
-            # Different enhancement repos need different inference classes (their
-            # hyperparams.yaml decides): mtl-mimic-voicebank -> WaveformEnhancement,
-            # metricgan/*-voicebank -> SpectralMaskEnhancement, sepformer-*-enhancement ->
-            # SepformerSeparation. Auto-detect by trying from_hparams in order; the wrong
-            # class raises "Need hparams['...']". module path moved in speechbrain 1.x
-            # (inference) vs 0.5.x (pretrained).
+            # Different enhancement repos need different inference classes (their hyperparams.yaml decides): mtl-mimic-voicebank -> WaveformEnhancement, metricgan/*-voicebank -> SpectralMaskEnhancement, sepformer-*-enhancement -> SepformerSeparation. Auto-detect by trying from_hparams in order (the wrong class raises "Need hparams['...']"); module path moved in speechbrain 1.x (inference) vs 0.5.x (pretrained).
             try:
                 from speechbrain.inference.enhancement import WaveformEnhancement, SpectralMaskEnhancement
                 from speechbrain.inference.separation import SepformerSeparation
@@ -845,11 +769,7 @@ data:
     def models():
         return {"object": "list", "data": [{"id": MODEL_NAME, "object": "model", "mode": "enhance"}]}
 
-    # Long audio handled SERVER-SIDE: whole-clip enhance loads the entire waveform onto the
-    # GPU (a 1h clip OOMs at ~15 GiB), so past ENHANCE_CHUNK_S we slide a fixed window over
-    # the clip, enhance each window, and overlap-add with a linear crossfade so seams are
-    # inaudible. Peak VRAM is bounded by ONE window, not the whole file — the client can
-    # therefore always send the whole clip in one request.
+    # Long audio handled SERVER-SIDE: whole-clip enhance loads the entire waveform onto the GPU (a 1h clip OOMs at ~15 GiB), so past ENHANCE_CHUNK_S we slide a fixed window over the clip, enhance each window, and overlap-add with a linear crossfade so seams are inaudible. Peak VRAM is bounded by ONE window, not the whole file, so the client can always send the whole clip in one request.
     CHUNK_S = float(os.environ.get("ENHANCE_CHUNK_S", "120") or 120)   # window length (s)
     OVERLAP_S = float(os.environ.get("ENHANCE_OVERLAP_S", "1") or 1)   # crossfade overlap (s)
 
@@ -889,8 +809,7 @@ data:
                 # Short clip: single pass (identical to the pre-chunking behaviour).
                 out = _run(wav)
             else:
-                # Long clip: sliding window + overlap-add crossfade, one window on the GPU
-                # at a time so peak VRAM is bounded regardless of total duration.
+                # Long clip: sliding window + overlap-add crossfade, one window on the GPU at a time so peak VRAM is bounded regardless of total duration.
                 hop = max(1, chunk - ov)
                 out = np.zeros(total, dtype="float32")
                 wsum = np.zeros(total, dtype="float32")
@@ -936,14 +855,7 @@ data:
     if __name__ == "__main__":
         uvicorn.run(app, host="0.0.0.0", port=PORT, log_level=LOG_LEVEL)
   align.py: |
-    # Forced alignment (audio + text -> word/char timestamps) via Qwen3-ForcedAligner,
-    # reusing the vLLM cu129 image's recent transformers + Blackwell (cu129) torch (NO new
-    # image). The capability is END-TO-END in the model: the official qwen-asr toolkit's
-    # Qwen3ForcedAligner directly predicts timestamps (no external CTC/Viterbi algorithm),
-    # which is exactly why it fits our "the capability lives in the model" paradigm.
-    # The llm-init-downloaded model (e.g. Qwen/Qwen3-ForcedAligner-0.6B) is read from the
-    # shared HF cache (HF_HUB_OFFLINE=1). Exposes: GET /health, GET /healthz, GET /readyz,
-    # GET /v1/models, POST /v1/audio/align (multipart audio file + text [+ language]).
+    # Forced alignment (audio + text -> word/char timestamps) via Qwen3-ForcedAligner, reusing the vLLM cu129 image's recent transformers + Blackwell (cu129) torch (NO new image). The capability is END-TO-END in the model (qwen-asr's Qwen3ForcedAligner directly predicts timestamps, no external CTC/Viterbi), which fits our "the capability lives in the model" paradigm. The llm-init-downloaded model (e.g. Qwen/Qwen3-ForcedAligner-0.6B) is read from the shared HF cache (HF_HUB_OFFLINE=1). Exposes GET /health, /healthz, /readyz, /v1/models, POST /v1/audio/align (multipart audio + text [+ language]).
     import os, tempfile, threading, logging
     from fastapi import FastAPI, UploadFile, File, Form, HTTPException
     import uvicorn
@@ -968,16 +880,13 @@ data:
 
     def _load():
         try:
-            # qwen-asr ships the Qwen3-ForcedAligner modeling code + .align() API. The engine
-            # cmd pip-installs it on first load; fall back to a pip here just in case.
+            # qwen-asr ships the Qwen3-ForcedAligner modeling code + .align() API; the engine cmd pip-installs it on first load, with a pip fallback here just in case.
             try:
                 from qwen_asr import Qwen3ForcedAligner  # noqa: F401
             except Exception:
                 import subprocess, sys
                 log.info("qwen-asr missing; pip-installing for forced aligner...")
-                # qwen-asr pulls flask->blinker; the cu129 image has a distutils-installed
-                # blinker 1.4 that pip refuses to uninstall. Reinstall blinker as a
-                # pip-managed pkg first so the qwen-asr install doesn't abort on it.
+                # qwen-asr pulls flask->blinker and the cu129 image has a distutils-installed blinker 1.4 pip refuses to uninstall, so reinstall blinker as a pip-managed pkg first so the qwen-asr install doesn't abort on it.
                 subprocess.run([sys.executable, "-m", "pip", "install", "-q",
                                 "--ignore-installed", "blinker"], check=False)
                 subprocess.run([sys.executable, "-m", "pip", "install", "-q", "qwen-asr"], check=False)
@@ -1034,9 +943,7 @@ data:
                 pass
         return None
 
-    # Gateway routes multipart audio-in capabilities under /v1/audio/<op>
-    # (same family as vad/diar/embed/enhance), so /v1/audio/align is the path
-    # the LLM Gateway hits.
+    # Gateway routes multipart audio-in capabilities under /v1/audio/<op> (same family as vad/diar/embed/enhance), so /v1/audio/align is the path the LLM Gateway hits.
     @app.post("/v1/audio/align")
     async def align(file: UploadFile = File(...), text: str = Form(...),
                     language: str = Form(default=None)):
@@ -1078,14 +985,7 @@ data:
     if __name__ == "__main__":
         uvicorn.run(app, host="0.0.0.0", port=PORT, log_level=LOG_LEVEL)
   stt_fw.py: |
-    # faster-whisper STT. Takes ONLY the harveyff Whisper-WebUI image's proven-on-Blackwell
-    # ctranslate2 + faster_whisper (NOT the WebUI/Gradio app). Drives the llm-init-downloaded
-    # CT2 model (read from the shared HF cache) on GPU and exposes the SAME OpenAI STT
-    # contract as vLLM so it is a drop-in (gateway + Demo unchanged):
-    #   GET /health, GET /healthz, GET /v1/models,
-    #   POST /v1/audio/transcriptions, POST /v1/audio/translations.
-    # Why this engine: faster-whisper issues FEW CUDA calls/sec, so it stays fast on the
-    # time-sliced vGPU where per-token vLLM gets throttled ~10x by the olares GPU lock.
+    # faster-whisper STT using ONLY the harveyff Whisper-WebUI image's proven-on-Blackwell ctranslate2 + faster_whisper (NOT the WebUI/Gradio app): drives the llm-init-downloaded CT2 model (read from the shared HF cache) on GPU and exposes the SAME OpenAI STT contract as vLLM so it is a drop-in (gateway + Demo unchanged): GET /health, /healthz, /v1/models, POST /v1/audio/transcriptions, POST /v1/audio/translations. Chosen because faster-whisper issues FEW CUDA calls/sec so it stays fast on the time-sliced vGPU where per-token vLLM gets throttled ~10x.
     import os, sys, tempfile, threading, subprocess, logging
     from fastapi import FastAPI, UploadFile, File, Form, HTTPException
     from fastapi.responses import PlainTextResponse
@@ -1102,16 +1002,12 @@ data:
     COMPUTE_TYPE = os.environ.get("FW_COMPUTE_TYPE", "float16")
     DEVICE = os.environ.get("FW_DEVICE", "auto")
     BEAM_SIZE = int(os.environ.get("FW_BEAM_SIZE", "5") or 5)
-    # THE speedup: WhisperX-style BatchedInferencePipeline (VAD-cut + parallel batched
-    # decode). This is what the proven WebUI runs by default (batch_size=16, vad on) and
-    # is ~10x faster than sequential transcribe AND friendlier to the time-sliced vGPU
-    # (few big batched kernel launches instead of many tiny per-token ones).
+    # THE speedup: WhisperX-style BatchedInferencePipeline (VAD-cut + parallel batched decode), what the proven WebUI runs by default (batch_size=16, vad on); ~10x faster than sequential transcribe AND friendlier to the time-sliced vGPU (few big batched kernel launches instead of many tiny per-token ones).
     BATCHED = os.environ.get("FW_BATCHED", "1").lower() in ("1", "true", "yes")
     BATCH_SIZE = int(os.environ.get("FW_BATCH_SIZE", "16") or 16)
     HF_TOKEN = os.environ.get("HF_TOKEN") or None
 
-    # Common full-name -> ISO 639-1 so callers can send "English"/"Chinese" (what some
-    # clients send) and not just "en"/"zh". Unknown values pass through lower-cased.
+    # Common full-name -> ISO 639-1 so callers can send "English"/"Chinese" (what some clients send) not just "en"/"zh"; unknown values pass through lower-cased.
     _LANG = {"english": "en", "chinese": "zh", "mandarin": "zh", "japanese": "ja",
              "korean": "ko", "french": "fr", "german": "de", "spanish": "es",
              "russian": "ru", "italian": "it", "portuguese": "pt", "arabic": "ar"}
@@ -1136,8 +1032,7 @@ data:
             try:
                 from faster_whisper import WhisperModel
             except Exception:
-                # Present in the harveyff image; if ever missing, install WITHOUT deps so we
-                # never replace the image's Blackwell-built ctranslate2 with a generic wheel.
+                # Present in the harveyff image; if ever missing, install WITHOUT deps so we never replace the image's Blackwell-built ctranslate2 with a generic wheel.
                 subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--no-deps",
                                 "faster-whisper"], check=False)
                 from faster_whisper import WhisperModel
@@ -1221,9 +1116,7 @@ data:
             temp = _parse_temp(temperature)
             pipe = _state.get("pipeline")
             if pipe is not None:
-                # Batched path (THE fast path): VAD-cut + parallel batched decode. Batched
-                # owns its VAD (so vad_filter=True drives chunking) and needs a SCALAR
-                # temperature; falls back to buffered if this faster_whisper rejects a kwarg.
+                # Batched path (THE fast path): VAD-cut + parallel batched decode; batched owns its VAD (vad_filter=True drives chunking) and needs a SCALAR temperature; falls back to buffered if this faster_whisper rejects a kwarg.
                 bkw = dict(kw)
                 bkw["temperature"] = temp[0] if isinstance(temp, tuple) else temp
                 bkw["batch_size"] = BATCH_SIZE
@@ -1293,31 +1186,7 @@ data:
     if __name__ == "__main__":
         uvicorn.run(app, host="0.0.0.0", port=PORT, log_level=LOG_LEVEL)
   stream.py: |
-    # Streaming STT (mode=stt_stream) for Qwen3-ASR, reusing the SAME vLLM cu129 image as
-    # offline stt/align (NO new image). Qwen3-ASR's streaming does NOT live in `vllm serve`
-    # (its serve only exposes offline /v1/chat/completions + /v1/audio/transcriptions); it
-    # lives in the official qwen-asr[vllm] package's IN-PROCESS API
-    # (Qwen3ASRModel.LLM + init_streaming_state / streaming_transcribe /
-    # finish_streaming_transcribe). So this wrapper loads that engine in-process and bridges
-    # it to a WebSocket. qwen-asr[vllm] is pip-installed on first load (engine cmd); the
-    # model is read from the shared HF cache (HF_HUB_OFFLINE=1).
-    #
-    # WebSocket contract (client <-> this wrapper) — a deliberately SIMPLE JSON+binary
-    # protocol (the gateway just tunnels frames; the client is our own Demo):
-    #   (upgrade) GET /v1/audio/stream
-    #   client -> server:
-    #     - optional first TEXT frame: {"type":"start","language":<str|null>,
-    #        "sample_rate":16000,"step_ms":500}
-    #     - BINARY frames: raw PCM16LE mono @ sample_rate audio chunks
-    #     - TEXT frame {"type":"stop"} (or socket close) to finalize
-    #   server -> client:
-    #     - {"type":"ready"}                              # per-connection stream armed
-    #     - {"type":"partial","text":...,"language":...}  # after each processed step
-    #     - {"type":"final","text":...,"language":...}    # after finish
-    #     - {"type":"error","detail":...}
-    # Also exposes GET /healthz, GET /readyz, GET /health, GET /v1/models for k8s probes +
-    # the gateway model registry. NOTE: Qwen streaming returns NO timestamps (by design), so
-    # this mode is a rolling-caption surface, not a timeline one.
+    # Streaming STT (mode=stt_stream) for Qwen3-ASR, reusing the SAME vLLM cu129 image as offline stt/align (NO new image). Qwen3-ASR streaming is NOT in `vllm serve` (which only exposes offline endpoints); it lives in the official qwen-asr[vllm] package's IN-PROCESS API (Qwen3ASRModel.LLM + init_streaming_state / streaming_transcribe / finish_streaming_transcribe), so this wrapper loads that engine in-process and bridges it to a WebSocket. qwen-asr[vllm] is pip-installed on first load; model read from the shared HF cache (HF_HUB_OFFLINE=1). WebSocket GET /v1/audio/stream (a simple JSON+binary protocol the gateway just tunnels): client sends an optional first TEXT frame {"type":"start","language":<str|null>,"sample_rate":16000,"step_ms":500}, then BINARY raw PCM16LE mono chunks, then {"type":"stop"} (or close) to finalize; server sends {"type":"ready"} then {"type":"partial"|"final","text":...,"language":...} and {"type":"error","detail":...}. Also exposes GET /healthz, /readyz, /health, /v1/models. NOTE: Qwen streaming returns NO timestamps (a rolling-caption surface, not a timeline one).
     import os, sys, json, asyncio, logging, subprocess
     from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, File, UploadFile, Form
     from fastapi.responses import Response
@@ -1333,24 +1202,14 @@ data:
     PORT = int(os.environ.get("WRAPPER_PORT", "8000"))
     GPU_UTIL = float(os.environ.get("VLLM_GPU_UTIL", "0.45") or 0.45)
     MAX_NEW_TOKENS = int(os.environ.get("STREAM_MAX_NEW_TOKENS", "32") or 32)
-    # Qwen3-ASR's default max_model_len is 65536 -> needs ~7GiB KV cache, which does NOT fit
-    # in the KV budget left after weights under the 12GiB HAMI quota (only ~2.4GiB free), so
-    # the vLLM engine ValueError-crashes at init. Streaming only processes tiny 2s chunks, so
-    # a small window is plenty. Cap it (well under the ~22.5k the engine reports as feasible).
-    # Mirrors what the offline qwen `vllm serve` does with --max-model-len. Override via
-    # STREAM_MAX_LEN. (Do NOT reuse VLLM_MAX_LEN=32768 — still too big for the KV budget here.)
+    # Qwen3-ASR's default max_model_len 65536 needs ~7GiB KV cache which does NOT fit under the 12GiB HAMI quota (only ~2.4GiB free -> vLLM ValueError-crashes at init); streaming only processes tiny 2s chunks so a small window is plenty. Cap it via STREAM_MAX_LEN, mirroring offline qwen `vllm serve --max-model-len` (do NOT reuse VLLM_MAX_LEN=32768 — still too big for the KV budget here).
     MAX_MODEL_LEN = int(os.environ.get("STREAM_MAX_LEN", "16384") or 16384)
-    # Streaming state knobs mirror the official example defaults (2s chunks, keep the last
-    # few chunks/tokens "unfixed" so they can still change as more audio arrives).
+    # Streaming state knobs mirror the official example defaults (2s chunks; keep the last few chunks/tokens "unfixed" so they can still change as more audio arrives).
     UNFIXED_CHUNK_NUM = int(os.environ.get("STREAM_UNFIXED_CHUNK_NUM", "2") or 2)
     UNFIXED_TOKEN_NUM = int(os.environ.get("STREAM_UNFIXED_TOKEN_NUM", "5") or 5)
     CHUNK_SIZE_SEC = float(os.environ.get("STREAM_CHUNK_SIZE_SEC", "2.0") or 2.0)
     DEFAULT_STEP_MS = int(os.environ.get("STREAM_STEP_MS", "500") or 500)
-    # A single streaming state accumulates this session's audio context; left
-    # unbounded it eventually overflows vLLM's audio encoder cache (~8192 tokens,
-    # observed to break a continuous session after ~10 min). We proactively "roll"
-    # the state (finalize + re-init) every STREAM_ROLL_SEC of audio so a session can
-    # run indefinitely with bounded memory. Kept safely under the observed cap.
+    # A single streaming state's audio context, left unbounded, eventually overflows vLLM's audio encoder cache (~8192 tokens, observed to break a continuous session after ~10 min), so we proactively "roll" the state (finalize + re-init) every STREAM_ROLL_SEC of audio (kept safely under the observed cap) so a session runs indefinitely with bounded memory.
     ROLL_SEC = float(os.environ.get("STREAM_ROLL_SEC", "240") or 240)
 
     app = FastAPI(title="audio-stt-stream (Qwen3-ASR streaming)")
@@ -1360,25 +1219,15 @@ data:
     except Exception as _e:
         log.warning("gpu /metrics unavailable: %s", _e)
     _state = {"ready": False, "error": None, "asr": None}
-    # vLLM's offline LLM.generate is blocking and not safe for concurrent calls; serialize
-    # all inference across connections behind one lock (fine for a base/PoC instance).
+    # vLLM's offline LLM.generate is blocking and not safe for concurrent calls; serialize all inference across connections behind one lock (fine for a base/PoC instance).
     _infer_lock = asyncio.Lock()
 
     def _p(msg):
-        # Startup breadcrumbs to stdout (flushed) so `container logs` shows load progress
-        # even before the logging handler / uvicorn are up (the engine block-loads first).
+        # Startup breadcrumbs to stdout (flushed) so `container logs` shows load progress even before the logging handler / uvicorn are up (the engine block-loads first).
         print("[stream] " + msg, flush=True)
 
     def _load_blocking():
-        # Load the qwen-asr vLLM streaming engine IN THE MAIN PROCESS/THREAD (before uvicorn
-        # starts). vLLM's offline LLM() installs signal handlers + spawns worker procs at
-        # construction, so it MUST be built on the main thread (a daemon thread raises
-        # "signal only works in main thread"). Health endpoints only come up AFTER this
-        # returns — same behaviour as `vllm serve` (the k8s probe just retries until then).
-        # NOTE: we install PLAIN `qwen-asr` (NOT the [vllm] extra) — vLLM is ALREADY in this
-        # cu129 image, and the [vllm] extra makes pip try to re-resolve/re-download the whole
-        # vLLM stack (observed hanging the container). The streaming API only needs vllm
-        # importable, which it is. (align.py uses plain qwen-asr on this same image.)
+        # Load the qwen-asr vLLM streaming engine IN THE MAIN PROCESS/THREAD before uvicorn: vLLM's offline LLM() installs signal handlers + spawns worker procs at construction, so it MUST be built on the main thread (a daemon thread raises "signal only works in main thread"); health endpoints only come up AFTER this returns (like `vllm serve`). Install PLAIN `qwen-asr` (NOT the [vllm] extra): vLLM is ALREADY in this cu129 image and the extra makes pip re-resolve/re-download the whole vLLM stack (observed hanging the container); the streaming API only needs vllm importable.
         _p("importing qwen_asr ...")
         try:
             from qwen_asr import Qwen3ASRModel
@@ -1391,9 +1240,7 @@ data:
             from qwen_asr import Qwen3ASRModel
         _p("constructing Qwen3ASRModel.LLM(model=%s, gpu_util=%.2f, max_model_len=%d) ..."
            % (MODEL_REPO, GPU_UTIL, MAX_MODEL_LEN))
-        # gpu_memory_utilization + max_model_len are vLLM LLM kwargs the qwen-asr wrapper
-        # forwards (that's how gpu_memory_utilization already works). If a given qwen-asr
-        # build doesn't forward max_model_len, retry without it (will need a smaller quota).
+        # gpu_memory_utilization + max_model_len are vLLM LLM kwargs the qwen-asr wrapper forwards; if a given qwen-asr build doesn't forward max_model_len, retry without it (will need a smaller quota).
         _kw = dict(model=MODEL_REPO, gpu_memory_utilization=GPU_UTIL, max_new_tokens=MAX_NEW_TOKENS)
         try:
             asr = Qwen3ASRModel.LLM(max_model_len=MAX_MODEL_LEN, **_kw)
@@ -1424,11 +1271,7 @@ data:
         return {"object": "list",
                 "data": [{"id": MODEL_NAME, "object": "model", "mode": "stt_stream"}]}
 
-    # ---- Offline STT (mode=stt) on the SAME loaded model ----------------------
-    # When MODEL_SUPPORTS includes BOTH stt and stt_stream, this ONE instance also
-    # serves offline /v1/audio/transcriptions, reusing the streaming primitives over
-    # the whole clip. The qwen model is loaded ONCE (no double GPU footprint) — that
-    # is the whole point of the single-instance dual-capability dispatcher.
+    # ---- Offline STT (mode=stt) on the SAME loaded model: when MODEL_SUPPORTS includes BOTH stt and stt_stream, this ONE instance also serves offline /v1/audio/transcriptions by reusing the streaming primitives over the whole clip, with the qwen model loaded ONCE (no double GPU footprint) — the point of the single-instance dual-capability dispatcher. ----
     def _decode_to_16k_mono(raw, filename):
         import numpy as np, tempfile
         import librosa
@@ -1515,10 +1358,7 @@ data:
                 chunk_size_sec=CHUNK_SIZE_SEC,
             )
 
-        # Session state in a dict so the nested helpers can rebind `st` on a roll.
-        # prefix = text already finalized by previous rolled segments (keeps the
-        # emitted transcript monotonic across rolls); samples = audio fed to the
-        # CURRENT state (drives the proactive roll).
+        # Session state in a dict so the nested helpers can rebind `st` on a roll: prefix = text already finalized by previous rolled segments (keeps the emitted transcript monotonic across rolls); samples = audio fed to the CURRENT state (drives the proactive roll).
         S = {"st": _new_state(), "prefix": "", "samples": 0}
         roll_samples = max(16000, int(ROLL_SEC * 16000))
         pending = np.zeros((0,), dtype="float32")
@@ -1545,9 +1385,7 @@ data:
             }))
 
         async def _roll():
-            # Finalize the current segment, fold its text into the committed prefix,
-            # then start a fresh state so the accumulated audio context (and vLLM's
-            # encoder-cache usage) resets to ~zero.
+            # Finalize the current segment, fold its text into the committed prefix, then start a fresh state so the accumulated audio context (and vLLM's encoder-cache usage) resets to ~zero.
             async with _infer_lock:
                 await asyncio.to_thread(asr.finish_streaming_transcribe, S["st"])
             S["prefix"] = _join(S["prefix"], getattr(S["st"], "text", "") or "")
@@ -1555,8 +1393,7 @@ data:
             S["samples"] = 0
 
         async def _feed(cur):
-            # Backstop: if the encoder cache overflows despite the proactive roll
-            # (ROLL_SEC too high / very dense audio), roll and retry the chunk once.
+            # Backstop: if the encoder cache overflows despite the proactive roll (ROLL_SEC too high / very dense audio), roll and retry the chunk once.
             try:
                 async with _infer_lock:
                     await asyncio.to_thread(asr.streaming_transcribe, cur, S["st"])
@@ -1601,8 +1438,7 @@ data:
                     cur, pending = pending[:step], pending[step:]
                     await _feed(cur)
                     await _emit("partial")
-                    # Proactive roll at a safe point (between steps) so we never
-                    # approach the encoder-cache cap.
+                    # Proactive roll at a safe point (between steps) so we never approach the encoder-cache cap.
                     if S["samples"] >= roll_samples:
                         await _roll()
                         await _emit("partial")
@@ -1633,65 +1469,11 @@ data:
             _p("engine load FAILED: %s" % e)
             log.exception("engine load failed: %s", e)
         _p("starting uvicorn on :%s (ready=%s)" % (PORT, _state["ready"]))
-        # Disable server-initiated WS keepalive: this stream does bursty, near-
-        # continuous inference (offloaded via to_thread), and under heavy/bursty
-        # feeds a client can lag on Pong long enough to trip the default 20s ping
-        # timeout -> the server would drop a healthy captioning session with 1011.
-        # Captioning is client-driven (browser paces at 1x; explicit stop/close),
-        # so we rely on WebSocketDisconnect/TCP reset instead of keepalive.
+        # Disable server-initiated WS keepalive: this stream does bursty, near-continuous inference (offloaded via to_thread) and under heavy feeds a client can lag on Pong past the default 20s ping timeout -> the server would drop a healthy captioning session with 1011; captioning is client-driven (browser paces at 1x; explicit stop/close), so rely on WebSocketDisconnect/TCP reset instead of keepalive.
         uvicorn.run(app, host="0.0.0.0", port=PORT, log_level=LOG_LEVEL,
                     ws_ping_interval=None, ws_ping_timeout=None)
   diar_stream.py: |
-    # Streaming / online speaker diarization (mode=diar_stream) via NVIDIA Streaming
-    # Sortformer, on the NeMo runtime image (beclab/nvidia-nemo:26.02). This is the ONE
-    # capability that needs a NEW heavy image: Sortformer is a .nemo checkpoint whose
-    # inference code lives in nemo.collections.asr — it cannot ride the pyannote or vLLM
-    # images. The model is downloaded by llm-init into the shared HF cache and loaded
-    # offline (HF_HUB_OFFLINE=1) from the cached .nemo file.
-    #
-    # WHY diar_stream is its own capability (NOT diar + a flag): offline diar (diar.py)
-    # sees the whole clip and clusters globally; streaming diar must keep speaker labels
-    # CONSISTENT across time at bounded latency. Sortformer solves this end-to-end with an
-    # Arrival-Order Speaker Cache (AOSC): speakers are numbered by arrival time, which is
-    # DETERMINISTIC on a given audio PREFIX — so within one window spk_0/spk_1/... are
-    # stable across steps (no relabeling churn).
-    #
-    # UNBOUNDED LENGTH — TWO PATHS (streaming-first, window fallback):
-    #  1) TRUE STREAMING (primary): keep ONE streaming_state for the whole session and
-    #     feed only NEWLY-arrived, chunk-aligned audio through the model's incremental API
-    #     (init_streaming_state + streaming_feat_loader + forward_streaming_step, per NeMo's
-    #     Streaming_Sortformer / Streaming_Multitalker_ASR tutorial). total_preds accumulates
-    #     per-80ms-frame speaker activity for the ENTIRE session, so turns are just a cheap
-    #     O(T) threshold of that matrix. Compute is O(1) per chunk => real-time forever, and
-    #     AOSC keeps column k == the same speaker for the whole stream, so NO window / overlap
-    #     / relabel is needed. Memory is bounded (audio discarded after feeding; total_preds
-    #     is ~4 floats/80ms ≈ 7MB/10h; streaming_state is fixed-size fifo+spkcache).
-    #  2) BOUNDED WINDOW (_run_window fallback): if the streaming self-test fails on a given
-    #     NeMo build, we fall back to re-running the documented `.diarize()` over only the
-    #     last WINDOW_SEC of audio, COMMIT older turns, and carry an OVERLAP_SEC tail so the
-    #     next window's labels are remapped onto the prior window's by time overlap. Slower
-    #     (O(n) per step) but correct — guarantees diar_stream never regresses to "no output".
-    # The path is chosen ONCE per connection, BEFORE any client audio is consumed (the
-    # streaming self-test runs on silence), so a fallback never loses data.
-    #
-    # Both paths use ONLY public NeMo API on `SortformerEncLabelModel` + `sortformer_modules`
-    # streaming knobs; no monkey-patching, and other capabilities are untouched.
-    #
-    # WebSocket contract (client <-> this wrapper) — mirrors stream.py's shape but the
-    # payload is speaker SEGMENTS (with the model's NATIVE frame timestamps), not text:
-    #   (upgrade) GET /v1/audio/diarize/stream
-    #   client -> server:
-    #     - optional first TEXT frame: {"type":"start","sample_rate":16000}
-    #     - BINARY frames: raw PCM16LE mono @ sample_rate audio chunks
-    #     - TEXT frame {"type":"stop"} (or socket close) to finalize
-    #   server -> client:
-    #     - {"type":"ready"}
-    #     - {"type":"partial","segments":[{"start","end","speaker"}],"speakers":[...]}
-    #     - {"type":"final","segments":[...],"speakers":[...]}
-    #     - {"type":"error","detail":...}
-    # Fusion of these speaker turns with ASR text (stt_stream) is the CONSUMER's job (the
-    # Demo holds one audio clock and feeds both streams) — the base stays single-purpose.
-    # Also exposes GET /healthz, /readyz, /health, /v1/models for probes + registry.
+    # Streaming / online speaker diarization (mode=diar_stream) via NVIDIA Streaming Sortformer on the NeMo runtime image (beclab/nvidia-nemo:26.02) — the ONE capability that needs a NEW heavy image (a .nemo checkpoint whose inference code lives in nemo.collections.asr, cannot ride pyannote/vLLM); model downloaded by llm-init into the shared HF cache and loaded offline (HF_HUB_OFFLINE=1). It is its own capability (NOT diar + a flag) because streaming diar must keep speaker labels CONSISTENT across time at bounded latency, which Sortformer solves end-to-end with an Arrival-Order Speaker Cache (AOSC) that numbers speakers by arrival time (deterministic on a given prefix, so spk_0/spk_1/.. are stable across steps). UNBOUNDED LENGTH via TWO PATHS: (1) TRUE STREAMING (primary) keeps ONE streaming_state and feeds only NEWLY-arrived chunk-aligned audio through the incremental API (init_streaming_state + streaming_feat_loader + forward_streaming_step); total_preds accumulates per-80ms-frame activity for the WHOLE session, compute is O(1)/chunk (real-time forever), AOSC keeps column k == one speaker so NO window/overlap/relabel, memory bounded. (2) BOUNDED WINDOW (_run_window fallback) re-runs .diarize() over the last WINDOW_SEC, COMMITs older turns, and carries an OVERLAP_SEC tail so the next window's labels are remapped by time overlap — slower (O(n)/step) but correct so diar_stream never regresses to "no output". The path is chosen ONCE per connection BEFORE any client audio (the self-test runs on silence). Both use ONLY public NeMo API on SortformerEncLabelModel + sortformer_modules (no monkey-patching). WebSocket GET /v1/audio/diarize/stream (mirrors stream.py's shape but payload is speaker SEGMENTS with native frame timestamps): client sends optional {"type":"start","sample_rate":16000}, then BINARY PCM16LE mono chunks, then {"type":"stop"} (or close); server sends {"type":"ready"}, {"type":"partial"|"final","segments":[{"start","end","speaker"}],"speakers":[...]}, {"type":"error"}. Fusion of these turns with ASR text (stt_stream) is the CONSUMER's job. Also exposes GET /healthz, /readyz, /health, /v1/models.
     import os, sys, json, glob, asyncio, logging, threading
     from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
     import uvicorn
@@ -1789,12 +1571,7 @@ data:
                 sm._check_streaming_parameters()
             except Exception as e:
                 log.warning("streaming-parameter check skipped: %s", e)
-            # Probe the TRUE incremental-streaming API (init_streaming_state +
-            # streaming_feat_loader + forward_streaming_step). If present we feed only NEW
-            # audio per step (O(1)/chunk, real-time); if ANY piece is missing we fall back
-            # to the bounded-window .diarize() path below (correctness preserved, just the
-            # old slower behaviour). n_spk / subsampling_factor drive preds->timestamps
-            # (each output frame = subsampling_factor * 10ms preprocessor hop = 80ms).
+            # Probe the TRUE incremental-streaming API (init_streaming_state + streaming_feat_loader + forward_streaming_step): if present we feed only NEW audio per step (O(1)/chunk, real-time), if ANY piece is missing we fall back to the bounded-window .diarize() path (correctness preserved, slower). n_spk / subsampling_factor drive preds->timestamps (each output frame = subsampling_factor * 10ms hop = 80ms).
             _state["n_spk"] = int(getattr(sm, "n_spk", 4) or 4)
             _state["subsampling"] = int(getattr(sm, "subsampling_factor", 8) or 8)
             _state["streaming_ok"] = bool(
@@ -1842,8 +1619,7 @@ data:
         return ("spk_" + digits) if digits else (s or "spk_0")
 
     def _parse_segments(raw):
-        # The card's diarize() yields items like "start end speaker" (str) across versions;
-        # tolerate tuples/objects too so a NeMo minor bump can't break the wire format.
+        # The card's diarize() yields items like "start end speaker" (str) across versions; tolerate tuples/objects too so a NeMo minor bump can't break the wire format.
         out = []
         for seg in (raw or []):
             s = e = spk = None
@@ -1867,8 +1643,7 @@ data:
         return out
 
     def _merge_segments(segs, gap=0.8):
-        # Collapse adjacent same-speaker turns (short gaps bridged) so the committed
-        # timeline and the seam between committed+live stay clean.
+        # Collapse adjacent same-speaker turns (short gaps bridged) so the committed timeline and the seam between committed+live stay clean.
         s2 = sorted(segs, key=lambda x: (x["start"], x["end"]))
         out = []
         for s in s2:
@@ -1880,11 +1655,7 @@ data:
         return out
 
     def _preds_to_segments(preds, frame_sec, thr=0.5):
-        # preds: numpy [T, n_spk] per-frame speaker-activity probabilities from the
-        # streaming model. Each frame spans frame_sec seconds (80ms). Threshold each
-        # speaker column and collapse contiguous active frames into ABS [start,end]
-        # turns. AOSC keeps column k == the same speaker for the whole session, so
-        # labels are globally stable with NO remap. Returns merged spk_<k> segments.
+        # preds: numpy [T, n_spk] per-frame speaker-activity probabilities (each frame spans frame_sec = 80ms) from the streaming model; threshold each speaker column and collapse contiguous active frames into ABS [start,end] turns (AOSC keeps column k == one speaker so labels are globally stable, NO remap). Returns merged spk_<k> segments.
         import numpy as np
         out = []
         if preds is None or getattr(preds, "size", 0) == 0:
@@ -1909,11 +1680,7 @@ data:
         return _merge_segments(out)
 
     def _diarize(buf):
-        # FALLBACK path only (used when the streaming API is absent). buf: float32 mono
-        # @ 16k. Returns parsed segments over the buffer (times RELATIVE to buf[0]);
-        # callers keep buf bounded to WINDOW_SEC. This is the OLD per-step re-diarize
-        # (O(n) per call) — kept solely as a safety net so diar_stream never regresses
-        # to "no output" if a NeMo version lacks forward_streaming_step.
+        # FALLBACK path only (used when the streaming API is absent): buf = float32 mono @16k; returns parsed segments over the buffer (times RELATIVE to buf[0]); callers keep buf bounded to WINDOW_SEC. This is the OLD per-step re-diarize (O(n)/call), kept solely as a safety net so diar_stream never regresses to "no output" if a NeMo version lacks forward_streaming_step.
         model = _state["model"]
         res = model.diarize(audio=[buf], batch_size=1, sample_rate=16000)
         return _parse_segments(res[0] if res else [])
@@ -1937,27 +1704,11 @@ data:
         return np.interp(xn, xo, seg).astype("float32")
 
     class _FallbackToWindow(Exception):
-        # Raised by the streaming path's pre-flight self-test if the incremental API is
-        # not usable on this NeMo build, so the handler switches to the window path
-        # BEFORE any real audio is consumed (no data lost, no worse than the old code).
+        # Raised by the streaming path's pre-flight self-test if the incremental API is not usable on this NeMo build, so the handler switches to the window path BEFORE any real audio is consumed (no data lost).
         pass
 
     async def _run_streaming(ws):
-        # TRUE incremental streaming, done the way the model was validated. The key to
-        # QUALITY is matching NeMo's reference path: extract log-mel over a CONTIGUOUS span
-        # (so per-feature normalization is consistent) and let streaming_feat_loader hand
-        # each chunk its left/right neighbour context. Per-tiny-block extraction re-normalizes
-        # every ~2s independently and drops context at seams -> the SAME speaker splits and
-        # DIFFERENT speakers merge (observed). So we keep a rolling WINDOW of recent audio,
-        # re-extract features over the WHOLE window each step, run the loader over it, and
-        # only actually feed forward_streaming_step for chunks that (a) are NEW (not yet
-        # committed) and (b) already have their full right-context inside the window. Already
-        # committed chunks are SKIPPED (streaming_state already reflects them) but still give
-        # new chunks proper left context + shared normalization. total_preds accumulates the
-        # per-80ms-frame speaker activity for the whole session (AOSC keeps column k == one
-        # speaker throughout -> NO window/overlap/relabel). Model compute stays O(1)/chunk
-        # (only new chunks run); feature extraction is O(window) per step (cheap log-mel);
-        # memory is bounded (window trimmed; total_preds ~4 floats/80ms).
+        # TRUE incremental streaming, done the way the model was validated: the key to QUALITY is matching NeMo's reference path — extract log-mel over a CONTIGUOUS span (consistent per-feature normalization) and let streaming_feat_loader hand each chunk its left/right neighbour context (per-tiny-block extraction re-normalizes every ~2s and drops seam context, so the SAME speaker splits and DIFFERENT speakers merge). So we keep a rolling WINDOW of recent audio, re-extract features over the WHOLE window each step, run the loader over it, and only feed forward_streaming_step for chunks that are NEW (not yet committed) and already have full right-context in the window (committed chunks are SKIPPED but still give new chunks left context + shared normalization). total_preds accumulates per-80ms-frame activity for the whole session (AOSC keeps column k == one speaker, NO window/overlap/relabel). Model compute stays O(1)/chunk, feature extraction O(window)/step (cheap log-mel), memory bounded.
         import numpy as np, torch
         model = _state["model"]; sm = model.sortformer_modules; device = _state["device"]
         n_spk = _state["n_spk"]; sub = _state["subsampling"]
@@ -1968,9 +1719,7 @@ data:
         chunk_audio = CS * hop                       # samples committed per chunk
         rc_frames = CRs
         step_samples = max(8000, int(STEP_SEC * 16000))          # process/emit cadence
-        # Rolling window kept for extraction: long enough for stable normalization + left
-        # context, chunk-aligned. Re-extracted each step; trimmed to keep_chunks from the
-        # committed frontier.
+        # Rolling window kept for extraction: long enough for stable normalization + left context, chunk-aligned, re-extracted each step and trimmed to keep_chunks from the committed frontier.
         keep_chunks = max(8, int(WINDOW_SEC * 16000) // chunk_audio)
         sample_rate = 16000
         buf = np.zeros((0,), dtype="float32")
@@ -1984,8 +1733,7 @@ data:
             st["committed"] = 0
 
         def _process(final=False):
-            # Feed every NEW chunk in the current window that has full right context (or all
-            # remaining chunks when final). feat_seq_offset is ALWAYS 0 (state carries history).
+            # Feed every NEW chunk in the current window that has full right context (or all remaining chunks when final); feat_seq_offset is ALWAYS 0 (state carries history).
             nonlocal buf
             if buf.size < hop:
                 return
@@ -2009,8 +1757,7 @@ data:
                         streaming_state=ss["state"], total_preds=ss["preds"],
                         left_offset=lo, right_offset=ro)
                     st["committed"] += 1
-            # Trim the window to keep_chunks behind the committed frontier (keeps left
-            # context + a normalization window; chunk-aligned so the grid never shifts).
+            # Trim the window to keep_chunks behind the committed frontier (keeps left context + a normalization window; chunk-aligned so the grid never shifts).
             max_base = st["committed"] - keep_chunks
             if max_base > st["base_chunks"]:
                 drop = max_base - st["base_chunks"]
@@ -2018,8 +1765,7 @@ data:
                 st["base_chunks"] = max_base
 
         def _selftest():
-            # Exercise the whole pipeline on ~2 chunks of silence, then RESET so the probe
-            # doesn't shift the real session. Any error here => fall back to window mode.
+            # Exercise the whole pipeline on ~2 chunks of silence then RESET so the probe doesn't shift the real session; any error here => fall back to window mode.
             _init_stream()
             nonlocal buf
             buf = np.zeros((CS * 3 * hop,), dtype="float32")
@@ -2088,9 +1834,7 @@ data:
         await ws.close()
 
     async def _run_window(ws):
-        # FALLBACK path: the ORIGINAL bounded-window per-step .diarize() implementation.
-        # Only used if the streaming self-test fails. Slower (re-diarizes the active
-        # window each step) but correct, so diar_stream never regresses to "no output".
+        # FALLBACK path: the ORIGINAL bounded-window per-step .diarize() implementation, used only if the streaming self-test fails — slower (re-diarizes the active window each step) but correct so diar_stream never regresses to "no output".
         import numpy as np
         sample_rate = 16000
         # Rolling window: `buf` holds only the ACTIVE window ([base_offset, now]).
@@ -2107,11 +1851,7 @@ data:
         canon = {"n": 0}         # next canonical speaker index
 
         def _relabel(local_abs):
-            # Map this window's LOCAL speaker labels (already in ABS time) to stable
-            # SESSION-canonical labels. Within a window Sortformer's arrival-order
-            # (AOSC) labels are stable, so win_map is sticky. After a roll, the new
-            # window's labels are anchored to the previous window's via max overlap
-            # with overlap_ref (the carried tail); unmatched speakers get a fresh id.
+            # Map this window's LOCAL speaker labels (already in ABS time) to stable SESSION-canonical labels: within a window Sortformer's arrival-order (AOSC) labels are stable so win_map is sticky; after a roll, anchor the new window's labels to the previous window's via max overlap with overlap_ref (the carried tail), unmatched speakers get a fresh id.
             order, by_spk = [], {}
             for s in local_abs:
                 if s["speaker"] not in by_spk:
@@ -2152,9 +1892,7 @@ data:
             return _relabel(local_abs)
 
         def _roll(cur):
-            # Once the window is full, freeze turns before the roll boundary into
-            # `committed`, keep only the last OVERLAP_SEC of audio, and stash the
-            # tail's canonical segments as the remap reference for the next window.
+            # Once the window is full, freeze turns before the roll boundary into `committed`, keep only the last OVERLAP_SEC of audio, and stash the tail's canonical segments as the remap reference for the next window.
             nonlocal buf, base_offset, overlap_ref, win_map, committed
             if buf.shape[0] < window_samples or overlap_samples <= 0:
                 return
@@ -2237,7 +1975,6 @@ data:
     if __name__ == "__main__":
         _p("diar_stream.py starting; model=%s port=%s" % (MODEL_REPO, PORT))
         _p("starting uvicorn on :%s" % PORT)
-        # Same rationale as stream.py: bursty offloaded inference + client-paced feed, so
-        # disable server-initiated WS keepalive to avoid dropping a healthy session on 1011.
+        # Same rationale as stream.py: bursty offloaded inference + client-paced feed, so disable server-initiated WS keepalive to avoid dropping a healthy session on 1011.
         uvicorn.run(app, host="0.0.0.0", port=PORT, log_level=LOG_LEVEL,
                     ws_ping_interval=None, ws_ping_timeout=None)

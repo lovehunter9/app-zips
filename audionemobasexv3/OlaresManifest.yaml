@@ -10,12 +10,7 @@ metadata:
   version: '1.0.0'
   categories:
     - AI
-# INTERNAL shared API (mirrors the updated llamacppllmbasev3 base): a sharedEntrances
-# stub -> the sharedentrances-api Service (:80 -> llm-init:8090). This is the cluster-
-# internal, no-public-edge, no-SSO endpoint the LLM Gateway should use as provider
-# base_url (http://sharedentrances-api.<ns>:80 + /v1), bypassing the public edge's
-# ~17s first-byte timeout that RST's queued/long requests. invisible + authLevel
-# internal: no public URL, not shown on the desktop.
+# INTERNAL shared API: a sharedEntrances stub -> the sharedentrances-api Service (:80 -> llm-init:8090), the cluster-internal, no-public-edge, no-SSO base_url the LLM Gateway should use (http://sharedentrances-api.<ns>:80 + /v1), bypassing the public edge's ~17s first-byte timeout. invisible + authLevel internal: no public URL, not shown on the desktop.
 sharedEntrances:
   - name: audionemobasexv3api
     host: sharedentrances-api
@@ -24,10 +19,7 @@ sharedEntrances:
     invisible: true
     authLevel: internal
     icon: https://app.cdn.olares.com/appstore/whisperwebui/icon.png
-# Public entrance -> llm-init (download-svc:8090). In audio-proxy mode llm-init IS
-# the complete base: it serves its control plane / dashboard / /api/model-spec on
-# "/", reverse-proxies "/v1/*" to the sibling audio engine, and synthesizes
-# /v1/models at the edge. No openresty/nginx sidecar (removed vs audiolabxv3).
+# Public entrance -> llm-init (download-svc:8090): in audio-proxy mode llm-init IS the complete base (serves control plane/dashboard//api/model-spec on "/", reverse-proxies "/v1/*" to the sibling audio engine, synthesizes /v1/models at the edge). No openresty/nginx sidecar.
 entrances:
   - name: audionemobasexv3
     port: 8090
@@ -151,9 +143,7 @@ envs:
     type: string
     editable: true
     applyOnChange: true
-  # MODEL_SUPPORTS: multi-select of the capabilities THIS instance exposes. On the
-  # NeMo base the only valid value is diar_stream (maps to WS /v1/audio/diarize/stream
-  # in llm-init). Pick what the chosen model actually supports.
+  # MODEL_SUPPORTS: multi-select of the capabilities THIS instance exposes; on the NeMo base the only valid value is diar_stream (maps to WS /v1/audio/diarize/stream in llm-init). Pick what the chosen model actually supports.
   - envName: MODEL_SUPPORTS
     required: true
     default: ""
