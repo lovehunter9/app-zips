@@ -90,7 +90,7 @@ spec:
 
   upgradeDescription: |
     v1.0.0: initial vLLM audio base. llm-init runs ENGINE_KIND=audio
-    (image lovehunter9/llm-init:v1.3.2-audiobase5): it downloads the model AND
+    (image lovehunter9/llm-init:v1.3.2-audiobase6): it downloads the model AND
     reverse-proxies the engine's OpenAI /v1/* directly (no nginx). Capabilities
     chosen at clone via MODEL_SUPPORTS (stt / stt_stream / align); GPU required.
 

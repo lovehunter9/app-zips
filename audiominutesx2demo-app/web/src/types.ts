@@ -51,6 +51,7 @@ export interface Timings {
 
 export interface RecordOptions {
   language: string;
+  sttMode?: "integral" | "segmented" | "batch";
   segmentedStt: boolean;
   translate?: boolean;
   enhance?: boolean;
@@ -188,6 +189,7 @@ export interface GatewayConfig {
   cookie: string;
   bflUser: string;
   models: { stt: string; align: string; diar: string };
+  sttMode?: "integral" | "segmented" | "batch";
   segmentedStt: boolean;
   language: string;
   autoTranscribe: boolean;

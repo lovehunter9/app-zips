@@ -1,7 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   alignAudio,
+  audioBatch,
   audioMultipart,
+  BATCH_TARGET_BYTES,
+  WAV_BYTES_PER_SEC,
   fetchDefaultModels,
   fetchProviderModels,
   fetchSilences,
@@ -180,6 +183,21 @@ function windowSegs(duration: number, win = 30): Seg[] {
   const out: Seg[] = [];
   for (let t = 0; t < duration - 0.05; t += win) out.push({ start: t, end: Math.min(duration, t + win) });
   return out.length ? out : [{ start: 0, end: duration }];
+}
+// 分段批量:把窗口按"累计上传 WAV 字节 ≤ target"贪心成批(避开网关 32M body 上限;
+// 16k 单声道 WAV = 32KB/s,target 30M ≈ ~15.6min/批)。
+function packSttBatches(windows: Seg[], targetBytes = BATCH_TARGET_BYTES): Seg[][] {
+  const batches: Seg[][] = [];
+  let cur: Seg[] = [];
+  let bytes = 0;
+  for (const w of windows) {
+    const wb = Math.max(1, w.end - w.start) * WAV_BYTES_PER_SEC;
+    if (cur.length && bytes + wb > targetBytes) { batches.push(cur); cur = []; bytes = 0; }
+    cur.push(w);
+    bytes += wb;
+  }
+  if (cur.length) batches.push(cur);
+  return batches;
 }
 // ---- Align (forced alignment) helpers ----
 interface AlignWin {
@@ -603,10 +621,10 @@ export default function App() {
   // VAD/Diarize (or silencedetect) timeline to get per-segment timestamps; OFF = show the
   // engine's raw output (Qwen → one untimed block, Whisper → native verbose_json segments).
   const [alignTs, setAlignTs] = useState(true);
-  // Per-segment STT fan-out: when ON (and VAD/Diarize is selected) the audio is sliced by
-  // the coalesced VAD/Diarize windows and each is transcribed separately (N calls). Slower
-  // but higher quality (full context per turn). OFF = the whole-clip single-call path.
-  const [sttPerSeg, setSttPerSeg] = useState(false);
+  // 转写模式: "batch"(默认) 分段批量——窗口按上传字节成批,每批 1 次 batch STT + 1 次 batch
+  // align(少往返、抗长音频); "segmented" 逐段——每窗一个请求(N 次); "integral" 整段——单次整段。
+  // batch/segmented 需 VAD/Diarize 提供分段;integral 走原来的整段路径。
+  const [sttMode, setSttMode] = useState<"integral" | "segmented" | "batch">("batch");
   // "分段对齐": OFF = whole-clip single align call (the heuristic was here before);
   // ON (needs VAD/Diarize + STT) = align each VAD/Diar segment against its own STT
   // text (one call per segment, offset=seg.start). The proper long-audio path —
@@ -1009,7 +1027,44 @@ export default function App() {
         try {
           const isWhisper = (model || "").toLowerCase().includes("whisper");
           const dur = upload!.durationSec || 0;
-          if (sttPerSeg && segSource.length) {
+          if (sttMode === "batch" && segSource.length) {
+            // ── 分段批量 (default): 窗口 → 按字节成批 → 每批 1 次 batch STT ──
+            const dec = await getDecoded();
+            const windows = splitLong(coalesceSegments(segSource, 28, 1.5), 30, 0);
+            const batches = packSttBatches(windows);
+            const sliceSrc = segHasSpeaker ? "Diarize" : "VAD";
+            const t0 = Date.now();
+            let okCalls = 0, calls = 0, lastStatus = 0, errSample = "", done = 0;
+            setProgress({ cap: "stt", phase: `分段批量转写(${sliceSrc})`, done: 0, total: windows.length });
+            for (const batch of batches) {
+              const bStart = batch[0].start, bEnd = batch[batch.length - 1].end;
+              const clip = sliceWav(dec, bStart, bEnd);
+              const relSegs = batch.map((w) => ({ start: +(w.start - bStart).toFixed(3), end: +(w.end - bStart).toFixed(3) }));
+              calls++;
+              let results: any[] = [];
+              try {
+                results = await audioBatch(settings, "transcriptions", clip, relSegs, model, { response_format: "json" });
+                okCalls++; lastStatus = 200;
+              } catch (e: any) { if (!errSample) errSample = String(e?.message || e); }
+              batch.forEach((w, i) => {
+                const r = results[i] || {};
+                (w as any)._text = (typeof r === "string" ? r : (r.text ?? "")).toString().trim();
+                done++;
+              });
+              setProgress({ cap: "stt", phase: `分段批量转写(${sliceSrc})`, done: Math.min(done, windows.length), total: windows.length });
+            }
+            fused = windows.filter((w) => (w as any)._text).map((w) => ({ start: w.start, end: w.end, speaker: w.speaker, text: (w as any)._text }));
+            const tsSource = `分段批量转写 (按 ${sliceSrc} 切窗,${batches.length} 批;时间戳待 Align 接管)`;
+            out.stt = { text: joinSegText(fused.map((f) => f.text || "")), segments: fused, tsSource };
+            push({
+              cap: "stt", invoked: true, endpoint: "/v1/audio/transcriptions",
+              method: `POST ×${batches.length}批(共${windows.length}窗)`, model,
+              params: { 模式: "分段批量", 切片来源: sliceSrc, 分批: `${windows.length}窗→${batches.length}批(WAV≤30MiB)`, response_format: "json", 时间戳来源: tsSource },
+              status: lastStatus, ok: okCalls === calls && fused.length > 0, durationMs: Date.now() - t0,
+              responseSummary: `分段批量转写 ${windows.length} 窗 / ${batches.length} 批,成功 ${okCalls}/${calls} 批;合计 ${out.stt.text.length} 字` + (okCalls < calls && errSample ? ` · 首个错误 ${errSample}` : ""),
+              rawResponse: JSON.stringify(fused.slice(0, 8), null, 2),
+            });
+          } else if (sttMode === "segmented" && segSource.length) {
             // ── PER-SEGMENT FAN-OUT (quality path; requires VAD/Diarize) ──
             const dec = await getDecoded();
             // Coalesce raw VAD/diar bits into far fewer ~30s windows (maxGap=10 bridges
@@ -1326,7 +1381,47 @@ export default function App() {
       const lang = alignLangName(source === "auto" ? detectLang(sttText || manual) : source);
       // per-segment mode needs VAD/Diar segmentation AND per-segment STT text (fused)
       const perSeg = alignPerSeg && (enabled.vad || enabled.diar) && fused.length > 0;
+      const batchAlign = sttMode === "batch" && (enabled.vad || enabled.diar) && fused.length > 0;
       if (!model) skip("align", "无可用模型");
+      else if (batchAlign) {
+        // ── 分段批量对齐: 窗口按字节成批,每批 1 次 batch align,units 片内相对时间回加
+        // 窗起点到绝对轴,再复用 finishAlign 归属说话人 + 重建融合时间轴 ──
+        try {
+          const dec = await getDecoded();
+          const segs = fused.filter((f) => (f.text || "").trim());
+          const batches = packSttBatches(segs);
+          const t0 = Date.now();
+          const allUnits: Seg[] = [];
+          let calls = 0, ok = 0, lastStatus = 0, errSample = "", done = 0;
+          setProgress({ cap: "align", phase: "分段批量对齐", done: 0, total: segs.length });
+          for (const batch of batches) {
+            const bStart = batch[0].start, bEnd = batch[batch.length - 1].end;
+            const clip = sliceWav(dec, bStart, bEnd);
+            const alignSegs = batch.map((w) => ({ start: +(w.start - bStart).toFixed(3), end: +(w.end - bStart).toFixed(3), text: w.text || "", language: lang }));
+            calls++;
+            let results: any[] = [];
+            try { results = await audioBatch(settings, "align", clip, alignSegs, model); ok++; lastStatus = 200; }
+            catch (e: any) { if (!errSample) errSample = String(e?.message || e); }
+            batch.forEach((w, i) => {
+              const r = results[i] || {};
+              const raw = Array.isArray(r.units) ? r.units : [];
+              for (const u of raw) {
+                allUnits.push({
+                  start: Number(u.start ?? u.start_time ?? 0) + w.start,
+                  end: Number(u.end ?? u.end_time ?? 0) + w.start,
+                  text: u.text ?? u.word ?? u.token ?? "",
+                  ...(w.speaker !== undefined ? { speaker: w.speaker } : {}),
+                });
+              }
+              done++;
+            });
+            setProgress({ cap: "align", phase: "分段批量对齐", done: Math.min(done, segs.length), total: segs.length });
+          }
+          finishAlign(allUnits, joinSegText(segs.map((s) => s.text || "")), { mode: `分段批量对齐(${batches.length}批)`, textSrc: "STT 分段文本", lang, calls, ok, lastStatus, errSample, durationMs: Date.now() - t0 });
+        } catch (e: any) {
+          push({ cap: "align", invoked: true, model, error: String(e.message || e) });
+        }
+      }
       else if (perSeg) {
         // ── 分段对齐: one window per STT segment (each already <300s) ──
         try {
@@ -1861,7 +1956,7 @@ export default function App() {
                       const fuseOn = enabled.vad || enabled.diar; // VAD/Diarize selected
                       // Per-segment fan-out needs a segmentation source (VAD/Diarize).
                       const perSegActive = enabled.stt && fuseOn;
-                      const perSegOn = perSegActive && sttPerSeg;
+                      const perSegOn = perSegActive && sttMode === "segmented";
                       // The align toggle is only meaningful for a timestamp-less engine (Qwen)
                       // when there is NO VAD/Diarize (and not in per-segment mode).
                       // When Align is enabled it produces the final (precise) timeline and
@@ -1872,6 +1967,8 @@ export default function App() {
                       const alignActive = enabled.stt && !fuseOn && !sttIsWhisper && !alignTakenOver;
                       const status = !enabled.stt
                         ? ""
+                        : (sttMode === "batch" && fuseOn)
+                          ? `分段批量 · 按 ${enabled.diar ? "Diarize" : "VAD"} 切窗成批转写${enabled.align ? " + 分段批量对齐(精确时间)" : ""}`
                         : alignTakenOver
                           ? "整段一次 · 时间戳由 Align 接管(强制对齐提供精确时间)"
                           : perSegOn
@@ -1888,22 +1985,22 @@ export default function App() {
                           {/* Interactive controls are anchored left with constant-width labels
                               so they DON'T shift when switching models; the variable status
                               text floats to the right (ml-auto) and never moves the controls. */}
-                          <label
-                            className={`flex shrink-0 items-center gap-1.5 whitespace-nowrap text-xs ${perSegActive ? "text-neutral-300" : "text-neutral-600"}`}
-                            title={
-                              perSegActive
-                                ? "开:按 VAD/Diarize 窗口逐段切音频分别转写(N 次调用),上下文更完整、质量更稳;关:整段一次调用。"
-                                : "需先勾选 VAD 或 Diarize 才能按段切片转写(本项当前不生效)。"
-                            }
+                          <div
+                            className="flex shrink-0 items-center gap-2 whitespace-nowrap text-xs"
+                            title="分段批量/分段 需先勾选 VAD 或 Diarize(靠它分段);整段无需。分段批量=窗口成批,一次请求多窗(少往返、抗长音频)。"
                           >
-                            <input
-                              type="checkbox"
-                              disabled={!perSegActive}
-                              checked={sttPerSeg}
-                              onChange={(e) => setSttPerSeg(e.target.checked)}
-                            />
-                            分段发送转写请求
-                          </label>
+                            <span className="text-neutral-400">转写模式</span>
+                            {([
+                              ["batch", "分段批量", perSegActive],
+                              ["segmented", "分段", perSegActive],
+                              ["integral", "整段", true],
+                            ] as const).map(([v, label, en]) => (
+                              <label key={v} className={`flex items-center gap-1 ${en ? "text-neutral-300" : "text-neutral-600"}`}>
+                                <input type="radio" name="sttMode" disabled={!en} checked={sttMode === v} onChange={() => setSttMode(v)} />
+                                {label}
+                              </label>
+                            ))}
+                          </div>
                           <label
                             className={`flex shrink-0 items-center gap-1.5 whitespace-nowrap text-xs ${perSegOn ? "text-neutral-400" : "text-neutral-600"}`}
                             title="逐段转写的并发路数。Whisper 可较高,Qwen3-ASR 较低;切换模型会重置为推荐默认值。"

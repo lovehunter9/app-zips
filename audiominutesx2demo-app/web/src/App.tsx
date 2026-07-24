@@ -584,7 +584,7 @@ function ProcessingView({ rec, onStop }: { rec: RecordFull; onStop?: () => void 
   } else {
     if (opts?.enhance) steps.push({ key: "enhance", label: "降噪增强" });
     steps.push({ key: "diar", label: "说话人分离" });
-    steps.push({ key: "stt", label: opts?.segmentedStt ? "分段转写 + 词级对齐" : "整段转写 + 词级对齐" });
+    steps.push({ key: "stt", label: opts?.sttMode === "batch" ? "分段批量转写 + 词级对齐" : opts?.segmentedStt ? "分段转写 + 词级对齐" : "整段转写 + 词级对齐" });
     steps.push({ key: "tidy", label: "整理结果" });
     if (opts?.translate) steps.push({ key: "translate", label: "翻译" });
   }
@@ -703,7 +703,9 @@ function SettingsPage({
   const [stt, setStt] = useState(config.models.stt);
   const [align, setAlign] = useState(config.models.align);
   const [diar, setDiar] = useState(config.models.diar);
-  const [segmentedStt, setSegmentedStt] = useState(config.segmentedStt);
+  const [sttMode, setSttMode] = useState<"integral" | "segmented" | "batch">(
+    config.sttMode || (config.segmentedStt ? "segmented" : "batch")
+  );
   const [language, setLanguage] = useState(config.language || "auto");
   const [autoTranscribe, setAutoTranscribe] = useState(config.autoTranscribe ?? true);
   const [trEnabled, setTrEnabled] = useState(config.translate?.enabled ?? false);
@@ -754,7 +756,7 @@ function SettingsPage({
       const saved = await api.putConfig({
         base, key, cookie,
         models: { stt, align, diar },
-        segmentedStt, language, autoTranscribe,
+        sttMode, segmentedStt: sttMode === "segmented", language, autoTranscribe,
         translate: { enabled: trEnabled, model: trModel, sourceLang: trSource, targetLang: trTarget },
         enhance: { enabled: enhEnabled, model: enhModel },
         summary: { model: sumModel },
@@ -895,13 +897,22 @@ function SettingsPage({
             <div className="text-sm font-medium text-neutral-200">
               转写默认值 <span className="text-[11px] font-normal text-neutral-500">· 详情页可逐文件覆盖</span>
             </div>
-            <label className="flex items-start gap-2 text-sm">
-              <input type="checkbox" className="mt-0.5 h-4 w-4" checked={segmentedStt} onChange={(e) => setSegmentedStt(e.target.checked)} />
-              <span>
-                <span className="block text-neutral-200">分段转写</span>
-                <span className="block text-[11px] leading-tight text-neutral-500">关=整段一次 STT 再切分;开=按 diarization 窗口逐段转写。</span>
-              </span>
-            </label>
+            <div className="text-sm">
+              <span className="mb-1 block text-neutral-200">转写模式</span>
+              {([
+                ["batch", "分段批量", "按说话人分窗,一批多窗一次调用(少往返、抗长音频,推荐)"],
+                ["segmented", "分段", "按 diarization 窗口逐段 STT(逐窗单独请求)"],
+                ["integral", "整段", "整段一次 STT 再切分(短音频快;长音频易超限/413)"],
+              ] as const).map(([v, label, hint]) => (
+                <label key={v} className="flex items-start gap-2 py-0.5">
+                  <input type="radio" name="sttMode" className="mt-0.5 h-4 w-4" checked={sttMode === v} onChange={() => setSttMode(v)} />
+                  <span>
+                    <span className="block text-neutral-200">{label}</span>
+                    <span className="block text-[11px] leading-tight text-neutral-500">{hint}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
             <label className="flex items-start gap-2 text-sm">
               <input type="checkbox" className="mt-0.5 h-4 w-4" checked={autoTranscribe} onChange={(e) => setAutoTranscribe(e.target.checked)} />
               <span>
@@ -1066,7 +1077,7 @@ function RecordDetail({
   // (re)transcribe). `optTouched` tracks whether the user changed anything so we
   // re-seed from the record on load until they do.
   const [optLang, setOptLang] = useState("auto");
-  const [optSeg, setOptSeg] = useState(false);
+  const [optSttMode, setOptSttMode] = useState<"integral" | "segmented" | "batch">("batch");
   const [optTr, setOptTr] = useState(false);
   const [optEnh, setOptEnh] = useState(false);
   const [optMaxSpk, setOptMaxSpk] = useState(0); // 0 = 自动/不限；>0 = 最多这么多人
@@ -1162,7 +1173,7 @@ function RecordDetail({
     const fresh = rec.status === "uploaded"; // not yet run → follow global default
     const o = rec.options;
     setOptLang((fresh ? config.language : o?.language) || config.language || "auto");
-    setOptSeg(fresh ? !!config.segmentedStt : (o?.segmentedStt ?? !!config.segmentedStt));
+    setOptSttMode(fresh ? (config.sttMode || "batch") : (o?.sttMode || (o?.segmentedStt ? "segmented" : "batch")));
     setOptTr(fresh ? !!config.translate?.enabled : (o?.translate ?? !!config.translate?.enabled));
     setOptEnh(fresh ? !!config.enhance?.enabled : (o?.enhance ?? !!config.enhance?.enabled));
     setOptMaxSpk(fresh ? 0 : (o?.maxSpeakers ?? 0));
@@ -1705,7 +1716,7 @@ function RecordDetail({
 
   async function doTranscribe() {
     try {
-      await api.transcribeRecord(id, { language: optLang, segmentedStt: optSeg, translate: optTr, enhance: optEnh, maxSpeakers: optMaxSpk });
+      await api.transcribeRecord(id, { language: optLang, sttMode: optSttMode, segmentedStt: optSttMode === "segmented", translate: optTr, enhance: optEnh, maxSpeakers: optMaxSpk });
       setShowOpts(false);
       await load(); onChanged();
     } catch (e: any) { setErr(String(e?.message || e)); }
@@ -2167,8 +2178,12 @@ function RecordDetail({
             </select>
           </label>
           <label className="flex items-center gap-2">
-            <input type="checkbox" className="h-4 w-4" checked={optSeg} onChange={(e) => setOptSeg(e.target.checked)} />
-            <span className="text-neutral-300">分段转写</span>
+            <span className="text-neutral-300">转写模式</span>
+            <select className="input !w-auto !py-1" value={optSttMode} onChange={(e) => setOptSttMode(e.target.value as "integral" | "segmented" | "batch")}>
+              <option value="batch">分段批量</option>
+              <option value="segmented">分段</option>
+              <option value="integral">整段</option>
+            </select>
           </label>
           <label className="flex items-center gap-2" title={config?.translate?.model ? "" : "请先在设置中选择翻译模型"}>
             <input type="checkbox" className="h-4 w-4" checked={optTr} disabled={!config?.translate?.model} onChange={(e) => setOptTr(e.target.checked)} />

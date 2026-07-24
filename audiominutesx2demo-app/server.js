@@ -99,8 +99,10 @@ const DEFAULT_CONFIG = {
   models: { stt: "", align: "", diar: "" },
   // DEFAULTS for NEW files (each record snapshots these into record.options at
   // upload; per-file overrides win at (re)transcribe time):
-  //   segmentedStt false = 整段转写 (one whole-clip STT); true = 分段转写 (STT per
-  //   diarization window).
+  //   sttMode: "batch" 分段批量(默认,一批多窗少往返) | "segmented" 分段(逐窗) |
+  //   "integral" 整段(单次整段 STT)。legacy segmentedStt 仅在无 sttMode 时回退映射
+  //   (true→segmented / false→integral)。
+  sttMode: "batch",
   segmentedStt: false,
   //   language "auto" = detect per slice from the STT text; a code (zh/en/ja/ko/…)
   //   forces that language for forced alignment.
@@ -288,7 +290,7 @@ function recordSummary(rec) {
     createdAt: rec.createdAt,
     speakers: rec.result?.speakers?.length || 0,
     segments: rec.result?.segments?.length || 0,
-    options: rec.options || { language: "auto", segmentedStt: false, translate: false, enhance: false, maxSpeakers: 0 },
+    options: rec.options || { language: "auto", sttMode: "batch", segmentedStt: false, translate: false, enhance: false, maxSpeakers: 0 },
     translated: !!(rec.result?.segments || []).some((s) => s.translation),
     jobKind: rec.jobKind || "full",
     notices: Array.isArray(rec.notices) ? rec.notices : [],
@@ -646,6 +648,41 @@ async function gwAudioEnhance(cfg, wavPath, model, outPath) {
   }
 }
 
+// Extract [start, start+dur] from `input` into a 16k mono FLAC (LOSSLESS — no quality
+// loss vs the source, ~half the size of WAV so more audio fits under the gateway's 32M
+// body cap, and libsndfile/soundfile/torchaudio all decode it). Builds per-batch
+// sub-clips for the "分段批量" path.
+function extractFlac(input, start, dur, output) {
+  return new Promise((resolve, reject) => {
+    const ff = spawn("ffmpeg", ["-y", "-ss", String(round3(Math.max(0, start))), "-i", input,
+      "-t", String(round3(Math.max(0.05, dur))), "-vn", "-ac", "1", "-ar", "16000", "-c:a", "flac", output]);
+    let err = "";
+    ff.stderr.on("data", (d) => (err += d.toString()));
+    ff.on("close", (code) => (code === 0 ? resolve(output) : reject(new Error("ffmpeg flac failed: " + err.slice(-1500)))));
+    ff.on("error", reject);
+  });
+}
+
+// Batch audio op: POST /v1/audio/<op> with the sub-clip file + a `segments` JSON array
+// (start/end RELATIVE to the sub-clip). The base wrapper decodes once, slices per
+// segment, runs each, and returns {results:[…]} in order. Returns that array. NO
+// prepUpload — sub-clips are FLAC packed under the cap on purpose (must stay lossless).
+async function gwAudioBatch(cfg, op, filePath, segments, model, extra = {}) {
+  const buf = fs.readFileSync(filePath);
+  const flac = /\.flac$/i.test(filePath);
+  const fd = new FormData();
+  fd.append("file", new Blob([buf], { type: flac ? "audio/flac" : "audio/wav" }), flac ? "audio.flac" : "audio.wav");
+  fd.append("model", model);
+  fd.append("segments", JSON.stringify(segments));
+  for (const [k, v] of Object.entries(extra)) fd.append(k, String(v));
+  const r = await fetch(gwUrl(cfg, `/v1/audio/${op}`), { method: "POST", headers: gwHeaders(cfg), body: fd, signal: cfg._signal });
+  const text = await r.text();
+  let j;
+  try { j = JSON.parse(text); } catch { j = text; }
+  if (!r.ok) throw new Error(`${op} batch ${r.status}: ${String(text).slice(0, 300)}`);
+  return Array.isArray(j?.results) ? j.results : [];
+}
+
 // Text chat completion via the gateway's OpenAI /v1/chat/completions (mode=chat).
 // Backs 智能摘要. Returns the assistant message string with Qwen3 <think> blocks
 // stripped (we ask for /no_think but strip defensively so JSON parsing is clean).
@@ -963,6 +1000,7 @@ app.put("/api/config", (req, res) => {
       align: (b.models?.align ?? cur.models.align ?? "").toString(),
       diar: (b.models?.diar ?? cur.models.diar ?? "").toString(),
     },
+    sttMode: ["integral", "segmented", "batch"].includes(b.sttMode) ? b.sttMode : (cur.sttMode || "batch"),
     segmentedStt: Boolean(b.segmentedStt ?? cur.segmentedStt ?? false),
     language: (b.language ?? cur.language ?? "auto").toString().trim() || "auto",
     autoTranscribe: Boolean(b.autoTranscribe ?? cur.autoTranscribe ?? true),
@@ -1104,6 +1142,7 @@ function handleUpload(req, res, t0) {
       // defaults; the user can override them per record before (re)transcribing.
       options: {
         language: cfg.language || "auto",
+        sttMode: cfg.sttMode || "batch",
         segmentedStt: !!cfg.segmentedStt,
         translate: !!cfg.translate?.enabled,
         enhance: !!cfg.enhance?.enabled,
@@ -3490,6 +3529,9 @@ async function runJob(id) {
   const opts = rec.options || {};
   if (opts.language) cfg.language = opts.language;
   cfg.segmentedStt = !!opts.segmentedStt;
+  cfg.sttMode = ["integral", "segmented", "batch"].includes(opts.sttMode)
+    ? opts.sttMode
+    : (opts.segmentedStt ? "segmented" : "integral"); // legacy records → their old behaviour
   const { ready, missing } = configReady(cfg);
   if (!ready) {
     rec.status = "error";
@@ -3649,7 +3691,97 @@ async function runJob(id) {
       });
     };
 
-    if (segmented) {
+    // 分段批量：diar 窗 → 每批 FLAC 子片(整段音频只在批内传一遍) → 一次 batch STT + 一次
+    // batch align。载荷用 FLAC(无损、libsndfile 通吃),按累计上传字节 ≤ ~30MiB 贪心分批
+    // (避开网关 32M body 上限)。窗口对齐单元时间是片内相对,回加 w.start 到绝对时间轴。
+    const runBatch = async () => {
+      const windows = buildWindows(diarSegs, rec.durationSec);
+      if (!windows.length) return [];
+      // 按 WAV 上限字节率(32KB/s)保守估算分批,保证任何内容(含压不动的噪声音频)的
+      // FLAC 子片都 ≤ 目标、不会 413;FLAC 通常只有一半大,富余只是让上传更快。
+      const FLAC_BPS = 32 * 1024;
+      const TARGET = 30 * 1024 * 1024; // 单批上传目标(< 31.8MiB 网关阈值)
+      const batches = [];
+      let cur = [], curBytes = 0;
+      for (const w of windows) {
+        const wb = Math.max(1, w.end - w.start) * FLAC_BPS;
+        if (cur.length && curBytes + wb > TARGET) { batches.push(cur); cur = []; curBytes = 0; }
+        cur.push(w); curBytes += wb;
+      }
+      if (cur.length) batches.push(cur);
+      console.log(`[${id}] 分段批量：${windows.length} 窗 → ${batches.length} 批(FLAC,≤30MiB/批)`);
+
+      timer.begin("分段批量转写");
+      let doneW = 0;
+      for (let bi = 0; bi < batches.length; bi++) {
+        ckCancel(id);
+        const batch = batches[bi];
+        const bStart = batch[0].start, bEnd = batch[batch.length - 1].end;
+        const flacPath = path.join(UPLOAD_DIR, `${id}-bstt${bi}.flac`);
+        tmp.push(flacPath);
+        await extractFlac(workAudio, bStart, bEnd - bStart, flacPath);
+        const segs = batch.map((w) => ({ start: round3(w.start - bStart), end: round3(w.end - bStart) }));
+        const _t0 = Date.now();
+        let results = [];
+        try {
+          results = await gwAudioBatch(cfg, "transcriptions", flacPath, segs, cfg.models.stt, sttParams(cfg));
+        } catch (e) { if (e && e.cancelled) throw e; console.error(`[${id}] 批量转写(${bi})失败: ${e?.message || e}`); }
+        batch.forEach((w, i) => {
+          const r = results[i] || {};
+          w._text = (typeof r === "string" ? r : (r.text ?? "")).toString().trim();
+        });
+        console.log(`[${id}] ⏱批量转写(${bi}) ${((Date.now() - _t0) / 1000).toFixed(1)}s · ${batch.length}窗 · 段长${round3(bEnd - bStart)}s`);
+        doneW += batch.length;
+        setP(20 + Math.round((35 * doneW) / windows.length), "分段批量转写", doneW, windows.length);
+      }
+
+      timer.begin("分段批量对齐");
+      doneW = 0;
+      for (let bi = 0; bi < batches.length; bi++) {
+        ckCancel(id);
+        const batch = batches[bi];
+        const withText = batch.filter((w) => w._text);
+        if (withText.length) {
+          const bStart = batch[0].start, bEnd = batch[batch.length - 1].end;
+          const flacPath = path.join(UPLOAD_DIR, `${id}-bal${bi}.flac`);
+          tmp.push(flacPath);
+          await extractFlac(workAudio, bStart, bEnd - bStart, flacPath);
+          const segs = withText.map((w) => ({
+            start: round3(w.start - bStart), end: round3(w.end - bStart),
+            text: w._text, language: resolveAlignLang(cfg.language, w._text),
+          }));
+          const _t0 = Date.now();
+          let results = [];
+          try {
+            results = await gwAudioBatch(cfg, "align", flacPath, segs, cfg.models.align, {});
+          } catch (e) { if (e && e.cancelled) throw e; console.error(`[${id}] 批量对齐(${bi})失败: ${e?.message || e}`); }
+          withText.forEach((w, i) => {
+            const r = results[i] || {};
+            if (!language && r.language) language = r.language;
+            const unitsRaw = Array.isArray(r.units) ? r.units : [];
+            const units = unitsRaw.map((u) => ({
+              text: u.text ?? u.word ?? u.token ?? "",
+              start: round3(Number(u.start ?? u.start_time ?? 0) + w.start),
+              end: round3(Number(u.end ?? u.end_time ?? 0) + w.start),
+            }));
+            w._words = finalizeWords(wordsFromRef(w._text, units), w.start, w.end);
+          });
+          console.log(`[${id}] ⏱批量对齐(${bi}) ${((Date.now() - _t0) / 1000).toFixed(1)}s · ${withText.length}窗`);
+        }
+        doneW += batch.length;
+        setP(55 + Math.round((35 * doneW) / windows.length), "分段批量对齐", doneW, windows.length);
+      }
+
+      return windows.map((w) => ({
+        start: round3(w.start), end: round3(w.end), speaker: w.speaker,
+        text: w._text || "", words: w._words || [],
+      }));
+    };
+
+    if (cfg.sttMode === "batch") {
+      segsOut = await runBatch();
+      dbg = { mode: "分段批量（一批多窗:1 次 batch STT + 1 次 batch align/批,FLAC 按字节分批）", punctuated: null, sttChars: 0, align: null };
+    } else if (segmented) {
       timer.begin("分段转写与对齐");
       segsOut = await runWindows();
       dbg = { mode: "分段转写与词级对齐（逐窗 STT + 逐窗对齐）", punctuated: null, sttChars: 0, align: null };
@@ -3854,7 +3986,7 @@ async function runJob(id) {
       language: language || "",
       durationSec: rec.durationSec || 0,
       models: { stt: cfg.models?.stt || "", align: cfg.models?.align || "", diar: cfg.models?.diar || "", translate: cfg.translate?.model || "" },
-      options: { segmentedStt: !!cfg.segmentedStt, translate: !!rec.options?.translate, enhance: !!rec.options?.enhance, maxSpeakers: Math.max(0, Math.floor(Number(rec.options?.maxSpeakers) || 0)) },
+      options: { sttMode: cfg.sttMode || "batch", segmentedStt: !!cfg.segmentedStt, translate: !!rec.options?.translate, enhance: !!rec.options?.enhance, maxSpeakers: Math.max(0, Math.floor(Number(rec.options?.maxSpeakers) || 0)) },
       diarWindows: dbgDiar,
       sttChars: dbg?.sttChars || 0,
       unitCount: dbg?.units || 0,
@@ -3909,6 +4041,7 @@ app.post("/api/records/:id/transcribe", (req, res) => {
   const prev = rec.options || {};
   rec.options = {
     language: (b.language ?? prev.language ?? cfg.language ?? "auto").toString().trim() || "auto",
+    sttMode: ["integral", "segmented", "batch"].includes(b.sttMode) ? b.sttMode : (prev.sttMode ?? cfg.sttMode ?? "batch"),
     segmentedStt: b.segmentedStt !== undefined ? !!b.segmentedStt : (prev.segmentedStt ?? !!cfg.segmentedStt),
     translate: b.translate !== undefined ? !!b.translate : (prev.translate ?? !!cfg.translate?.enabled),
     enhance: b.enhance !== undefined ? !!b.enhance : (prev.enhance ?? !!cfg.enhance?.enabled),
@@ -4013,7 +4146,7 @@ app.post("/api/records/:id/clip", (req, res) => {
     progress: 5,
     phase: "生成中",
     error: "",
-    options: { language: parent.options?.language || "auto", segmentedStt: false, translate: false, enhance: false },
+    options: { language: parent.options?.language || "auto", sttMode: "batch", segmentedStt: false, translate: false, enhance: false },
     clipOf: parent.id,
     clipRanges: ranges,
     // 连续/非连续 reflects the user's selection (a single contiguous block is 连续),

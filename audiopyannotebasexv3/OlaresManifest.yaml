@@ -91,7 +91,7 @@ spec:
 
   upgradeDescription: |
     v1.0.0: initial pyannote/speechbrain audio base. llm-init runs ENGINE_KIND=audio
-    (image lovehunter9/llm-init:v1.3.2-audiobase5): it downloads the model AND
+    (image lovehunter9/llm-init:v1.3.2-audiobase6): it downloads the model AND
     reverse-proxies the engine's /v1/audio/* directly (no nginx). Capabilities
     chosen at clone via MODEL_SUPPORTS (vad / diar / speaker_embed / enhance).
 

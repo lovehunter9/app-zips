@@ -252,6 +252,33 @@ export async function audioMultipart(
   return dataCall(s, `/v1/audio/${op}`, { method: "POST", body: fd }, wantBlob);
 }
 
+// Batch audio op (分段批量): POST /v1/audio/<op> with the sub-clip WAV + a `segments`
+// JSON array (start/end RELATIVE to the sub-clip). The base wrapper decodes once, slices
+// per segment, runs each, returns {results:[…]} in order. Returns that array. Always WAV,
+// never edgeSafe (sub-clips are packed under the 32M body cap on purpose).
+export async function audioBatch(
+  s: Settings,
+  op: "transcriptions" | "align",
+  file: Blob,
+  segments: object[],
+  model: string,
+  extra: Record<string, string> = {}
+): Promise<any[]> {
+  const fd = new FormData();
+  fd.append("file", file, "audio.wav");
+  fd.append("model", model);
+  fd.append("segments", JSON.stringify(segments));
+  for (const [k, v] of Object.entries(extra)) fd.append(k, v);
+  const res = await dataCall(s, `/v1/audio/${op}`, { method: "POST", body: fd });
+  if (!res.ok) throw new Error(`${op} batch ${res.status}: ${(res.text || JSON.stringify(res.json) || "").slice(0, 200)}`);
+  return Array.isArray(res.json?.results) ? res.json.results : [];
+}
+
+// Upload byte budget for batch sub-clips: 16k mono WAV = 32 KB/s; keep each POST body
+// under the gateway nginx 32M cap (target 30M ≈ ~15.6 min of audio per batch).
+export const WAV_BYTES_PER_SEC = 16000 * 2;
+export const BATCH_TARGET_BYTES = 30 * 1024 * 1024;
+
 // MTran-style translate via the gateway TEMP passthrough: POST /v1/translate?model=<name>.
 // Body {from,to,text}; from "" / "auto" => the model auto-detects. Response {result}.
 // (Codes are MTran, e.g. zh-Hans/en — see floresToMtran in App.tsx.)

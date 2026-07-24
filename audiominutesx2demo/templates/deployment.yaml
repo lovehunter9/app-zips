@@ -1,0 +1,92 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: audiominutesx2demo
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    io.kompose.service: audiominutesx2demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: audiominutesx2demo
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: audiominutesx2demo
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      initContainers:
+        # The appData hostPath is created root-owned (fsGroup doesn't apply to hostPath),
+        # so hand the dir to uid 1000 before the non-root main container starts. A trusted
+        # beclab/ image is used here only for the chown (OPA allows beclab init as root);
+        # our own app image stays non-root. Non-recursive: the server makes its own
+        # /data/uploads subdir as uid 1000, and -R can fail to chown those on upgrade.
+        - name: fix-permissions
+          image: beclab/aboveos-busybox:1.37.0
+          command: ["sh", "-c", "chown 1000:1000 /data || true"]
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: appdata
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+      containers:
+        - name: audiominutesx2demo
+          image: "{{ .Values.image }}"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+          env:
+            - name: PORT
+              value: "8080"
+            - name: DATA_DIR
+              value: /data
+            - name: GATEWAY_URL
+              value: "{{ index (.Values.olaresEnv | default dict) "GATEWAY_URL" | default "" }}"
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          volumeMounts:
+            - name: appdata
+              mountPath: /data
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 30
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+      terminationGracePeriodSeconds: 10
+      restartPolicy: Always
+      volumes:
+        - name: appdata
+          hostPath:
+            path: "{{ .Values.userspace.appData }}"
+            type: DirectoryOrCreate

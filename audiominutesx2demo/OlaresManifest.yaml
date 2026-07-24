@@ -1,0 +1,130 @@
+olaresManifest.version: '0.12.0'
+olaresManifest.type: app
+apiVersion: 'v3'
+metadata:
+  name: audiominutesx2demo
+  icon: https://app.cdn.olares.com/appstore/llamacpp/icon.png
+  description: Feishu-Minutes-style audio notes — diarized, word-timestamped transcripts with player sync, via the LLM Gateway.
+  appid: audiominutesx2demo
+  title: Audio Minutes X2 Demo
+  version: '1.0.0'
+  categories:
+    - Utilities
+permission:
+  appData: true
+spec:
+  runAsUser: true
+  versionName: '1.0.0'
+  fullDescription: |
+    Audio Minutes X2 Demo is a Feishu-Minutes (妙记) style app for turning meetings,
+    lectures and audiobooks into interactive, searchable transcripts — all powered by
+    the on-Olares audio models through the LLM Gateway.
+
+    - Upload an audio or video file; it is normalized server-side (ffmpeg) and
+      transcribed asynchronously, so progress survives page refreshes.
+    - The transcript is speaker-diarized (who said what) and carries WORD-LEVEL
+      timestamps (STT + forced alignment).
+    - Two-way sync: click any word to jump the player there; while playing, the
+      current word is highlighted and the transcript auto-scrolls.
+    - A persistent library ("我的内容") keeps every processed recording.
+    - Configure the LLM Gateway URL and pick which STT / align / diarization models to
+      use, all in the app. If a required model is missing, the app tells you it cannot
+      transcribe until it is configured.
+  upgradeDescription: |
+    1.0.0（WIP·存档快照）：冻结当前「重对齐 + 均匀兜底」实现的状态，作为算法重构前的存档点。
+    与 1.0.17 代码等价，仅版本号 bump；下一步将按新的对齐算法重做，此版随时可能被整体推翻。
+    1.0.17（WIP·随时可能被推翻）：重对齐兜底——切片重对齐又塌(覆盖<50%)时，不再保留塌缩版，
+    改为在「真实空闲区」(前一个可靠词end→后一个可靠词start，并向外吞并塌缩词)内按字长均匀分布；
+    整段对齐窗口可调(默认 230s 顶格·最快，与 1.0.14 一致；另有「自适应/按语速」与 60–180s 选项，仅影响整段转写)。
+    已知：整段词级对齐仍是速度瓶颈(网关单次~100s/230s切片、串行)。此版为 WIP 存档，非稳定基线。
+    1.0.14: 修正塌窗判定阈值。1.0.13 把「可靠前缀只有 ~16 秒但真实对齐(matchRate=1.0)」的短前缀误判为整片
+    塌陷并对整窗插值,导致必塌 Vault 那条仍走插值。改为:只有「密集单元 + 可靠前缀 <8 秒」才算真塌窗;短而真的
+    前缀(早切)一律保留并让剩余音频进下一窗重对齐(经验证的「早切无害」)。本地 8090 复跑必塌 Vault(1012s):
+    5 窗全部真实对齐(covA 202~230s)、缩窗=0、降级/插值窗=0、插值区间=0——彻底不塌。
+    1.0.13: 方案 B「DIAR 规约」根治整段词级对齐塌窗。用已经算好的说话人分离(DIAR)时间轴来规约分窗:
+    (1) 窗口边界卡在 DIAR 停顿(静音间隙)中点,且每窗 ≤230 秒——低于对齐器可靠区(~255 秒),直接消除旧版
+    290 秒窗在测试机上超界整片塌陷的问题;(2) 每窗喂多少文本由「DIAR 有声时长分布 + 好窗真值锚点修正」的
+    字符↔时间曲线估算(字符只在有声段累积,快/慢语段不再把估计带偏);(3) 下一窗文本起点=上一窗对齐到的
+    可靠末字符,音频游标与字符游标出自同一个已对齐词,永不错位——彻底断掉「前导文本→塌窗」这条根因。仍塌则
+    前移文本重试(最多 2 次)再退化插值;插值段按字符线性铺开,不再堆同一时间戳。离线确定性 mock(相邻语段
+    6→22 cps 极端变速)验证:0 塌窗、0 插值、时间轴单调、100% 覆盖、平均误差 0.19 秒。网络错误仍中止。
+    1.0.12: 通过对照实验锁定塌窗真因——不是网络、并发、ffmpeg 字节或过量文本,而是「文本-音频游标错位」:
+    只要喂给某个词级对齐窗口的文本起点比该窗音频早哪怕 ~8 秒,对齐器立刻塌成 covA≈11 秒(实测 382→374 起点
+    covA 从 253 秒骤降到 11 秒)。据此按「尽量不塌、真塌就直接插值」重构:去掉限速/退避重试/自适应缩窗,每窗
+    单发对齐;塌窗或空窗一律直接对该 [a,b] 区间按 cps 插值并同步推进游标,不等待、不重试(宁可略有漂移也不卡死)。
+    网络错误仍按原逻辑中止。详细处理记录保留。游标错位的根治留待后续。
+    1.0.11: 定位并根治整段转写在测试机(App 与模型同机)上「稳定复现、位点固定」的时间戳漂移。对照实验
+    (同代码/同音频/同模型/同 GPU,仅 App→网关的请求间隔不同)证明:localhost 下相邻词级对齐请求过于紧密,
+    对齐后端来不及释放上一次的 GPU 状态就被下一次命中,导致对齐塌成 1 秒;而经网络的本地机因 RTT 天然拉开
+    间隔从不复现。故对「词级对齐」请求主动限速:每窗之间加基础间隔、塌窗则退避(2/4/7 秒)重试同一窗,复刻
+    网络客户端的节奏;缩窗降为最后兜底。仅对齐加间隔,其它阶段不受影响。另:提高分段转写与翻译的并发度以加速。
+    新增「详细处理记录」调试页(操作区「详细记录」按钮,可浏览/下载 TXT):展示每个对齐窗口的判定、被插值的
+    音频区间、以及哪些分段落在插值区间(正式发布前会移除)。
+    1.0.10: 修复负载下整段转写「成段时间戳偏移~5分钟」的残留——某个词级对齐窗口在繁忙 GPU 下
+    塌成 1 秒(covA≈1s)时,旧兜底会「一次性插值 255 秒」,导致那 4~5 分钟高亮整体超前、到下一窗才
+    收敛。现改为「自适应缩窗」:窗口降级就对半砍(290→145→72→40 秒)用同起点重试——更小的切片
+    对齐器更可能对成功、拿到真实时间戳;只有连 40 秒都塌了才对那一小段插值,误差被限制在 ~40 秒内。
+    同时修复一个潜在漂移:窗口「零进展」时不再只跳音频而把文本游标留在原地(那正是成段前移一个窗口
+    ~290 秒的根因),音频与文本始终同步推进。另:文字记录只在句子终止符处断段,不再在逗号处断句。
+    1.0.9: 修复负载下整段转写「成段时间戳跳过~5分钟」——词级对齐新增抗降级防线:某窗在繁忙 GPU 下
+    音频推进但文本几乎没消费(单元文本对不上稿件/时间被后挤)时,强制文本游标按字/秒追上音频,不再把
+    陈旧文本喂给后一窗;每个对齐单元硬钳进本窗、空窗/降级窗自动重试并打诊断日志。修复逐词高亮「快冲一串
+    再卡住」(burst-then-gap)——新增去 burst 平滑:保证每个词最小显示位、从邻近空档借时间并保留真停顿,
+    高亮匀速推进。另:「转写设置」的「转写时翻译」改为常驻显示(不再随全局开关时隐时现),「显示译文」只要
+    该记录有译文即可用;处理页转写阶段区分显示「整段转写 + 词级对齐」/「分段转写 + 词级对齐」。
+    1.0.8: 修复整段转写长音频(>~5分钟)的时间戳塌陷——词级对齐改为按对齐器自身饱和点切窗
+    (Qwen3-ForcedAligner 只在 ~270s 内可靠),每窗只保留可靠前缀、从最后一个可靠词续对后半段;
+    修复长音频尾部「几十段全挤在同一秒」的致命 bug(饱和窗口上映射整段文本会让字符游标在重复词上
+    越级跳到文本末尾,导致后半段音频从未对齐)——现只映射可靠前缀且限制前跳距离,时间戳全程单调递增。
+    1.0.7: 修复大文件/视频上传偶发「upload network error」——上传请求改为落盘即回包(几毫秒),
+    音频提取(ffmpeg)与时长探测(ffprobe)全部下沉到后台独立阶段,不再阻塞事件循环、不占转写时长；
+    音频按扩展名兜底识别(修复 MIME 缺失/错误时被误当视频转码而卡住)；新增 multer 传输错误处理与
+    服务端上传日志(便于定位)；前端上传报错更明确(区分“真断网”与“已传完但未响应,请刷新查看”)。
+    1.0.6: 新增「创建片段」——按转写勾选一段/多段生成独立片段(精确重编码切割拼接、飞书式片段编辑器、
+    连续/非连续标识、回链原出处、视频片段自动首帧封面)；参与者颜色可自动分配/自选/编辑；
+    音频「跳过空白」(播放与生成片段时剔除无人说话的空档，开启即提示总跳过时长，视频保留画面)；
+    片段列表移入「片段」TAB(飞书式卡片/列表切换 + 创建入口)。
+    1.0.5: 文字记录展示向飞书妙记靠拢(大段落合并、有标点按句编辑、只重排改动句时间轴)；
+    参与者管理(增删、删除后其发言转“未知”待逐条重指派)、重新识别说话人(仅重跑分离并保留文字)；
+    处理记录可单条删除/清空；「显示译文」改为按文件记忆；编辑进行中禁用重跑类操作，避免与自动保存冲突。
+    1.0.4: 长音频整段转写彻底修复 —— 词级对齐自动分窗(避免网关 413)、时间戳贯穿全程(修复坍缩)；
+    新增降噪增强(Enhance)、白天/夜晚主题、自定义背景图、文件卡大图/列表切换；界面处理记录(降噪/分窗/回退/翻译等事件与失败原因，不再黑箱)；
+    英译中标点自动转全角；界面向飞书妙记靠拢(满屏宽度、视频窗口更大、转写更紧凑)；补翻译处理列表只显示翻译步骤。
+    1.0.3: 转写/翻译支持手动「停止」；搜索命中高亮(区别于播放高亮)、支持跨词搜索并覆盖译文；
+    中文按词/字渲染改为紧密排列(去除字/词间空隙)；译文分段的空格问题修复。
+    1.0.2: 部署后无需手填 Cookie —— 透传浏览器 Olares 会话与 edge 注入的身份
+    (X-BFL-USER) 到网关，console/数据面均可直接鉴权。chart 升级为 v3 结构。
+    1.0.1: 词级高亮增强 —— 中文按词高亮(jieba 分词)+「词/字」切换，播放高亮不再跳字；
+    段落合并、标点保留、对齐语言自动检测等改进。
+    1.0.0: first release.
+  developer: Olares
+  website: https://olares.com
+  submitter: Olares
+  locale:
+    - en-US
+    - zh-CN
+  requiredMemory: 256Mi
+  limitedMemory: 2Gi
+  requiredDisk: 1Gi
+  limitedDisk: 20Gi
+  requiredCpu: 100m
+  limitedCpu: '2'
+  supportArch:
+    - amd64
+options:
+  apiTimeout: 0
+  allowedOutboundPorts:
+    - 80
+    - 443
+  dependencies:
+    - name: olares
+      type: system
+      version: '>=1.12.6-0'
+entrances:
+  - name: audiominutesx2demo
+    port: 8080
+    host: audiominutesx2demo
+    title: Audio Minutes X2 Demo
+    icon: https://app.cdn.olares.com/appstore/llamacpp/icon.png
+    openMethod: window
+    authLevel: internal
