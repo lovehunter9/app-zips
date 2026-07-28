@@ -9,11 +9,18 @@ import {
   fetchProviderModels,
   fetchSilences,
   fetchUploadAudio,
+  beginRun,
+  endRun,
+  isStopped,
+  stopRun,
+  STOPPED_MSG,
   transcodeToMp3,
   translate,
   translateBatch,
   uploadMedia,
   type CallResult,
+  type TaskProgress,
+  type TaskProgressFn,
 } from "./api";
 import { alignTextToTimeline, distributeTextOverRuns } from "./align";
 import {
@@ -259,10 +266,17 @@ function joinSegText(parts: (string | undefined)[]): string {
 // The aligner returns bare spoken tokens (word/char level) WITHOUT spaces or
 // sentence punctuation. Rebuilding line text by concatenating units therefore glues
 // English words and drops all punctuation. Instead we map each unit back to its
-// character span in the ORIGINAL reference text (greedy forward search, case-
-// insensitive fallback) and slice the ORIGINAL text for display — preserving spaces,
-// punctuation and casing. Align is used ONLY for timing.
-function mapUnitsToRef(units: Seg[], refText: string): { ci: number; cj: number }[] {
+// character span in the ORIGINAL reference text and slice the ORIGINAL text for
+// display — preserving spaces, punctuation and casing. Align is used ONLY for timing.
+//
+// The search is CASE-INSENSITIVE (the aligner lowercases and strips punctuation) and
+// BOUNDED to `slack` chars ahead of the cursor: an unbounded forward search let one
+// short word (a/the/and) whose nearby occurrence differs in case match thousands of
+// chars later, and buildCharToTime's monotonic clamp then pinned every following
+// character to that early unit's time — an hour-long clip ended with hundreds of
+// lines stamped the same second. A token that isn't where it should be simply
+// advances the cursor by its own length and leaves a hole for interpolation.
+function mapUnitsToRef(units: Seg[], refText: string, slack = 48): { ci: number; cj: number }[] {
   const out: { ci: number; cj: number }[] = [];
   let cursor = 0;
   const lower = refText.toLowerCase();
@@ -272,10 +286,12 @@ function mapUnitsToRef(units: Seg[], refText: string): { ci: number; cj: number 
       out.push({ ci: cursor, cj: cursor });
       continue;
     }
-    let idx = refText.indexOf(t, cursor);
-    if (idx < 0) idx = lower.indexOf(t.toLowerCase(), cursor);
-    if (idx < 0) {
-      out.push({ ci: cursor, cj: Math.min(refText.length, cursor + t.length) });
+    const idx = lower.indexOf(t.toLowerCase(), cursor);
+    if (idx < 0 || idx > cursor + slack) {
+      const cj = Math.min(refText.length, cursor + t.length);
+      out.push({ ci: cursor, cj });
+      cursor = cj;
+      while (cursor < refText.length && /\s/.test(refText[cursor])) cursor++;
       continue;
     }
     out.push({ ci: idx, cj: idx + t.length });
@@ -503,6 +519,56 @@ function splitTextN(text: string, n: number): string[] {
   parts.push(text.slice(start));
   return parts;
 }
+// Cut a long transcript into sentence-bounded blocks of at most `maxChars` for
+// translation. A translation model has a context window like any other: handed a
+// 65-minute transcript in ONE /v1/translate call it stops translating and starts
+// summarising, then loops the same paragraph. Blocks are cut only at sentence ends
+// (a clause is never split), and a single over-long sentence is passed as its own
+// block rather than chopped mid-clause.
+function chunkForTranslate(text: string, maxChars = 900): string[] {
+  const src = (text || "").trim();
+  if (src.length <= maxChars) return src ? [src] : [];
+  const sentEnd = /[。！？!?…]|[.](?=\s|$)/;
+  const out: string[] = [];
+  let buf = "";
+  let sent = "";
+  const flushSent = () => {
+    if (!sent) return;
+    if (buf && buf.length + sent.length > maxChars) {
+      out.push(buf);
+      buf = "";
+    }
+    buf += sent;
+    sent = "";
+  };
+  for (let i = 0; i < src.length; i++) {
+    sent += src[i];
+    if (sentEnd.test(src[i])) {
+      // swallow the closing quotes/brackets/space that belong to this sentence
+      while (i + 1 < src.length && /["'”’」』）)\]\s]/.test(src[i + 1])) sent += src[++i];
+      flushSent();
+    }
+  }
+  flushSent();
+  if (buf) out.push(buf);
+  // A transcript with no sentence punctuation at all (Whisper's Chinese) would come
+  // out as one giant block — exactly what this is meant to prevent. Wrap those on a
+  // comma, else a space/CJK boundary, else hard.
+  const wrapped: string[] = [];
+  for (const b of out) {
+    let rest = b;
+    while (rest.length > maxChars) {
+      const head = rest.slice(0, maxChars);
+      let cut = Math.max(head.lastIndexOf("，"), head.lastIndexOf(","), head.lastIndexOf("、"));
+      if (cut < maxChars * 0.5) cut = head.lastIndexOf(" ");
+      if (cut < maxChars * 0.5) cut = maxChars - 1;
+      wrapped.push(rest.slice(0, cut + 1));
+      rest = rest.slice(cut + 1);
+    }
+    wrapped.push(rest);
+  }
+  return wrapped.filter((s) => s.trim());
+}
 
 // Remove text duplicated by the audio overlap between a split-continuation piece and its
 // predecessor: find the largest tail-of-prev == head-of-cur (char-level, so it works for
@@ -565,6 +631,23 @@ function sttConcBounds(model: string): { def: number; max: number } {
   return { def: 4, max: 8 };
 }
 const TRANSLATE_CONC_MAX = 12;
+// Whole-text translation is sent as sentence-bounded blocks of this many chars, at
+// most this many blocks per /translate/batch call (the model rejects >64 texts).
+const TRANSLATE_BLOCK_CHARS = 900;
+const TRANSLATE_BATCH_MAX = 50;
+// CJK targets have no inter-sentence space, so blocks are re-joined without one.
+const cjkTarget = (flores: string): boolean => /^(zho|jpn|kor|yue)/i.test(flores || "");
+
+// The engine's task progress as one line: "chunk · 62% · 12/19". Empty when the
+// engine hasn't reported anything yet (a just-queued task).
+const taskProgressText = (p: TaskProgress | null): string => {
+  if (!p) return "";
+  const bits: string[] = [];
+  if (p.stage) bits.push(p.stage);
+  if (typeof p.ratio === "number") bits.push(`${Math.round(p.ratio * 100)}%`);
+  if (p.total) bits.push(`${p.done || 0}/${p.total}`);
+  return bits.join(" · ");
+};
 
 const is5xx = (res: CallResult) => res.status === 502 || res.status === 503 || res.status === 504;
 // A 502/504 whose body is the Olares edge HTML (envoy/openresty) — i.e. the public
@@ -643,12 +726,27 @@ export default function App() {
   const [uploading, setUploading] = useState(false);
   const [uploadPct, setUploadPct] = useState(0);
   const [running, setRunning] = useState(false);
+  const [stopping, setStopping] = useState(false);
   // Live workflow progress: which capability, what phase, and how far (done/total).
   // total=0 ⇒ indeterminate (a single whole-clip call still in flight).
   const [progress, setProgress] = useState<{ cap: CapId; phase: string; done: number; total: number } | null>(null);
   const [exec, setExec] = useState<ExecRecord[]>([]);
   const [results, setResults] = useState<Record<string, any>>({});
   const [enhanceUrl, setEnhanceUrl] = useState<string>("");
+
+  // Feed the bar from the engine's own task progress (async task mode): the engine
+  // counts real units when it has them (chunks, segments), else reports a ratio,
+  // which the bar shows as a percentage. Whole-clip calls used to be a pulsing
+  // placeholder because the client had nothing to count.
+  const taskProgress = (cap: CapId, phase: string): TaskProgressFn => (p) => {
+    const text = taskProgressText(p);
+    setProgress({
+      cap,
+      phase: text ? `${phase} · ${text}` : phase,
+      done: p?.total ? (p.done || 0) : Math.round((p?.ratio || 0) * 100),
+      total: p?.total ? p.total : (p?.ratio == null ? 0 : 100),
+    });
+  };
 
   useEffect(() => {
     localStorage.setItem(LS_KEY, JSON.stringify(settings));
@@ -854,12 +952,23 @@ export default function App() {
       setRunning(false);
       return;
     }
+    setStopping(false);
+    beginRun(); // arms 停止 for every data-plane call below
 
     const push = (r: ExecRecord) => {
       records.push(r);
       setExec([...records]);
     };
     const skip = (cap: CapId, reason: string) => push({ cap, invoked: false, skippedReason: reason });
+    // 停止 = "don't start the next stage". The stage that was in flight gets its
+    // 已停止 row from the aborted call itself (see dataCall), and its upstream task
+    // is cancelled by stopRun; the stages after it are marked so the ledger still
+    // accounts for every capability.
+    const live = (cap: CapId, enabled: boolean): boolean => {
+      if (isStopped()) { skip(cap, STOPPED_MSG); return false; }
+      if (!enabled) { skip(cap, "未勾选"); return false; }
+      return true;
+    };
 
     // working audio: the blob downstream steps operate on (may be the enhanced output)
     let workingAudio: Blob = original;
@@ -888,13 +997,14 @@ export default function App() {
     // Whole-clip enhance: the engine now chunks internally (sliding window + crossfade
     // overlap-add, see enhance.py), so peak VRAM is bounded by one window and the client
     // always sends the FULL clip in a single request regardless of duration.
-    if (enabled.enhance) {
+    if (live("enhance", enabled.enhance)) {
       const model = selModel.enhance;
       if (!model) skip("enhance", "无可用模型");
       else {
         try {
           setProgress({ cap: "enhance", phase: "整段降噪中", done: 0, total: 0 });
-          const res = await callRetry(() => audioMultipart(settings, "enhance", original, model, {}, true));
+          const res = await callRetry(() => audioMultipart(settings, "enhance", original, model, {}, true, false,
+            { onProgress: taskProgress("enhance", "整段降噪中") }));
           if (res.blob) {
             // engine returns WAV → compress to MP3 so it stays edge-safe downstream
             const enhanced = await transcodeToMp3(res.blob).catch(() => res.blob!);
@@ -924,14 +1034,14 @@ export default function App() {
           push({ cap: "enhance", invoked: true, model, error: String(e.message || e) });
         }
       }
-    } else skip("enhance", "未勾选");
+    }
 
     // ── Stage 1: Segmentation (VAD / Diarize) on the working audio ─────
     let vadSegs: Seg[] = [];
     let diarSegs: Seg[] = [];
 
     const vadTask = async () => {
-      if (!enabled.vad) return skip("vad", "未勾选");
+      if (!live("vad", enabled.vad)) return;
       const model = selModel.vad;
       if (!model) return skip("vad", "无可用模型");
       try {
@@ -961,7 +1071,7 @@ export default function App() {
     };
 
     const diarTask = async () => {
-      if (!enabled.diar) return skip("diar", "未勾选");
+      if (!live("diar", enabled.diar)) return;
       const model = selModel.diar;
       if (!model) return skip("diar", "无可用模型");
       try {
@@ -973,7 +1083,9 @@ export default function App() {
         // Retry transient 5xx like VAD (its sibling segmentation op). A transient edge/gateway
         // 502 returns fast so the retries are cheap; callRetry still short-circuits an open
         // circuit breaker so we never hammer a genuinely-down provider.
-        const res = await callRetry(() => audioMultipart(settings, "diarization", workingAudio, model, {}), 3);
+        const res = await callRetry(() => audioMultipart(settings, "diarization", workingAudio, model, {}, false, false,
+          // diar is the slow half of this stage, so it owns the bar while both run.
+          { onProgress: taskProgress("diar", "说话人分离中") }), 3);
         out.diar = res.json;
         diarSegs = asSegments(res.json);
         push({
@@ -1013,7 +1125,7 @@ export default function App() {
     // ── Stage 2: STT ──────────────────────────────────────────────────
     let fused: Seg[] = []; // {start,end,speaker?,text}
     let alignPrimary = false; // set when Align supersedes the STT heuristic timeline
-    if (enabled.stt) {
+    if (live("stt", enabled.stt)) {
       const model = selModel.stt;
       if (!model) skip("stt", "无可用模型");
       else {
@@ -1042,8 +1154,20 @@ export default function App() {
               const relSegs = batch.map((w) => ({ start: +(w.start - bStart).toFixed(3), end: +(w.end - bStart).toFixed(3) }));
               calls++;
               let results: any[] = [];
+              // The bar counts WINDOWS; the engine counts the segments inside THIS
+              // batch, so its report rides in the phase text — a 40-segment batch
+              // used to be one silent jump.
+              const batchPhase = `分段批量转写(${sliceSrc}) 第 ${calls}/${batches.length} 批`;
+              const doneSoFar = done;
               try {
-                results = await audioBatch(settings, "transcriptions", clip, relSegs, model, { response_format: "json" });
+                results = await audioBatch(settings, "transcriptions", clip, relSegs, model, { response_format: "json" }, {
+                  onProgress: (p) => setProgress({
+                    cap: "stt",
+                    phase: taskProgressText(p) ? `${batchPhase} · ${taskProgressText(p)}` : batchPhase,
+                    done: Math.min(doneSoFar, windows.length),
+                    total: windows.length,
+                  }),
+                });
                 okCalls++; lastStatus = 200;
               } catch (e: any) { if (!errSample) errSample = String(e?.message || e); }
               batch.forEach((w, i) => {
@@ -1133,7 +1257,8 @@ export default function App() {
           // Send the working audio AS-IS (mp3/m4a/wav). edgeSafe() only transcodes a huge
           // RAW-WAV upload (e.g. video-extracted 1h ≈ 115 MB) down to mp3 to clear the edge.
           const res = await callRetry(
-            () => audioMultipart(settings, "transcriptions", workingAudio, model, { response_format: fmt }, false, false),
+            () => audioMultipart(settings, "transcriptions", workingAudio, model, { response_format: fmt }, false, false,
+              { onProgress: taskProgress("stt", "整段转写中(模型原生用法)") }),
             2
           );
           let nativeSegs = asSegments(res.json).filter((s) => (s.text || "").trim());
@@ -1254,7 +1379,7 @@ export default function App() {
           push({ cap: "stt", invoked: true, model, error: String(e.message || e) });
         }
       }
-    } else skip("stt", "未勾选");
+    }
 
     // ── Stage 2.5: Align (forced alignment → precise char/word timestamps) ──
     // We RESPECT the model's native 300s/inference cap (no engine change) and handle
@@ -1373,7 +1498,7 @@ export default function App() {
       });
     };
 
-    if (enabled.align) {
+    if (live("align", enabled.align)) {
       const model = selModel.align;
       const sttText = (out.stt?.text || "").trim();
       const manual = manualText.trim();
@@ -1400,8 +1525,19 @@ export default function App() {
             const alignSegs = batch.map((w) => ({ start: +(w.start - bStart).toFixed(3), end: +(w.end - bStart).toFixed(3), text: w.text || "", language: lang }));
             calls++;
             let results: any[] = [];
-            try { results = await audioBatch(settings, "align", clip, alignSegs, model); ok++; lastStatus = 200; }
-            catch (e: any) { if (!errSample) errSample = String(e?.message || e); }
+            const batchPhase = `分段批量对齐 第 ${calls}/${batches.length} 批`;
+            const doneSoFar = done;
+            try {
+              results = await audioBatch(settings, "align", clip, alignSegs, model, {}, {
+                onProgress: (p) => setProgress({
+                  cap: "align",
+                  phase: taskProgressText(p) ? `${batchPhase} · ${taskProgressText(p)}` : batchPhase,
+                  done: Math.min(doneSoFar, segs.length),
+                  total: segs.length,
+                }),
+              });
+              ok++; lastStatus = 200;
+            } catch (e: any) { if (!errSample) errSample = String(e?.message || e); }
             batch.forEach((w, i) => {
               const r = results[i] || {};
               const raw = Array.isArray(r.units) ? r.units : [];
@@ -1483,16 +1619,17 @@ export default function App() {
           }
         }
       }
-    } else skip("align", "未勾选");
+    }
 
     // ── Stage 3: Translate (per-line over the fused transcript) ────────
-    if (enabled.translate) {
+    if (live("translate", enabled.translate)) {
       const model = selModel.translate;
       // Fine mode: translate each segment so the fused view shows per-segment
       // translation (the nice part). Each call is fail-fast (tries=1) so it degrades
       // gracefully instead of stacking gateway timeouts. Whole-text otherwise.
       const lines = translatePerSeg ? fused.filter((f) => (f.text || "").trim()) : [];
       const wholeText = out.stt?.text || (fused.length ? joinSegText(fused.map((f) => f.text || "")).trim() : "");
+      const blocks = lines.length ? [] : chunkForTranslate(wholeText, TRANSLATE_BLOCK_CHARS);
       // Source language: explicit pick, or auto-detect. The document-level guess
       // (over the whole transcript) is the stable fallback for short per-line text.
       const docLang = source === "auto" ? detectLang(wholeText, "eng_Latn") : source;
@@ -1538,7 +1675,7 @@ export default function App() {
                 : `失败 ${res.status}: ${errBody(res)}`,
               rawResponse: JSON.stringify(lines.slice(0, 8).map((l) => ({ text: l.text, translation: (l as any).translation })), null, 2),
             });
-          } else {
+          } else if (blocks.length <= 1) {
             const res = await callRetry(() => translate(settings, model, from, to, wholeText), 3);
             const result = (res.json?.result ?? "").toString();
             out.translate = { text: result, translation: result, target, source: srcMode };
@@ -1555,15 +1692,50 @@ export default function App() {
               responseSummary: res.ok ? `整段翻译 ${result.length} 字` : `失败 ${res.status}: ${errBody(res)}`,
               rawResponse: JSON.stringify(res.json ?? res.text, null, 2)?.slice(0, 4000),
             });
+          } else {
+            // A long transcript goes as sentence-bounded blocks, TRANSLATE_BATCH_MAX per
+            // call. One giant text made the model summarise and loop instead of translate
+            // (an hour-long clip came back as a few repeated paragraphs).
+            const parts: string[] = [];
+            let calls = 0, okCalls = 0, lastStatus = 0, errSample = "";
+            for (let off = 0; off < blocks.length && !isStopped(); off += TRANSLATE_BATCH_MAX) {
+              const group = blocks.slice(off, off + TRANSLATE_BATCH_MAX);
+              setProgress({ cap: "translate", phase: `整段翻译(按句分块)`, done: off, total: blocks.length });
+              calls++;
+              const res = await callRetry(() => translateBatch(settings, model, from, to, group), 3);
+              lastStatus = res.status;
+              const got: string[] = Array.isArray(res.json?.results) ? res.json.results.map((x: any) => (x ?? "").toString()) : [];
+              if (res.ok && got.length === group.length) okCalls++;
+              else if (!errSample) errSample = `${res.status}: ${errBody(res)}`;
+              group.forEach((_, i) => parts.push(got[i] ?? ""));
+            }
+            setProgress({ cap: "translate", phase: "整段翻译(按句分块)", done: blocks.length, total: blocks.length });
+            const result = parts.join(cjkTarget(target) ? "" : " ").trim();
+            out.translate = { text: result, translation: result, target, source: srcMode };
+            push({
+              cap: "translate",
+              invoked: true,
+              endpoint: "/v1/translate/batch",
+              method: `POST ×${calls}(整段按句分块 ${blocks.length} 块)`,
+              model,
+              params: { 模式: `整段(按句分块,每块 ≤${TRANSLATE_BLOCK_CHARS} 字)`, 源语言: srcMode, target: langLabel(target) },
+              status: lastStatus,
+              ok: okCalls === calls && !!result,
+              durationMs: Date.now() - t0,
+              responseSummary: okCalls === calls
+                ? `整段翻译 ${result.length} 字(${blocks.length} 块 / ${calls} 次调用)`
+                : `${okCalls}/${calls} 次调用成功${errSample ? ` · 首个错误 ${errSample}` : ""}`,
+              rawResponse: JSON.stringify(parts.slice(0, 8), null, 2)?.slice(0, 4000),
+            });
           }
         } catch (e: any) {
           push({ cap: "translate", invoked: true, model, error: String(e.message || e) });
         }
       }
-    } else skip("translate", "未勾选");
+    }
 
     // ── Stage 4: Embed (per-speaker voiceprint -> similarity matrix) ───
-    if (enabled.embed) {
+    if (live("embed", enabled.embed)) {
       const model = selModel.embed;
       if (!model) skip("embed", "无可用模型");
       else if (segHasSpeaker) {
@@ -1621,7 +1793,8 @@ export default function App() {
         // no diarization: whole-clip embedding
         try {
           setProgress({ cap: "embed", phase: "整段声纹中", done: 0, total: 0 });
-          const res = await callRetry(() => audioMultipart(settings, "embeddings", workingAudio, model, {}));
+          const res = await callRetry(() => audioMultipart(settings, "embeddings", workingAudio, model, {}, false, false,
+            { onProgress: taskProgress("embed", "整段声纹中") }));
           out.embed = res.json;
           push({
             cap: "embed",
@@ -1640,12 +1813,14 @@ export default function App() {
           push({ cap: "embed", invoked: true, model, error: String(e.message || e) });
         }
       }
-    } else skip("embed", "未勾选");
+    }
 
     out._fused = fused;
     setResults(out);
     setProgress(null);
     setRunning(false);
+    setStopping(false);
+    endRun();
   }
 
   // Unified workflow transcript: fused stt segments (already speaker-attributed when
@@ -2117,6 +2292,16 @@ export default function App() {
             <button className="btn" disabled={running || !hasGateway || (!upload && !(manualText.trim() && enabled.translate))} onClick={run}>
               {running ? "执行中…" : !upload && manualText.trim() ? "▶ 翻译文本框内容" : "▶ 运行所选能力"}
             </button>
+            {running && upload && (
+              <button
+                className="rounded-md bg-neutral-700 px-4 py-1.5 text-sm text-neutral-100 hover:bg-neutral-600 disabled:opacity-50"
+                disabled={stopping}
+                title="中止后续步骤,并通知引擎取消正在跑的任务(DELETE /v1/audio/tasks/{id}) —— GPU 立刻腾出来"
+                onClick={() => { setStopping(true); stopRun(settings); }}
+              >
+                {stopping ? "停止中…" : "■ 停止"}
+              </button>
+            )}
             {!hasGateway && <span className="text-sm text-amber-400">⚠ 未配置 Gateway URL，已禁用调用(见①)。</span>}
             {hasGateway && !upload && !(manualText.trim() && enabled.translate) && (
               <span className="text-sm text-neutral-500">先上传音频/视频(见②),或在『翻译』文本框输入文字做纯文本翻译。</span>

@@ -171,11 +171,44 @@ function _releaseData(): void {
   else _dataInflight--;
 }
 
+// ---- run lifecycle / stop ----
+// The workflow used to be unstoppable: the button only disabled itself and every
+// call ran to the end. Async tasks give us something to stop with — abort the
+// in-flight fetches AND tell the engine to drop the tasks, so a wrong model or a
+// wrong file doesn't keep the GPU for another ten minutes.
+export const STOPPED_MSG = "已停止";
+let runAbort: AbortController | null = null;
+const liveTasks = new Map<string, string>(); // task id -> model (the poll/cancel needs ?model=)
+
+export function beginRun(): void {
+  runAbort = new AbortController();
+  liveTasks.clear();
+}
+export function endRun(): void {
+  runAbort = null;
+  liveTasks.clear();
+}
+export function isStopped(): boolean {
+  return runAbort?.signal.aborted ?? false;
+}
+export function stopRun(s: Settings): void {
+  const ids = [...liveTasks.entries()];
+  liveTasks.clear();
+  runAbort?.abort();
+  // `unstoppable`: these requests must reach the engine, so they don't ride the
+  // signal we just aborted.
+  for (const [id, model] of ids) {
+    void dataCall(s, `/v1/audio/tasks/${encodeURIComponent(id)}?model=${encodeURIComponent(model)}`,
+      { method: "DELETE" }, false, true);
+  }
+}
+
 async function dataCall(
   s: Settings,
   path: string,
   init: RequestInit,
-  wantBlob = false
+  wantBlob = false,
+  unstoppable = false
 ): Promise<CallResult> {
   await _acquireData();
   const t0 = performance.now();
@@ -185,6 +218,7 @@ async function dataCall(
       headers: gwHeaders(s, (init.headers as Record<string, string>) || {}),
       credentials: "include",
       redirect: "manual",
+      signal: unstoppable ? undefined : runAbort?.signal,
     });
     const durationMs = Math.round(performance.now() - t0);
     if (r.type === "opaqueredirect" || r.status === 0) {
@@ -200,6 +234,14 @@ async function dataCall(
       res.text = await r.text();
     }
     return res;
+  } catch (e: any) {
+    // A stop aborts every in-flight fetch. Report it as a call result instead of
+    // throwing, so the ledger shows 已停止 on the step that was running and the
+    // later stages simply don't start.
+    if (isStopped() && (e?.name === "AbortError" || String(e).includes("abort"))) {
+      return { status: 0, ok: false, durationMs: Math.round(performance.now() - t0), contentType: "", text: STOPPED_MSG };
+    }
+    throw e;
   } finally {
     _releaseData();
   }
@@ -209,6 +251,11 @@ async function dataCall(
 // clip ≈ 115 MB → 413 from envoy). Round large clips through the app server's ffmpeg
 // to 16k mono MP3 before sending. Small slices (STT 30s windows ≈ 1 MB) pass untouched.
 const EDGE_SAFE_BYTES = Math.floor(31.8 * 1024 * 1024); // ~200KB under the gateway nginx 32M body cap
+
+// Upload byte budget for batch sub-clips: 16k mono WAV = 32 KB/s; keep each POST body
+// under the gateway nginx 32M cap (target 30M ≈ ~15.6 min of audio per batch).
+export const WAV_BYTES_PER_SEC = 16000 * 2;
+export const BATCH_TARGET_BYTES = 30 * 1024 * 1024;
 
 export async function transcodeToMp3(blob: Blob): Promise<Blob> {
   const r = await fetch("/api/transcode", {
@@ -232,6 +279,103 @@ async function edgeSafe(file: Blob): Promise<Blob> {
   }
 }
 
+// ---- async task mode ----
+// A capability POST carrying `async=1` is answered with 202 + a task id instead
+// of the result, and polling that task reports the engine's OWN progress (stage
+// + done/total). Two things it buys this demo: a long clip no longer rides on
+// one held-open request through every hop, and the progress bar can show what
+// the engine is actually doing instead of a pulsing placeholder.
+//
+// It needs the gateway's task routes (v2.0.12-test1) and an engine that honours
+// the flag; both degrade on their own. An engine that ignores it answers 200
+// with the result, and a gateway without the routes 404s the poll — which turns
+// the mode off for the page and retries the call synchronously.
+export interface TaskProgress {
+  stage?: string;
+  ratio?: number;
+  done?: number;
+  total?: number;
+}
+export type TaskProgressFn = (p: TaskProgress | null, status: string) => void;
+export interface AudioOpts {
+  onProgress?: TaskProgressFn;
+}
+
+let asyncTasks = true;
+const TASK_POLL_MS = 1500;
+
+// An engine 404 names the task it couldn't find; a gateway without the routes
+// answers gin's plain "404 page not found" or an envelope about the route.
+function missingTaskAPI(res: CallResult): boolean {
+  const body = res.text || JSON.stringify(res.json ?? "");
+  return res.status === 404 && !/no such task/i.test(body);
+}
+
+// Poll one submitted task to a terminal state and return its result shaped like
+// an ordinary CallResult, so callers can't tell which mode ran.
+async function awaitTask(
+  s: Settings,
+  op: string,
+  model: string,
+  submitted: any,
+  wantBlob: boolean,
+  startedAt: number,
+  onProgress?: TaskProgressFn
+): Promise<CallResult | "no-task-api"> {
+  const id = (submitted?.task || submitted)?.id;
+  if (!id) throw new Error(`${op}: 202 without a task id`);
+  const q = `?model=${encodeURIComponent(model)}`;
+  const took = () => Math.round(performance.now() - startedAt);
+  // Registered so 停止 can cancel it upstream, not just abandon it here.
+  liveTasks.set(id, model);
+  try {
+    for (;;) {
+      await new Promise((r) => setTimeout(r, TASK_POLL_MS));
+      const poll = await dataCall(s, `/v1/audio/tasks/${encodeURIComponent(id)}${q}`, { method: "GET" });
+      if (missingTaskAPI(poll)) return "no-task-api";
+      if (!poll.ok) return { ...poll, durationMs: took() };
+      const doc = poll.json || {};
+      onProgress?.(doc.progress || null, String(doc.status || ""));
+      if (doc.status === "failed" || doc.status === "canceled") {
+        const msg = doc.error?.message || doc.status;
+        return { status: doc.error?.code || 500, ok: false, durationMs: took(), contentType: "", text: `${op}: ${msg}` };
+      }
+      if (doc.status !== "succeeded") continue;
+      if (!wantBlob && doc.result_kind === "json" && doc.result != null) {
+        return { status: 200, ok: true, durationMs: took(), contentType: "application/json", json: doc.result };
+      }
+      const got = await dataCall(s, `/v1/audio/tasks/${encodeURIComponent(id)}/result${q}`, { method: "GET" }, wantBlob);
+      return { ...got, durationMs: took() };
+    }
+  } finally {
+    liveTasks.delete(id);
+  }
+}
+
+// One audio call, async-first. `buildForm` is a callback because a body can only
+// be sent once and the async→sync fallback needs a second one.
+async function audioCall(
+  s: Settings,
+  op: string,
+  model: string,
+  buildForm: () => FormData,
+  wantBlob: boolean,
+  onProgress?: TaskProgressFn
+): Promise<CallResult> {
+  for (;;) {
+    const startedAt = performance.now();
+    const useAsync = asyncTasks;
+    const fd = buildForm();
+    if (useAsync) fd.append("async", "1");
+    const res = await dataCall(s, `/v1/audio/${op}`, { method: "POST", body: fd }, wantBlob);
+    if (res.status !== 202) return res;
+    const settled = await awaitTask(s, op, model, res.json, wantBlob, startedAt, onProgress);
+    if (settled !== "no-task-api") return settled;
+    asyncTasks = false;
+    console.warn(`[gw] 网关没有任务 API，本页改回同步调用（${op}）`);
+  }
+}
+
 export async function audioMultipart(
   s: Settings,
   op: string,
@@ -242,14 +386,17 @@ export async function audioMultipart(
   // STT must keep WAV: the vLLM transcription engines decode via libsndfile/soundfile,
   // which can't read MP3 → 400 "Invalid or unsupported audio file". So callers that send
   // already-edge-safe WAV (STT windows ≤25 MB) skip the >8 MB → MP3 transcode.
-  skipEdgeSafe = false
+  skipEdgeSafe = false,
+  opts: AudioOpts = {}
 ): Promise<CallResult> {
   const sendable = skipEdgeSafe ? file : await edgeSafe(file);
-  const fd = new FormData();
-  fd.append("file", sendable, /mpeg|mp3/i.test(sendable.type) ? "audio.mp3" : "audio.wav");
-  fd.append("model", model);
-  for (const [k, v] of Object.entries(extra)) fd.append(k, v);
-  return dataCall(s, `/v1/audio/${op}`, { method: "POST", body: fd }, wantBlob);
+  return audioCall(s, op, model, () => {
+    const fd = new FormData();
+    fd.append("file", sendable, /mpeg|mp3/i.test(sendable.type) ? "audio.mp3" : "audio.wav");
+    fd.append("model", model);
+    for (const [k, v] of Object.entries(extra)) fd.append(k, v);
+    return fd;
+  }, wantBlob, opts.onProgress);
 }
 
 // Batch audio op (分段批量): POST /v1/audio/<op> with the sub-clip WAV + a `segments`
@@ -262,22 +409,20 @@ export async function audioBatch(
   file: Blob,
   segments: object[],
   model: string,
-  extra: Record<string, string> = {}
+  extra: Record<string, string> = {},
+  opts: AudioOpts = {}
 ): Promise<any[]> {
-  const fd = new FormData();
-  fd.append("file", file, "audio.wav");
-  fd.append("model", model);
-  fd.append("segments", JSON.stringify(segments));
-  for (const [k, v] of Object.entries(extra)) fd.append(k, v);
-  const res = await dataCall(s, `/v1/audio/${op}`, { method: "POST", body: fd });
+  const res = await audioCall(s, op, model, () => {
+    const fd = new FormData();
+    fd.append("file", file, "audio.wav");
+    fd.append("model", model);
+    fd.append("segments", JSON.stringify(segments));
+    for (const [k, v] of Object.entries(extra)) fd.append(k, v);
+    return fd;
+  }, false, opts.onProgress);
   if (!res.ok) throw new Error(`${op} batch ${res.status}: ${(res.text || JSON.stringify(res.json) || "").slice(0, 200)}`);
   return Array.isArray(res.json?.results) ? res.json.results : [];
 }
-
-// Upload byte budget for batch sub-clips: 16k mono WAV = 32 KB/s; keep each POST body
-// under the gateway nginx 32M cap (target 30M ≈ ~15.6 min of audio per batch).
-export const WAV_BYTES_PER_SEC = 16000 * 2;
-export const BATCH_TARGET_BYTES = 30 * 1024 * 1024;
 
 // MTran-style translate via the gateway TEMP passthrough: POST /v1/translate?model=<name>.
 // Body {from,to,text}; from "" / "auto" => the model auto-detects. Response {result}.
@@ -324,11 +469,12 @@ export function alignAudio(
   model: string,
   clip: Blob,
   text: string,
-  language?: string
+  language?: string,
+  opts: AudioOpts = {}
 ): Promise<CallResult> {
   const extra: Record<string, string> = { text };
   if (language) extra.language = language;
-  return audioMultipart(s, "align", clip, model, extra, false, true);
+  return audioMultipart(s, "align", clip, model, extra, false, true, opts);
 }
 
 export async function uploadMedia(
