@@ -397,7 +397,9 @@ function SpeakerChip({ spk, names, colors, onClick }: { spk: string; names?: Rec
 
 function statusText(r: RecordSummary): string {
   if (r.status === "processing") {
-    const cnt = r.stepTotal > 0 ? ` (${r.stepDone}/${r.stepTotal})` : "";
+    // Same wording as the detail view's header + step row, so the two places a
+    // running file is shown never disagree on the numbers.
+    const cnt = r.stepTotal > 0 ? ` · ${r.stepDone}/${r.stepTotal} 段` : "";
     return `处理中 ${r.progress}%${r.phase ? " · " + r.phase : ""}${cnt}`;
   }
   if (r.status === "preparing") return r.phase || "准备中…";
@@ -611,11 +613,11 @@ function ProcessingView({ rec, onStop }: { rec: RecordFull; onStop?: () => void 
     ? "stt"
     : translateOnly
     ? "translate"
-    : p >= 94
+    : p >= 90
     ? "tidy"
-    : p >= 20
+    : p >= 24
     ? "stt"
-    : p >= 3
+    : p >= 12
     ? "diar"
     : opts?.enhance
     ? "enhance"
@@ -3886,7 +3888,7 @@ export default function App() {
     }
     if (r.status === "preparing") {
       return (
-        <div className="flex flex-1 items-center gap-2">
+        <div className="flex min-w-0 flex-1 items-center gap-2">
           <div className="min-w-0 flex-1">
             <div className="mb-1 truncate text-xs text-sky-400">
               <span className="mr-1 inline-block animate-pulse">●</span>{statusText(r)}
@@ -3900,7 +3902,7 @@ export default function App() {
 }
     if (r.status === "processing") {
   return (
-        <div className="flex flex-1 items-center gap-2">
+        <div className="flex min-w-0 flex-1 items-center gap-2">
           <div className="min-w-0 flex-1">
             <div className="mb-1 truncate text-xs text-amber-400">{statusText(r)}</div>
             <div className="h-1.5 w-full overflow-hidden rounded bg-neutral-800">
@@ -4111,7 +4113,9 @@ export default function App() {
                       ✕
                     </button>
                   </div>
-                  <div className="mt-2 flex items-center gap-2">{statusActions(r)}</div>
+                  {/* overflow-hidden: the status line is one long nowrap string; without
+                      a clip on the card's own row a long 处理中 phase escaped the card. */}
+                  <div className="mt-2 flex items-center gap-2 overflow-hidden">{statusActions(r)}</div>
                 </div>
               ))}
             </div>

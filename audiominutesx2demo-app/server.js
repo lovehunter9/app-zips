@@ -605,20 +605,154 @@ async function prepUpload(file) {
   return { path: out, mp3: true };
 }
 
-async function gwAudioOp(cfg, op, wavPath, model, extra = {}) {
+// --- Async task mode ----------------------------------------------------
+// The engines answer a capability POST carrying `async=1` with 202 + a task id
+// instead of the result, and the task's poll reports the engine's OWN progress
+// (stage + done/total). Two reasons this demo prefers it over a long-held
+// request: an hour-long clip no longer depends on every hop's read timeout, and
+// "说话人分离（整段分析中）" can finally say how far along it is.
+//
+// The mode needs task routes on the gateway (v2.0.12-test1) and an engine new
+// enough to honour `async=1`. Both degrade by themselves: an engine that
+// ignores the flag answers 200 with the result, and a gateway without the
+// routes 404s the poll — which turns the mode off for the rest of the process
+// and retries the call synchronously, exactly as before.
+let asyncTasks = true;
+const TASK_POLL_MS = 1500;
+
+// Sentinel: the poll 404'd in a way that means "this gateway has no task API"
+// rather than "no such task".
+class TaskAPIMissing extends Error {}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// An engine 404 names the task it couldn't find; a gateway without the routes
+// answers gin's plain "404 page not found" or an envelope about the route.
+function looksLikeMissingTaskAPI(body) {
+  return !/no such task/i.test(String(body || ""));
+}
+
+// Read a finished (non-202) audio response: JSON for the analytic caps, raw
+// bytes for enhance. Throws with the upstream text on non-2xx.
+async function readAudioReply(r, op, binary) {
+  if (binary) {
+    if (!r.ok) throw new Error(`${op} ${r.status}: ${String(await r.text().catch(() => "")).slice(0, 300)}`);
+    return { bytes: Buffer.from(await r.arrayBuffer()), contentType: r.headers.get("content-type") };
+  }
+  const text = await r.text();
+  if (!r.ok) throw new Error(`${op} ${r.status}: ${String(text).slice(0, 300)}`);
+  try { return JSON.parse(text); } catch { return text; }
+}
+
+// Poll one task to a terminal state, reporting progress, then hand back its
+// result. JSON results already ride in the poll document; binary ones are
+// fetched from the result URL.
+async function gwTaskAwait(cfg, op, model, submitted, { binary, onProgress }) {
+  const id = (submitted?.task || submitted)?.id;
+  if (!id) throw new Error(`${op}: 202 without a task id`);
+  const q = `?model=${encodeURIComponent(model)}`;
+  try {
+    for (;;) {
+      await sleep(TASK_POLL_MS);
+      const r = await fetch(gwUrl(cfg, `/v1/audio/tasks/${encodeURIComponent(id)}${q}`),
+        { headers: gwHeaders(cfg), signal: cfg._signal });
+      const text = await r.text();
+      if (r.status === 404 && looksLikeMissingTaskAPI(text)) throw new TaskAPIMissing(text.slice(0, 200));
+      if (!r.ok) throw new Error(`${op} poll ${r.status}: ${String(text).slice(0, 300)}`);
+      let doc;
+      try { doc = JSON.parse(text); } catch { throw new Error(`${op} poll: unreadable task document`); }
+      if (onProgress) onProgress(doc.progress || null, doc.status);
+      if (doc.status === "failed") throw new Error(`${op}: ${doc.error?.message || "task failed"}`);
+      if (doc.status === "canceled") throw new Error(`${op}: task canceled`);
+      if (doc.status !== "succeeded") continue;
+      if (!binary && doc.result_kind === "json" && doc.result != null) return doc.result;
+      const rr = await fetch(gwUrl(cfg, `/v1/audio/tasks/${encodeURIComponent(id)}/result${q}`),
+        { headers: gwHeaders(cfg), signal: cfg._signal });
+      return await readAudioReply(rr, op, binary);
+    }
+  } catch (e) {
+    // 停止转写 aborts the polls, and the engine would otherwise keep burning GPU
+    // on a result nobody will read — the task API can actually cancel it, which
+    // the old held-open request never could.
+    if (cfg._signal?.aborted) {
+      fetch(gwUrl(cfg, `/v1/audio/tasks/${encodeURIComponent(id)}${q}`), { method: "DELETE", headers: gwHeaders(cfg) })
+        .catch(() => { /* best effort */ });
+    }
+    throw e;
+  }
+}
+
+// One audio call through the gateway, async-first. `buildForm` is a callback
+// rather than a ready FormData because a body can only be sent once and the
+// async→sync fallback has to build a second one.
+async function gwAudioRequest(cfg, op, model, buildForm, { binary = false, onProgress } = {}) {
+  for (;;) {
+    const useAsync = asyncTasks;
+    const fd = new FormData();
+    buildForm(fd);
+    if (useAsync) fd.append("async", "1");
+    const r = await fetch(gwUrl(cfg, `/v1/audio/${op}`), { method: "POST", headers: gwHeaders(cfg), body: fd, signal: cfg._signal });
+    if (r.status !== 202) return await readAudioReply(r, op, binary);
+    const submitted = await r.json().catch(() => null);
+    try {
+      return await gwTaskAwait(cfg, op, model, submitted, { binary, onProgress });
+    } catch (e) {
+      if (!(e instanceof TaskAPIMissing)) throw e;
+      asyncTasks = false;
+      console.log(`[gw] 网关没有任务 API（${e.message}），本进程改回同步调用`);
+    }
+  }
+}
+
+// Format an engine progress document for a phase label: "转写中 62% · 12/19".
+function taskProgressText(p) {
+  if (!p) return "";
+  const bits = [];
+  if (p.stage) bits.push(String(p.stage));
+  if (typeof p.ratio === "number") bits.push(`${Math.round(p.ratio * 100)}%`);
+  if (p.total) bits.push(`${p.done || 0}/${p.total}`);
+  return bits.join(" · ");
+}
+
+// Same, minus done/total — for the phases whose done/total is already carried by
+// the record's own step counter, so the same pair isn't printed twice.
+function taskProgressPct(p) {
+  if (!p) return "";
+  const bits = [];
+  if (p.stage) bits.push(String(p.stage));
+  if (typeof p.ratio === "number") bits.push(`${Math.round(p.ratio * 100)}%`);
+  else if (p.total) bits.push(`${Math.round((100 * (p.done || 0)) / p.total)}%`);
+  return bits.join(" · ");
+}
+
+// How far along an engine task is, 0..1 — its ratio, else its own done/total.
+// This is what lets the overall bar climb DURING a stage instead of jumping only
+// when the stage ends.
+function taskFrac(p) {
+  if (!p) return 0;
+  if (typeof p.ratio === "number") return Math.min(1, Math.max(0, p.ratio));
+  if (p.total > 0) return Math.min(1, Math.max(0, (p.done || 0) / p.total));
+  return 0;
+}
+
+// How many of THIS batch's segments the engine has finished, as a (fractional)
+// count — folded into the outer window counter so the bar and the "x/y 段"
+// counter move together within a batch.
+function taskDone(p, n) {
+  if (!p) return 0;
+  if (p.total > 0) return Math.min(n, (p.done || 0) * (n / p.total));
+  return Math.min(n, taskFrac(p) * n);
+}
+
+async function gwAudioOp(cfg, op, wavPath, model, extra = {}, { onProgress } = {}) {
   const { path: upPath, mp3 } = await prepUpload(wavPath);
   try {
     const buf = fs.readFileSync(upPath);
-    const fd = new FormData();
-    fd.append("file", new Blob([buf], { type: mp3 ? "audio/mpeg" : "audio/wav" }), mp3 ? "audio.mp3" : "audio.wav");
-    fd.append("model", model);
-    for (const [k, v] of Object.entries(extra)) fd.append(k, String(v));
-    const r = await fetch(gwUrl(cfg, `/v1/audio/${op}`), { method: "POST", headers: gwHeaders(cfg), body: fd, signal: cfg._signal });
-    const text = await r.text();
-    let j;
-    try { j = JSON.parse(text); } catch { j = text; }
-    if (!r.ok) throw new Error(`${op} ${r.status}: ${String(text).slice(0, 300)}`);
-    return j;
+    return await gwAudioRequest(cfg, op, model, (fd) => {
+      fd.append("file", new Blob([buf], { type: mp3 ? "audio/mpeg" : "audio/wav" }), mp3 ? "audio.mp3" : "audio.wav");
+      fd.append("model", model);
+      for (const [k, v] of Object.entries(extra)) fd.append(k, String(v));
+    }, { onProgress });
   } finally {
     if (upPath !== wavPath) { try { fs.unlinkSync(upPath); } catch { /* ignore */ } }
   }
@@ -646,22 +780,17 @@ function enhanceExt(contentType) {
   return ".wav";
 }
 
-async function gwAudioEnhance(cfg, wavPath, model, outBase) {
+async function gwAudioEnhance(cfg, wavPath, model, outBase, { onProgress } = {}) {
   const { path: upPath, mp3 } = await prepUpload(wavPath);
   try {
     const buf = fs.readFileSync(upPath);
-    const fd = new FormData();
-    fd.append("file", new Blob([buf], { type: mp3 ? "audio/mpeg" : "audio/wav" }), mp3 ? "audio.mp3" : "audio.wav");
-    fd.append("model", model);
-    fd.append("format", ENHANCE_FORMAT);
-    const r = await fetch(gwUrl(cfg, "/v1/audio/enhance"), { method: "POST", headers: gwHeaders(cfg), body: fd, signal: cfg._signal });
-    if (!r.ok) {
-      const t = await r.text().catch(() => "");
-      throw new Error(`enhance ${r.status}: ${String(t).slice(0, 300)}`);
-    }
-    const ab = await r.arrayBuffer();
-    const outPath = outBase + enhanceExt(r.headers.get("content-type"));
-    fs.writeFileSync(outPath, Buffer.from(ab));
+    const out = await gwAudioRequest(cfg, "enhance", model, (fd) => {
+      fd.append("file", new Blob([buf], { type: mp3 ? "audio/mpeg" : "audio/wav" }), mp3 ? "audio.mp3" : "audio.wav");
+      fd.append("model", model);
+      fd.append("format", ENHANCE_FORMAT);
+    }, { binary: true, onProgress });
+    const outPath = outBase + enhanceExt(out.contentType);
+    fs.writeFileSync(outPath, out.bytes);
     return outPath;
   } finally {
     if (upPath !== wavPath) { try { fs.unlinkSync(upPath); } catch { /* ignore */ } }
@@ -687,19 +816,15 @@ function extractFlac(input, start, dur, output) {
 // (start/end RELATIVE to the sub-clip). The base wrapper decodes once, slices per
 // segment, runs each, and returns {results:[…]} in order. Returns that array. NO
 // prepUpload — sub-clips are FLAC packed under the cap on purpose (must stay lossless).
-async function gwAudioBatch(cfg, op, filePath, segments, model, extra = {}) {
+async function gwAudioBatch(cfg, op, filePath, segments, model, extra = {}, { onProgress } = {}) {
   const buf = fs.readFileSync(filePath);
   const flac = /\.flac$/i.test(filePath);
-  const fd = new FormData();
-  fd.append("file", new Blob([buf], { type: flac ? "audio/flac" : "audio/wav" }), flac ? "audio.flac" : "audio.wav");
-  fd.append("model", model);
-  fd.append("segments", JSON.stringify(segments));
-  for (const [k, v] of Object.entries(extra)) fd.append(k, String(v));
-  const r = await fetch(gwUrl(cfg, `/v1/audio/${op}`), { method: "POST", headers: gwHeaders(cfg), body: fd, signal: cfg._signal });
-  const text = await r.text();
-  let j;
-  try { j = JSON.parse(text); } catch { j = text; }
-  if (!r.ok) throw new Error(`${op} batch ${r.status}: ${String(text).slice(0, 300)}`);
+  const j = await gwAudioRequest(cfg, op, model, (fd) => {
+    fd.append("file", new Blob([buf], { type: flac ? "audio/flac" : "audio/wav" }), flac ? "audio.flac" : "audio.wav");
+    fd.append("model", model);
+    fd.append("segments", JSON.stringify(segments));
+    for (const [k, v] of Object.entries(extra)) fd.append(k, String(v));
+  }, { onProgress });
   return Array.isArray(j?.results) ? j.results : [];
 }
 
@@ -3471,7 +3596,10 @@ async function runRediarizeJob(id, target) {
     // Hint the gateway with an UPPER BOUND only (max_speakers). Never num_speakers —
     // that forces EXACTLY N and would split a single speaker into N. We ALSO cap
     // client-side below so the contract holds even if the backend ignores the hint.
-    const diar = await gwAudioOp(cfg, "diarization", workAudio, cfg.models.diar, { max_speakers: N });
+    // 10→70 follows the engine's own diarization progress; re-assigning afterwards is
+    // local and instant, so the whole visible wait belongs to this one call.
+    const diar = await gwAudioOp(cfg, "diarization", workAudio, cfg.models.diar, { max_speakers: N },
+      { onProgress: (p) => setP(10 + Math.round(60 * taskFrac(p)), `重新识别说话人${taskProgressText(p) ? `（${taskProgressText(p)}）` : ""}`) });
     timer.finish();
     ckCancel(id);
     let dseg = (Array.isArray(diar?.segments) ? diar.segments : [])
@@ -3581,6 +3709,20 @@ async function runJob(id) {
     r.error = "";
     writeRecord(r);
   };
+  // Percentage BAND per stage; the bar's number is interpolated inside the band
+  // from the engine's own task progress (see setBand/taskFrac). Before this, a
+  // stage was one fixed number — an hour-long clip sat at "3%" for the four
+  // minutes diarization took, then jumped, which read as "stuck".
+  const BAND = {
+    enhance: [2, 12],
+    diar: [12, 24],
+    stt: [24, 60],        // 分段批量: batch STT · 整段: the single STT call
+    align: [60, 90],      // 分段批量: batch align · 整段: alignLong
+    sttAlign: [24, 90],   // 逐窗: STT and align run together per window
+    tidy: [90, 94],
+  };
+  const setBand = ([lo, hi], frac, phase, stepDone = 0, stepTotal = 0) =>
+    setP(lo + Math.round((hi - lo) * Math.min(1, Math.max(0, frac || 0))), phase, stepDone, stepTotal);
   const tmp = [];
   try {
     ckCancel(id);
@@ -3591,8 +3733,9 @@ async function runJob(id) {
     if (rec.options?.enhance && cfg.enhance?.model) {
       try {
         timer.begin("降噪增强");
-        setP(2, "降噪增强（整段处理中）");
-        const enhPath = await gwAudioEnhance(cfg, rec.audioPath, cfg.enhance.model, path.join(UPLOAD_DIR, `${id}-enh`));
+        setBand(BAND.enhance, 0, "降噪增强（整段处理中）");
+        const enhPath = await gwAudioEnhance(cfg, rec.audioPath, cfg.enhance.model, path.join(UPLOAD_DIR, `${id}-enh`),
+          { onProgress: (p) => setBand(BAND.enhance, taskFrac(p), `降噪增强（${taskProgressText(p) || "整段处理中"}）`) });
         tmp.push(enhPath);
         console.log(`[${id}] 降噪增强返回 ${path.basename(enhPath)} ${(fs.statSync(enhPath).size / 1048576).toFixed(1)}MB`);
         ckCancel(id);
@@ -3613,11 +3756,12 @@ async function runJob(id) {
       }
     }
     timer.begin("说话人分离");
-    setP(3, "说话人分离（整段分析中）");
+    setBand(BAND.diar, 0, "说话人分离（整段分析中）");
     // 1) diarization over the whole clip. maxSpk is an UPPER BOUND only (max_speakers) —
     // never num_speakers — so the gateway may return FEWER if the audio has fewer voices.
     const maxSpk = Math.max(0, Math.floor(Number(opts.maxSpeakers) || 0));
-    const diar = await gwAudioOp(cfg, "diarization", workAudio, cfg.models.diar, maxSpk > 0 ? { max_speakers: maxSpk } : {});
+    const diar = await gwAudioOp(cfg, "diarization", workAudio, cfg.models.diar, maxSpk > 0 ? { max_speakers: maxSpk } : {},
+      { onProgress: (p) => setBand(BAND.diar, taskFrac(p), `说话人分离（${taskProgressText(p) || "整段分析中"}）`) });
     ckCancel(id);
     const diarSegs = Array.isArray(diar?.segments) ? diar.segments : [];
     console.log(`[${id}] 说话人分离完成: ${diarSegs.length} 段  workAudio=${path.basename(workAudio)}${maxSpk > 0 ? `  (max_speakers=${maxSpk})` : ""}`);
@@ -3687,7 +3831,7 @@ async function runJob(id) {
     // mislead the user into thinking 分段 was turned on when it wasn't.
     const runWindows = async (phase = "分段转写与词级对齐") => {
       const windows = buildWindows(diarSegs, rec.durationSec);
-      setP(20, phase, 0, windows.length);
+      setBand(BAND.sttAlign, 0, phase, 0, windows.length);
       let done = 0;
       // Per-window STT+align run several windows at once for speed. These aligns are
       // SHORT (~30s) and independent, so a rare localhost collapse is bounded to one
@@ -3706,7 +3850,7 @@ async function runJob(id) {
         const units = await alignSlice(w.start, w.end, text, `wa${idx}`);
         const words = finalizeWords(wordsFromRef(text, units), w.start, w.end);
         done++;
-        setP(20 + Math.round((70 * done) / windows.length), phase, done, windows.length);
+        setBand(BAND.sttAlign, done / windows.length, phase, done, windows.length);
         return { start: round3(w.start), end: round3(w.end), speaker: w.speaker, text, words };
       });
     };
@@ -3744,7 +3888,18 @@ async function runJob(id) {
         const _t0 = Date.now();
         let results = [];
         try {
-          results = await gwAudioBatch(cfg, "transcriptions", flacPath, segs, cfg.models.stt, sttParams(cfg));
+          // The engine counts the segments inside THIS batch, and those segments ARE
+          // windows — so its count is FOLDED INTO the outer window counter instead of
+          // being printed as a second pair of numbers beside it. The bar climbs during
+          // a batch too (46 windows used to go by as one silent 7% jump).
+          results = await gwAudioBatch(cfg, "transcriptions", flacPath, segs, cfg.models.stt, sttParams(cfg), {
+            onProgress: (p) => {
+              const at = doneW + taskDone(p, batch.length);
+              setBand(BAND.stt, at / windows.length,
+                `分段批量转写（第 ${bi + 1}/${batches.length} 批${taskProgressPct(p) ? ` · ${taskProgressPct(p)}` : ""}）`,
+                Math.round(at), windows.length);
+            },
+          });
         } catch (e) { if (e && e.cancelled) throw e; console.error(`[${id}] 批量转写(${bi})失败: ${e?.message || e}`); }
         batch.forEach((w, i) => {
           const r = results[i] || {};
@@ -3752,7 +3907,7 @@ async function runJob(id) {
         });
         console.log(`[${id}] ⏱批量转写(${bi}) ${((Date.now() - _t0) / 1000).toFixed(1)}s · ${batch.length}窗 · 段长${round3(bEnd - bStart)}s`);
         doneW += batch.length;
-        setP(20 + Math.round((35 * doneW) / windows.length), "分段批量转写", doneW, windows.length);
+        setBand(BAND.stt, doneW / windows.length, "分段批量转写", doneW, windows.length);
       }
 
       timer.begin("分段批量对齐");
@@ -3773,7 +3928,14 @@ async function runJob(id) {
           const _t0 = Date.now();
           let results = [];
           try {
-            results = await gwAudioBatch(cfg, "align", flacPath, segs, cfg.models.align, {});
+            results = await gwAudioBatch(cfg, "align", flacPath, segs, cfg.models.align, {}, {
+              onProgress: (p) => {
+                const at = doneW + taskDone(p, withText.length);
+                setBand(BAND.align, at / windows.length,
+                  `分段批量对齐（第 ${bi + 1}/${batches.length} 批${taskProgressPct(p) ? ` · ${taskProgressPct(p)}` : ""}）`,
+                  Math.round(at), windows.length);
+              },
+            });
           } catch (e) { if (e && e.cancelled) throw e; console.error(`[${id}] 批量对齐(${bi})失败: ${e?.message || e}`); }
           withText.forEach((w, i) => {
             const r = results[i] || {};
@@ -3789,7 +3951,7 @@ async function runJob(id) {
           console.log(`[${id}] ⏱批量对齐(${bi}) ${((Date.now() - _t0) / 1000).toFixed(1)}s · ${withText.length}窗`);
         }
         doneW += batch.length;
-        setP(55 + Math.round((35 * doneW) / windows.length), "分段批量对齐", doneW, windows.length);
+        setBand(BAND.align, doneW / windows.length, "分段批量对齐", doneW, windows.length);
       }
 
       return windows.map((w) => ({
@@ -3816,10 +3978,11 @@ async function runJob(id) {
       try {
         ckCancel(id);
         timer.begin("整段转写");
-        setP(20, "整段转写");
+        setBand(BAND.stt, 0, "整段转写");
         console.log(`[${id}] 整段转写：单次 STT 整段音频 (${path.basename(workAudio)}, 时长≈${rec.durationSec ?? "?"}s, model=${cfg.models.stt})`);
         const t0 = Date.now();
-        const stt = await gwAudioOp(cfg, "transcriptions", workAudio, cfg.models.stt, sttParams(cfg));
+        const stt = await gwAudioOp(cfg, "transcriptions", workAudio, cfg.models.stt, sttParams(cfg),
+          { onProgress: (p) => setBand(BAND.stt, taskFrac(p), `整段转写${taskProgressText(p) ? `（${taskProgressText(p)}）` : ""}`) });
         console.log(`[${id}] 整段 STT 返回，用时 ${((Date.now() - t0) / 1000).toFixed(1)}s`);
         const fullText = (typeof stt === "string" ? stt : stt?.text ?? "").trim();
         if (!fullText) throw new Error("STT 无文本");
@@ -3838,7 +4001,7 @@ async function runJob(id) {
         }
 
         timer.begin("词级对齐");
-        setP(55, "词级对齐");
+        setBand(BAND.align, 0, "词级对齐");
         // Forced alignment over the WHOLE clip, REGULARIZED BY DIARIZATION (see
         // alignLong): windows are cut at diar pause midpoints and each window's text
         // is the diar-speech-time char span, so no leading text can trigger a
@@ -3847,7 +4010,7 @@ async function runJob(id) {
         const alignTotal = rec.durationSec || 0;
         const { units, map, diag: alignDiag } = await alignLong(
           alignSlice, fullText, alignTotal, diarSegs,
-          (frac) => setP(55 + Math.round(30 * frac), "词级对齐"),
+          (frac) => setBand(BAND.align, frac, "词级对齐"),
           id,
         );
         console.log(`[${id}] 词级对齐(alignLong)完成：${units.length} 个单元，音频≈${Math.round(alignTotal)}s`);
@@ -3860,7 +4023,7 @@ async function runJob(id) {
         deburstUnits(units);
 
         timer.begin("整理结果");
-        setP(85, "整理结果");
+        setBand(BAND.tidy, 0, "整理结果");
         // char<->time over the punctuated reference, then cut along diar windows
         // (boundaries snapped to punctuation) and re-wrap into readable, timed,
         // punctuation-preserving lines. Reuses the audiostudioxdemo algorithm.
@@ -3952,7 +4115,7 @@ async function runJob(id) {
     }
 
     timer.begin("整理结果");
-    setP(94, "整理结果");
+    setBand(BAND.tidy, 1, "整理结果");
     // Times come straight from forced alignment; only order + drop empties. No
     // redistribution — alignment is authoritative (segment/merge/split must not
     // move a word's time), so the old repair pass is intentionally not called.
