@@ -1,4 +1,4 @@
-{{- /* Qwen ASR engine: ONE baked image (beclab/audio-qwen) whose wrapper serves stt / stt_stream / align per MODEL_SUPPORTS off a single qwen-asr load. No runtime pip, no capability branching here — the image self-reports /v1/models + /metrics; this template only sizes the GPU and starts the sentinel-wait shell. */ -}}
+{{- /* Qwen ASR engine: one baked image serves stt / stt_stream / align off a single load; this only sizes the GPU. */ -}}
 {{- $oe := .Values.olaresEnv | default dict -}}
 {{- $modelName := $oe.MODEL_NAME | default "" -}}
 {{- $modelSource := $oe.MODEL_SOURCE | default "" -}}
@@ -35,7 +35,7 @@
 {{- $vllmUtil = printf "%.2f" $u -}}
 {{- end -}}
 {{- if not $vllmUtil -}}{{- $vllmUtil = "0.45" -}}{{- end -}}
-{{- /* Streaming max_model_len DERIVED from the GPU quota (bigger quota => longer context), stepping down from 65536 so small quotas still boot; override via STREAM_MAX_LEN. */ -}}
+{{- /* max_model_len derived from the quota, stepping down so a small slice still boots; STREAM_MAX_LEN overrides. */ -}}
 {{- $streamMaxLen := trim ($oe.STREAM_MAX_LEN | default "") -}}
 {{- if and (eq $streamMaxLen "") $wantGpu -}}
 {{- $g := int $gpuMiB -}}
@@ -151,7 +151,7 @@ spec:
           ports:
             - name: http
               containerPort: {{ $enginePort }}
-          # NO readinessProbe (mirrors llamacpp): pod Ready at start so the app reaches "running" while the model downloads; llm-init WaitAlive/Ready polls the engine's /v1/models and NotReadyGuard 503-gates /v1/* until it's alive.
+          # No readinessProbe (like llamacpp): Ready at start so the app runs while the model downloads; llm-init gates /v1/*.
           volumeMounts:
             - name: hf-cache
               mountPath: /cache/hf/hub

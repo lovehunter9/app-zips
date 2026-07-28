@@ -1,4 +1,4 @@
-{{- /* llmbase.gpuMiB: normalize a GPU-memory quantity (8Gi/8G/8192Mi/8192M/8192) to a BARE MiB integer for HAMi's nvidia.com/gpumem (a Mi/Gi suffix is misread by the scheduler). Usage: {{ include "llmbase.gpuMiB" ($oe.X_REQUIRED_GPU_MEMORY | default "4096") }} */ -}}
+{{- /* llmbase.gpuMiB: 8Gi/8G/8192Mi/8192M/8192 -> a BARE MiB integer, since HAMi misreads a suffix. */ -}}
 {{- define "llmbase.gpuMiB" -}}
 {{- $g := trim . -}}
 {{- if hasSuffix "Gi" $g -}}

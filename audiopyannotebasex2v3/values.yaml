@@ -1,5 +1,4 @@
-# Per-workload replica counts (keys match workloadReplicas in OlaresManifest):
-#   audiopyannotebasex2v3 = engine Deployment (== Release.Name), llminit = llm-init proxy Deployment.
+# Replica count per workload; the keys must match workloadReplicas in OlaresManifest.
 workloads:
   audiopyannotebasex2v3:
     replicaCount: 1

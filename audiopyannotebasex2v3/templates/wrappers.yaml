@@ -1,7 +1,4 @@
-# Thin sentinel-wait shell mounted into the engine container (mirrors
-# llamacppllmbasev3/wrappers.yaml). The wrapper + all deps are baked into the
-# audio-pyannote image; this only blocks on llm-init's model_download_finish
-# sentinel, then execs the baked wrapper offline (HF cache already populated).
+# Sentinel-wait shell for the engine container: block on llm-init's download sentinel, then exec the baked wrapper.
 apiVersion: v1
 kind: ConfigMap
 metadata:

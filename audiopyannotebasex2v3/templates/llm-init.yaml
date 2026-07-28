@@ -1,4 +1,4 @@
-{{- /* llm-init reverse-proxy (ENGINE_KIND=audio) — the single entrance: downloads MODEL_SOURCE into the shared HF cache AND is the OpenAI data plane (proxies /v1/* to audio-engine:8000, serves control plane on :8090). The engine blocks on the download sentinel in RUN_DIR instead of polling, breaking the proxy<->engine deadlock. */ -}}
+{{- /* llm-init (ENGINE_KIND=audio) is the whole entrance: it downloads MODEL_SOURCE and proxies /v1/* to the engine. */ -}}
 {{- $clientDomainENV := split "," .Values.domain.audiopyannotebasex2v3 -}}
 {{- $clientDomain := index $clientDomainENV "_0" -}}
 {{- $oe := .Values.olaresEnv | default dict -}}
@@ -93,7 +93,7 @@ spec:
           ports:
             - name: http
               containerPort: 8090
-          # K8s probes stay on /livez (process up), NOT the engine: download-svc gets an endpoint as soon as llm-init is up while the engine boots; /v1/* is gated inside llm-init (NotReadyGuard -> 503 until the engine is alive).
+          # Probes stay on /livez (process up), not the engine: llm-init 503-gates /v1/* until the engine is alive.
           livenessProbe:
             httpGet:
               path: /livez
@@ -137,7 +137,7 @@ spec:
       targetPort: 8090
   type: ClusterIP
 ---
-# Internal shared-API Service (backs the sharedEntrances stub): in-cluster clients reach llm-init's /v1/* at http://sharedentrances-api.<ns>:80 (no public edge/SSO), bypassing the edge's ~17s first-byte timeout; :80 -> llm-init:8090.
+# The Service behind the sharedEntrances stub: :80 -> llm-init:8090, in-cluster only (no edge, no SSO).
 apiVersion: v1
 kind: Service
 metadata:

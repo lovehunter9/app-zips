@@ -10,7 +10,7 @@ metadata:
   version: '1.0.0'
   categories:
     - AI
-# INTERNAL shared API: a sharedEntrances stub -> the sharedentrances-api Service (:80 -> llm-init:8090); the cluster-internal, no-edge/no-SSO endpoint the LLM Gateway uses as provider base_url (http://sharedentrances-api.<ns>:80 + /v1), bypassing the edge's ~17s first-byte timeout. invisible + authLevel internal (no public URL, not on desktop).
+# Internal shared API stub: in-cluster callers use http://sharedentrances-api.<ns>:80 + /v1, off the edge (no SSO).
 sharedEntrances:
   - name: audiopyannotebasex2v3api
     host: sharedentrances-api
@@ -19,7 +19,7 @@ sharedEntrances:
     invisible: true
     authLevel: internal
     icon: https://app.cdn.olares.com/appstore/whisperwebui/icon.png
-# Public entrance -> llm-init (download-svc:8090): llm-init IS the complete base — control plane/dashboard/api on "/", reverse-proxies "/v1/*" to the audio engine (which self-reports /v1/models).
+# Public entrance -> llm-init (download-svc:8090): its own dashboard on "/", the engine's /v1/* reverse-proxied.
 entrances:
   - name: audiopyannotebasex2v3
     port: 8090
@@ -145,7 +145,7 @@ envs:
     type: string
     editable: true
     applyOnChange: true
-  # MODEL_SUPPORTS: the capability this instance serves. These are four different models, so pick ONE and clone the others separately. Passed through to the engine, which self-reports it on /v1/models.
+  # MODEL_SUPPORTS: these are four different models, so pick ONE and clone the others separately.
   - envName: MODEL_SUPPORTS
     required: true
     type: string

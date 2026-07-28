@@ -1,4 +1,4 @@
-{{- /* faster-whisper engine: ONE baked image (beclab/audio-fasterwhisper) whose wrapper serves stt off a CTranslate2 load. No runtime pip, no capability branching here — the image self-reports /v1/models + /metrics; this template only sizes the GPU and starts the sentinel-wait shell. */ -}}
+{{- /* faster-whisper engine: one baked image serves stt off a CTranslate2 load; this only sizes the GPU. */ -}}
 {{- $oe := .Values.olaresEnv | default dict -}}
 {{- $modelName := $oe.MODEL_NAME | default "" -}}
 {{- $modelSource := $oe.MODEL_SOURCE | default "" -}}
@@ -25,7 +25,7 @@
 {{- $memLimit = printf "%sMi" $gpuMiB -}}
 {{- end -}}
 {{- end -}}
-{{- /* Batched decode (VAD-cut + parallel) is the whole reason this base beats vLLM-Whisper on a sliced vGPU; the batch is what fills the quota, so DERIVE it from the quota and let a small slice step down. Override via FW_BATCH_SIZE. */ -}}
+{{- /* Batched decode is why this base beats vLLM-Whisper on a sliced vGPU, so derive it from the quota. */ -}}
 {{- $batchSize := trim ($oe.FW_BATCH_SIZE | default "") -}}
 {{- if and (eq $batchSize "") $wantGpu -}}
 {{- $g := int $gpuMiB -}}
@@ -102,8 +102,7 @@ spec:
             - name: FW_BATCH_SIZE
               value: "{{ $batchSize }}"
 {{- if not $wantGpu }}
-            # CPU-only clone: the wrapper's "auto" device already falls back to
-            # int8 on CPU, but say so explicitly so the log is unambiguous.
+            # CPU-only clone: "auto" already falls back to int8, but saying so keeps the log unambiguous.
             - name: FW_DEVICE
               value: "cpu"
 {{- end }}
@@ -143,7 +142,7 @@ spec:
           ports:
             - name: http
               containerPort: {{ $enginePort }}
-          # NO readinessProbe (mirrors llamacpp): pod Ready at start so the app reaches "running" while the model downloads; llm-init WaitAlive/Ready polls the engine's /v1/models and NotReadyGuard 503-gates /v1/* until it's alive.
+          # No readinessProbe (like llamacpp): Ready at start so the app runs while the model downloads; llm-init gates /v1/*.
           volumeMounts:
             - name: hf-cache
               mountPath: /cache/hf/hub

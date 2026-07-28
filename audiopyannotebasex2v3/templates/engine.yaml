@@ -1,4 +1,4 @@
-{{- /* pyannote/torch engine: ONE baked image (beclab/audio-pyannote) whose wrapper serves vad / diar / speaker_embed / enhance per MODEL_SUPPORTS. No runtime pip, no capability branching here — the image self-reports /v1/models + /metrics; this template only sizes the GPU and starts the sentinel-wait shell. */ -}}
+{{- /* pyannote/torch engine: one baked image serves vad / diar / speaker_embed / enhance; this only sizes the GPU. */ -}}
 {{- $oe := .Values.olaresEnv | default dict -}}
 {{- $modelName := $oe.MODEL_NAME | default "" -}}
 {{- $modelSource := $oe.MODEL_SOURCE | default "" -}}
@@ -9,7 +9,7 @@
 {{- $memRequest := trim ($oe.AUDIO_MEMORY_REQUEST | default "2Gi") -}}
 {{- $cpuLimit := trim ($oe.AUDIO_CPU_LIMIT | default "6") -}}
 {{- $memLimit := trim ($oe.AUDIO_MEMORY_LIMIT | default "24Gi") -}}
-{{- /* GPU is OPTIONAL (AUDIO_REQUIRED_GPU_MEMORY = "" or "0" => CPU-only, which is the norm for vad and speaker_embed). */ -}}
+{{- /* GPU is OPTIONAL (empty or "0" => CPU-only, which is the norm for vad and speaker_embed). */ -}}
 {{- $gpuRaw := trim ($oe.AUDIO_REQUIRED_GPU_MEMORY | default "") -}}
 {{- $wantGpu := and (ne $gpuRaw "") (ne $gpuRaw "0") -}}
 {{- $gpuMiB := "" -}}
@@ -25,7 +25,7 @@
 {{- $memLimit = printf "%sMi" $gpuMiB -}}
 {{- end -}}
 {{- end -}}
-{{- /* enhance streams long clips through a sliding window so peak VRAM is bounded by ONE window; DERIVE that window from the quota (a small slice gets a shorter one). Override via ENHANCE_CHUNK_S. */ -}}
+{{- /* enhance windows long clips so peak VRAM is ONE window, derived from the quota (ENHANCE_CHUNK_S overrides). */ -}}
 {{- $enhanceChunk := trim ($oe.ENHANCE_CHUNK_S | default "") -}}
 {{- if and (eq $enhanceChunk "") $wantGpu -}}
 {{- $g := int $gpuMiB -}}
@@ -34,7 +34,7 @@
 {{- else -}}{{- $enhanceChunk = "30" -}}{{- end -}}
 {{- end -}}
 {{- if eq $enhanceChunk "" -}}{{- $enhanceChunk = "30" -}}{{- end -}}
-{{- /* diar: pyannote runs segmentation (10 s window, 1 s hop) and embedding at batch_size=1, so a long clip becomes tens of thousands of tiny forward passes with the GPU idle between them. DERIVE a batch from the quota; the engine falls back to 1 on CPU. Override via DIAR_SEG_BATCH / DIAR_EMB_BATCH. */ -}}
+{{- /* diar: pyannote batches at 1, so a long clip is tens of thousands of tiny passes; batch from the quota. */ -}}
 {{- $segBatch := trim ($oe.DIAR_SEG_BATCH | default "") -}}
 {{- $embBatch := trim ($oe.DIAR_EMB_BATCH | default "") -}}
 {{- if and $wantGpu (or (eq $segBatch "") (eq $embBatch "")) -}}
@@ -161,7 +161,7 @@ spec:
           ports:
             - name: http
               containerPort: {{ $enginePort }}
-          # NO readinessProbe (mirrors llamacpp): pod Ready at start so the app reaches "running" while the model downloads; llm-init WaitAlive/Ready polls the engine's /v1/models and NotReadyGuard 503-gates /v1/* until it's alive.
+          # No readinessProbe (like llamacpp): Ready at start so the app runs while the model downloads; llm-init gates /v1/*.
           volumeMounts:
             - name: hf-cache
               mountPath: /cache/hf/hub

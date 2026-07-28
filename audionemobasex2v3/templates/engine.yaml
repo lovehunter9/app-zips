@@ -1,4 +1,4 @@
-{{- /* NeMo engine: ONE baked image (beclab/audio-nemo) whose wrapper serves diar_stream (Streaming Sortformer). No runtime pip, no capability branching here — the image self-reports /v1/models + /metrics; this template only sizes the GPU, picks a latency preset and starts the sentinel-wait shell. */ -}}
+{{- /* NeMo engine: one baked image serves diar_stream on Streaming Sortformer; this sizes the GPU and the preset. */ -}}
 {{- $oe := .Values.olaresEnv | default dict -}}
 {{- $modelName := $oe.MODEL_NAME | default "" -}}
 {{- $modelSource := $oe.MODEL_SOURCE | default "" -}}
@@ -24,7 +24,7 @@
 {{- $memLimit = printf "%sMi" $gpuMiB -}}
 {{- end -}}
 {{- end -}}
-{{- /* Sortformer latency preset (frames = 80ms), from the model card. Default `high` (~10s input latency): for SPEAKERS accuracy beats immediacy — a ~10s span resolves rapid adjacent turns far better than the 480ms low-latency chunk AND is ~18x cheaper; transcription stays real-time on its own stt_stream engine. */ -}}
+{{- /* Sortformer preset in 80ms frames: `high` (~10s) resolves adjacent turns better and is ~18x cheaper. */ -}}
 {{- $preset := lower (trim ($oe.DIAR_LATENCY_PRESET | default "high")) -}}
 {{- $chunkLen := "124" -}}{{- $rightCtx := "1" -}}{{- $fifoLen := "124" -}}{{- $updatePeriod := "124" -}}{{- $spkcacheLen := "188" -}}
 {{- if eq $preset "low" -}}
@@ -141,7 +141,7 @@ spec:
           ports:
             - name: http
               containerPort: {{ $enginePort }}
-          # NO readinessProbe (mirrors llamacpp): pod Ready at start so the app reaches "running" while the model downloads; llm-init WaitAlive/Ready polls the engine's /v1/models and NotReadyGuard 503-gates /v1/* until it's alive.
+          # No readinessProbe (like llamacpp): Ready at start so the app runs while the model downloads; llm-init gates /v1/*.
           volumeMounts:
             - name: hf-cache
               mountPath: /cache/hf/hub
