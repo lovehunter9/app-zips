@@ -625,22 +625,42 @@ async function gwAudioOp(cfg, op, wavPath, model, extra = {}) {
 }
 
 // Speech enhancement: POST the whole clip to /v1/audio/enhance and write the
-// returned WAV (binary, not JSON) to outPath. Used as a pre-processing step
-// before diar/STT/align. Throws on non-2xx so the caller can fall back to the
-// original audio.
-async function gwAudioEnhance(cfg, wavPath, model, outPath) {
+// returned audio (binary, not JSON) beside `outBase`, returning the path written.
+// Used as a pre-processing step before diar/STT/align. Throws on non-2xx so the
+// caller can fall back to the original audio.
+//
+// The response is the WHOLE clip again, so its size — not the enhancer, which
+// needs about a second per five minutes — is what used to kill long meetings:
+// 16k mono PCM16 is ~2MB/min, i.e. ~390MB for 3h20m to buffer through the
+// gateway. Ogg/Opus is ~1/10 of that and still richer than the ~19kbps mp3
+// prepUpload had to squeeze the request into, and the reply is re-encoded to
+// 64k mp3 for the downstream steps anyway. An engine that predates `format`
+// answers WAV and an engine without the encoder falls back to FLAC; ffmpeg
+// sniffs the container either way, so the extension is only for humans.
+const ENHANCE_FORMAT = "ogg";
+
+function enhanceExt(contentType) {
+  const t = String(contentType || "").toLowerCase();
+  if (t.includes("ogg") || t.includes("opus")) return ".ogg";
+  if (t.includes("flac")) return ".flac";
+  return ".wav";
+}
+
+async function gwAudioEnhance(cfg, wavPath, model, outBase) {
   const { path: upPath, mp3 } = await prepUpload(wavPath);
   try {
     const buf = fs.readFileSync(upPath);
     const fd = new FormData();
     fd.append("file", new Blob([buf], { type: mp3 ? "audio/mpeg" : "audio/wav" }), mp3 ? "audio.mp3" : "audio.wav");
     fd.append("model", model);
+    fd.append("format", ENHANCE_FORMAT);
     const r = await fetch(gwUrl(cfg, "/v1/audio/enhance"), { method: "POST", headers: gwHeaders(cfg), body: fd, signal: cfg._signal });
     if (!r.ok) {
       const t = await r.text().catch(() => "");
       throw new Error(`enhance ${r.status}: ${String(t).slice(0, 300)}`);
     }
     const ab = await r.arrayBuffer();
+    const outPath = outBase + enhanceExt(r.headers.get("content-type"));
     fs.writeFileSync(outPath, Buffer.from(ab));
     return outPath;
   } finally {
@@ -3572,12 +3592,12 @@ async function runJob(id) {
       try {
         timer.begin("降噪增强");
         setP(2, "降噪增强（整段处理中）");
-        const enhPath = path.join(UPLOAD_DIR, `${id}-enh.wav`);
+        const enhPath = await gwAudioEnhance(cfg, rec.audioPath, cfg.enhance.model, path.join(UPLOAD_DIR, `${id}-enh`));
         tmp.push(enhPath);
-        await gwAudioEnhance(cfg, rec.audioPath, cfg.enhance.model, enhPath);
+        console.log(`[${id}] 降噪增强返回 ${path.basename(enhPath)} ${(fs.statSync(enhPath).size / 1048576).toFixed(1)}MB`);
         ckCancel(id);
-        // The enhancer returns raw WAV; compress to mp3 so the whole-clip diar/STT
-        // uploads stay under the gateway limit (a raw hour-long WAV → 413).
+        // Re-encode to mp3 so the whole-clip diar/STT uploads stay under the
+        // gateway limit (a raw hour-long WAV → 413).
         const enhMp3 = path.join(UPLOAD_DIR, `${id}-enh.mp3`);
         tmp.push(enhMp3);
         await transcodeMp3(enhPath, enhMp3);

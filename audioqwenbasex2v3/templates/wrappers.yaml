@@ -1,0 +1,36 @@
+# Thin sentinel-wait shell mounted into the engine container (mirrors
+# llamacppllmbasev3/wrappers.yaml). The wrapper + all deps are baked into the
+# audio-qwen image; this only blocks on llm-init's model_download_finish
+# sentinel, then execs the baked wrapper offline (HF cache already populated).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: audio-wrappers
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: audio-engine
+data:
+  qwen.sh: |
+    #!/bin/sh
+    set -eu
+
+    SENTINEL=${SENTINEL:-/run/llm-init/model_download_finish}
+    WAIT_INTERVAL=${WAIT_INTERVAL:-5}
+    WAIT_TIMEOUT=${WAIT_TIMEOUT:-3600}
+    log() { printf '[wrapper-qwen] %s\n' "$*"; }
+
+    elapsed=0
+    while [ ! -f "$SENTINEL" ]; do
+        if [ "$elapsed" -ge "$WAIT_TIMEOUT" ]; then
+            log "timed out after ${WAIT_TIMEOUT}s waiting for $SENTINEL"
+            exit 1
+        fi
+        log "waiting for $SENTINEL (elapsed=${elapsed}s)"
+        sleep "$WAIT_INTERVAL"
+        elapsed=$((elapsed + WAIT_INTERVAL))
+    done
+    log "sentinel $SENTINEL found after ${elapsed}s; starting engine offline"
+
+    export HF_HUB_OFFLINE=1
+    export PYTHONUNBUFFERED=1
+    exec audio-python -m wrapper.app

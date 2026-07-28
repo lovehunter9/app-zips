@@ -172,6 +172,22 @@ maximize the chance of reproducing the same hash/URL on re-clone, **reuse the
 EXACT recorded title.** If the URL still changes, the user re-points the Gateway
 provider manually — tell them the new URL.
 
+## GOTCHA — never gate a clone on probing the internal mirror
+
+A node pulls through `mirrors-internal.joinolares.cn`, and a fresh tag can genuinely be
+missing there for hours (2026-07-27: nine clones all `downloadFailed` on a tag Docker Hub
+already had). It is tempting to probe first:
+
+```
+curl -sI https://mirrors-internal.joinolares.cn/v2/<ns>/<repo>/manifests/<tag>
+```
+
+**That probe is not evidence.** 2026-07-28: `lovehunter9/audio-fasterwhisper:audio-stt-test5`
+answered 404 ten times in a row while nodes had been pulling that exact tag for three days,
+and three tags probing 404 cloned successfully seconds later. Anonymous 404 only means the
+probe cannot see it. **Just clone**; `olares-cli market status <app>` reporting
+`downloadFailed` is the only judgement, and its error text names the ref that failed.
+
 ## GOTCHA — OlaresManifest env `default` OVERRIDES the chart template default
 
 A clone-form env declared in `OlaresManifest.yaml` (`spec.options.appScope`/env list with
