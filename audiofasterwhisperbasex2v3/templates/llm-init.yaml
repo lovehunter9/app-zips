@@ -57,7 +57,7 @@ spec:
             runAsUser: 0
       containers:
         - name: llm-init
-          image: docker.io/lovehunter9/llm-init:v1.3.2-audiobase7
+          image: docker.io/lovehunter9/llm-init:v1.3.3-test1
           imagePullPolicy: IfNotPresent
           env:
             - name: ENGINE_KIND
