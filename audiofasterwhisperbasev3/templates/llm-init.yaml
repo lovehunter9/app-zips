@@ -4,7 +4,15 @@
 {{- $oe := .Values.olaresEnv | default dict -}}
 {{- $modelSource := $oe.MODEL_SOURCE | default "" -}}
 {{- $modelName := $oe.MODEL_NAME | default "" -}}
-{{- $modelSupports := $oe.MODEL_SUPPORTS | default "stt" -}}
+{{- /* MODEL_SUPPORTS comes in as bare capability names (what the clone form offers); llm-init and the engine both take supports_* keys. */ -}}
+{{- $supportsKeys := list -}}
+{{- range $tok := splitList "," ($oe.MODEL_SUPPORTS | default "stt") -}}
+{{- $tok = trim $tok -}}
+{{- if $tok -}}
+{{- $supportsKeys = append $supportsKeys (ternary $tok (printf "supports_%s" $tok) (hasPrefix "supports_" $tok)) -}}
+{{- end -}}
+{{- end -}}
+{{- $modelSupports := join "," $supportsKeys -}}
 {{- $logLevel := $oe.LOG_LEVEL | default "debug" -}}
 {{- $hfEndpoint := $oe.HF_ENDPOINT | default "" -}}
 {{- $hfToken := $oe.HF_TOKEN | default "" -}}

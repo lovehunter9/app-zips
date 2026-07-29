@@ -2,7 +2,7 @@ export type CapId = "stt" | "align" | "translate" | "vad" | "diar" | "enhance" |
 
 // AUDIOBASE (x2) model: every audio model registers with the coarse gateway
 // mode `audio` and declares its concrete capabilities in model_spec.supports
-// (bare keys). So a capability is served by a model when
+// (supports_* keys, which api.ts normalizes to bare). So a capability is served when
 //   model.mode === AUDIO_MODE && model.supports.includes(CAP_SUPPORT[cap]).
 export const AUDIO_MODE = "audio";
 

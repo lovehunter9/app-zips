@@ -1037,29 +1037,31 @@ function qaMessages(question, ctx) {
 // ---------------------------------------------------------------------------
 // GET /api/models — discover gateway models by CAPABILITY (supports) + mode
 // ---------------------------------------------------------------------------
-// Audio models are registered mode=audio with a model_spec.supports map of bare
-// capability keys (stt/align/diar/enhance/…). The translate model is mode=chat
-// with supports.translate. The light /provider-models endpoint DOESN'T return
+// Audio models are registered mode=audio with a model_spec.supports map of
+// supports_* keys (supports_stt / supports_align / …). The translate model is
+// mode=chat with supports_translate. The light /provider-models endpoint DOESN'T return
 // supports, so we list providers then GET each provider DETAIL (whose inline
 // models carry supports) and group by capability. chat/embedding (摘要/问答/RAG)
 // stay mode-based.
 const AUDIO_CAPS = ["stt", "align", "diar", "enhance", "translate"];
 
 // Read the capability keys off a model row (model_spec.supports {key:bool} map,
-// possibly a raw JSON string; or a flat supports object/array). Truthy keys only.
+// possibly a raw JSON string; or a flat supports object/array). Truthy keys only,
+// returned bare: the wire keys carry the supports_ prefix, our cap names don't.
 function extractSupports(m) {
   let sup = m?.supports ?? m?.model_spec?.supports ?? m?.modelSpec?.supports;
   if (typeof m?.model_spec === "string") {
     try { sup = JSON.parse(m.model_spec)?.supports ?? sup; } catch { /* ignore */ }
   }
   if (!sup) return [];
-  if (Array.isArray(sup)) return sup.map(String);
-  if (typeof sup === "object") return Object.keys(sup).filter((k) => !!sup[k]);
+  const bare = (k) => String(k).replace(/^supports_/, "");
+  if (Array.isArray(sup)) return sup.map(bare);
+  if (typeof sup === "object") return Object.keys(sup).filter((k) => !!sup[k]).map(bare);
   return [];
 }
 
-// A model serves a capability if its supports map contains the key (new audio
-// arch), or — legacy fallback — its mode equals the key (old per-mode registrations).
+// A model serves a capability if its (bare) supports keys contain it, or — legacy
+// fallback — its mode equals the key (old per-mode registrations).
 function modelServesCap(m, cap) {
   if ((m.supports || []).includes(cap)) return true;
   return m.mode === cap;

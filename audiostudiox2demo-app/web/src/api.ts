@@ -97,8 +97,8 @@ export async function fetchProviderModels(s: Settings): Promise<ProviderModel[]>
 
 // extractSupports reads the audio capability keys off a model row. The console
 // serves supports under model_spec.supports (a {key:bool} map), possibly as a raw
-// JSON string; some shapes surface a flat `supports` object/array directly. Return
-// the keys whose value is truthy.
+// JSON string; some shapes surface a flat `supports` object/array directly. Returns
+// the truthy keys, bare: the wire carries supports_stt, a capability is named stt.
 function extractSupports(m: any): string[] {
   let sup = m?.supports ?? m?.model_spec?.supports ?? m?.modelSpec?.supports;
   if (typeof m?.model_spec === "string") {
@@ -109,8 +109,9 @@ function extractSupports(m: any): string[] {
     }
   }
   if (!sup) return [];
-  if (Array.isArray(sup)) return sup.map(String);
-  if (typeof sup === "object") return Object.keys(sup).filter((k) => !!sup[k]);
+  const bare = (k: any) => String(k).replace(/^supports_/, "");
+  if (Array.isArray(sup)) return sup.map(bare);
+  if (typeof sup === "object") return Object.keys(sup).filter((k) => !!sup[k]).map(bare);
   return [];
 }
 

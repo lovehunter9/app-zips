@@ -45,8 +45,8 @@ spec:
     cache, and (2) IS the OpenAI-compatible data plane — it reverse-proxies `/v1/*`
     to the sibling audio engine at `http://audio-engine:8000` and serves its control
     plane / dashboard on `/`. The engine image (`beclab/audio-pyannote`) bakes the
-    wrapper + all deps and self-reports `/v1/models` (id + mode + supports +
-    endpoints) and generic `/metrics` (gpu_*); llm-init proxies these unchanged. The
+    wrapper + all deps and self-reports `/v1/models` (the standard Ollama +
+    OpenAI model list, with `capabilities`) and generic `/metrics` (gpu_*); llm-init proxies these unchanged. The
     engine container waits for llm-init's download sentinel rather than polling,
     avoiding the proxy<->engine deadlock.
 

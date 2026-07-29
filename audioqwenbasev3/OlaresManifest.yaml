@@ -46,7 +46,7 @@ spec:
     (incl. WebSocket streaming) to the sibling audio engine at
     `http://audio-engine:8000` and serves its control plane / dashboard on `/`. The
     engine image (`beclab/audio-qwen`) bakes the wrapper + all deps and self-reports
-    `/v1/models` (id + mode + supports + endpoints) and generic `/metrics` (gpu_*);
+    `/v1/models` (the standard Ollama + OpenAI model list, with `capabilities`) and generic `/metrics` (gpu_*);
     llm-init proxies these unchanged. The engine container waits for llm-init's
     download sentinel rather than polling, avoiding the proxy<->engine deadlock.
 
@@ -58,8 +58,8 @@ spec:
     - `MODEL_SOURCE` — `hf://<repo>` (llm-init download spec).
     - `MODEL_NAME` — model id advertised to clients (must match the engine's /v1/models id).
     - `MODEL_SUPPORTS` — multi-select of the capabilities this model exposes:
-      `stt` (offline transcription), `stt_stream` (streaming ASR, WebSocket),
-      `align` (forced alignment). Pick what the chosen model actually supports.
+      `stt` (offline transcription), `stt_stream` (streaming ASR,
+      WebSocket), `align` (forced alignment). Pick what the model can do.
     - `AUDIO_REQUIRED_GPU_MEMORY` — e.g. Qwen3-ASR (1.7B) stt / stt_stream `12Gi`;
       Qwen3-ForcedAligner (0.6B) align `4Gi`.
 

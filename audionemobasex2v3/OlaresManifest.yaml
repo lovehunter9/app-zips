@@ -44,7 +44,7 @@ spec:
     (incl. WebSocket streaming) to the sibling audio engine at
     `http://audio-engine:8000` and serves its control plane / dashboard on `/`. The
     engine image (`beclab/audio-nemo`) bakes the wrapper + all deps and self-reports
-    `/v1/models` (id + mode + supports + endpoints) and generic `/metrics` (gpu_*);
+    `/v1/models` (the standard Ollama + OpenAI model list, with `capabilities`) and generic `/metrics` (gpu_*);
     llm-init proxies these unchanged. The engine container waits for llm-init's
     download sentinel rather than polling, avoiding the proxy<->engine deadlock.
 

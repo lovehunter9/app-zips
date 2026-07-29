@@ -15,7 +15,7 @@ spec:
     - `LOG_LEVEL`: `debug`, `info`, `warn`, or `error`.
 
     **How It Works**
-    `llm-init` downloads your model and gets it ready, then the engine starts serving when it's ready. The engine image bakes the wrapper + deps and self-reports `/v1/models` (id + mode + supports + endpoints) and `/metrics` (gpu_*); llm-init reverse-proxies `/v1/*` unchanged.
+    `llm-init` downloads your model and gets it ready, then the engine starts serving when it's ready. The engine image bakes the wrapper + deps and self-reports `/v1/models` (the standard Ollama + OpenAI model list, with `capabilities`) and `/metrics` (gpu_*); llm-init reverse-proxies `/v1/*` unchanged.
 
     **Stack**
     - **audio-pyannote engine** (port 8000): `vad` is Silero VAD; `diar` and `speaker_embed` are pyannote.audio; `enhance` is SpeechBrain with the inference class auto-detected, streaming long clips through a crossfaded sliding window so peak VRAM stays bounded.

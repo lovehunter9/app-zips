@@ -15,7 +15,7 @@ spec:
     - `LOG_LEVEL`: `debug`, `info`, `warn`, or `error`.
 
     **How It Works**
-    `llm-init` downloads your model and gets it ready, then the faster-whisper engine starts serving when it's ready. The engine image bakes the wrapper + deps and self-reports `/v1/models` (id + mode + supports + endpoints) and `/metrics` (gpu_*); llm-init reverse-proxies `/v1/*` unchanged.
+    `llm-init` downloads your model and gets it ready, then the faster-whisper engine starts serving when it's ready. The engine image bakes the wrapper + deps and self-reports `/v1/models` (the standard Ollama + OpenAI model list, with `capabilities`) and `/metrics` (gpu_*); llm-init reverse-proxies `/v1/*` unchanged.
 
     **Stack**
     - **audio-fasterwhisper engine**: faster-whisper's `WhisperModel` on CTranslate2, driven by a `BatchedInferencePipeline` (VAD-cut + parallel decode) on port 8000. Alongside `/v1/audio/transcriptions` (single + batch `segments`) it serves `/v1/audio/translations`, Whisper's native speech-to-English task.

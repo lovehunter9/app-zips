@@ -2,7 +2,15 @@
 {{- $oe := .Values.olaresEnv | default dict -}}
 {{- $modelName := $oe.MODEL_NAME | default "" -}}
 {{- $modelSource := $oe.MODEL_SOURCE | default "" -}}
-{{- $supportsRaw := $oe.MODEL_SUPPORTS | default "diar_stream" -}}
+{{- /* MODEL_SUPPORTS comes in as bare capability names (what the clone form offers); llm-init and the engine both take supports_* keys. */ -}}
+{{- $supportsKeys := list -}}
+{{- range $tok := splitList "," ($oe.MODEL_SUPPORTS | default "diar_stream") -}}
+{{- $tok = trim $tok -}}
+{{- if $tok -}}
+{{- $supportsKeys = append $supportsKeys (ternary $tok (printf "supports_%s" $tok) (hasPrefix "supports_" $tok)) -}}
+{{- end -}}
+{{- end -}}
+{{- $supportsRaw := join "," $supportsKeys -}}
 {{- $engineImage := $oe.ENGINE_IMAGE | default "docker.io/beclab/audio-nemo:v1.0.0" -}}
 {{- $enginePort := int ($oe.ENGINE_PORT | default "8000") -}}
 {{- $cpuRequest := trim ($oe.AUDIO_CPU_REQUEST | default "500m") -}}
